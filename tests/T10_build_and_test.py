@@ -43,7 +43,7 @@ SKROT = os.path.join(ROOT, "T10_skrot.txt")
 # Override with the KN_FFMPEG_PREFIX environment variable if it moves.
 FFMPEG_PREFIX = os.environ.get(
     "KN_FFMPEG_PREFIX",
-    r"C:\Users\KarnyJohnny\Desktop\ffmpeg\ffmpeg-win7-dev\usr\local")
+    r"C:\Users\KarnyJohnny\Desktop\ffmpeg\ffmpeg-win7-dev")
 
 OUT = []
 
