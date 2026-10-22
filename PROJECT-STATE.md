@@ -6,12 +6,58 @@
 > decisions D1–D13, verified facts, the logging spec (§7), pitfalls and the stage plan.
 > Language rule D12: everything in this repo is **English**.
 
-## Current status (updated 2026-10-21)
+## Bootstrapping a NEW agent session (do this first, ~5 minutes)
+
+Everything needed is public or in this repo. No file transfers from the user required.
+
+```sh
+# 1. This repo (source of truth; the user keeps it current):
+git clone https://github.com/karnyjohnny/KarnyNow.git
+# 2. Protocol reference (MIT; commit a49b124 is the verified baseline —
+#    all nvst.rs line numbers in the docs point at it):
+git clone https://github.com/OpenCloudGaming/OpenNOW.git
+#    Key file: native/opennow-streamer/crates/opennow-streamer-transport/src/nvst.rs
+#    Key docs: docs/core-protocol.md, docs/mjolnir-nack-v2.md,
+#              docs/session-start-progress.md, docs/streamer-comparison/*
+# 3. third_party/ is GITIGNORED — fetch it:
+#    a) tiny-AES-c (Unlicense), UNMODIFIED upstream defaults (AES128, ECB+CBC+CTR):
+#       https://raw.githubusercontent.com/kokke/tiny-AES-c/master/aes.{c,h}
+#       -> third_party/tiny-aes-c/
+#    b) Brad Conte SHA-1 (public domain):
+#       https://raw.githubusercontent.com/B-Con/crypto-algorithms/master/sha1.{c,h}
+#       -> third_party/crypto-algorithms-sha1/
+# 4. OPTIONAL (sandbox compile-checks of kn_decode.c only; the TARGET build uses
+#    the user's own FFmpeg dev tree instead): headers at the user's exact commit:
+#       https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/bf0e831606938f530326c9679591109407fa8d0d
+#    extract libavcodec/*.h libavutil/*.h libswscale/*.h -> third_party/ffmpeg-headers/
+#    then create two stand-ins for configure-generated headers:
+#      libavutil/avconfig.h:  #define AV_HAVE_BIGENDIAN 0   (+ guard)
+#      libavutil/ffversion.h: #define FFMPEG_VERSION "N-127939-gbf0e831606" (+ guard)
+```
+
+Sandbox toolchain (agent side; **does NOT persist between chat messages** —
+reinstall every session, ~2-4 min):
+
+```sh
+apt-get update && apt-get install -y gcc cmake ninja-build libc6-dev \
+    gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
+# verify everything before trusting a run:
+sh tools/build_native_tests.sh     # host: 6 suites + knvstd smoke + zip/jsonl validation
+sh tools/cross_check.sh            # mingw x64+i686, -Wall -Wextra -Werror, F1 flags
+```
+
+**The authoritative compile+run gate is the TARGET machine** (w64devkit GCC
+16.2.0 — stricter than sandbox GCC 12; it catches warnings GCC 12 misses):
+`python tests\T10_build_and_test.py` under ConEmu → `T10_wynik.txt` +
+`T10_skrot.txt`. The user runs it quickly and willingly — ask for a
+measurement instead of guessing (§10.7).
+
+## Current status (updated 2026-10-22)
 
 | Stage | State |
 |---|---|
 | **0 — measurements** | **COMPLETE.** G0.1 CPU ✅ · G0.2 D3D9 presentation ✅ **(T4 v4)** · G0.3 toolchain ✅ · G0.4 console ✅ |
-| **1 — C skeleton offline + logging subsystem** | **IN PROGRESS — logging+FEC+SRTP-p1 VERIFIED ON TARGET (T9 ALL PASS); SRTP phase 2 written, awaiting T9.** T9 round 1 (2026-10-21): cmake build rc=0 **warnings=0** on GCC 16.2 (confirms the `-Wstring-compare` fix); `test_knlog` 105 PASS, `test_knring` 34 PASS, **`test_knsrtp` 37 PASS** (RFC 3711 B.2/B.3 + FIPS-197 vectors byte-exact with vendored tiny-AES-c), `test_knfec` 122/125 — the 3 failures were a test-side state leak in `test_error_paths` (fixed; knfec logic proven by 200/200 property round-trips + all KATs). T9 itself had a Windows `subprocess` cwd/exe-path trap → fixed (absolute paths). Next T9 re-run should be fully green. Then: SRTP phase 2 (HMAC/replay), diagnostic bundle, `knvstd --loopback`. |
+| **1 — C skeleton offline + logging subsystem** | **Core subsystems + diagnostics + self-tests IMPLEMENTED and largely target-verified.** knlog/knring/knfec/knsrtp(ph1+2) verified on target (T9 ALL PASS + T10 round 1: 452 host checks, GCC 16.2 binaries reproduce every KAT). `kn_diag` bundle + `kn_selftest` registry + `knvstd` skeleton (`--selftest`, `--diagnostics`, `--version`) delivered; **bundle + fec/srtp vectors + clock.resolution + console.host VERIFIED ON TARGET (T10 round 1: ConEmu hook build 230724 confirmed, Sleep(1) 1.25→1.00 ms)**. `kn_decode` (FFmpeg h264 threads=1 → NV12) + `decode.synthetic` (EMBEDDED 60-frame clip) implemented and compile-verified against the user's exact FFmpeg headers (bf0e831606, avcodec 63) with -Werror on both arches; **link+run blocked on one user action: rebuild FFmpeg with `--enable-static`** (see D18 — the F1 `-static` link ignores `.dll.a`; CMake now fails with the exact recipe). Remaining for G1: d3d.formats/d3d.present (R25 milestone 0), the --loopback video path, WASAPI. |
 | 2–5 | not started |
 
 Gate G0.2 evidence and the settled presentation chain: `docs/analysis/G0.2-T4v4-RESULTS.md`.
@@ -30,6 +76,8 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | **D15** | Game list = **account library only** (`filters: {variants:{gfn:{library:{status:{notEquals:"NOT_OWNED"}}}}}`), not the full GFN catalog. R24 pagination guards (context hash + revision re-check before/after each page) still mandatory. | User answer Q3 (uses GFN for owned/free-to-play games) | user preference |
 | **D16** | Stream renders in a **separate window**; all keyboard/mouse capture lives in the streamer process; the Python TUI stays in the console. (Confirms the BOOTSTRAP §3 architecture — was a recommendation, now a user requirement.) | User answer Q4 | — |
 | **D17** | Artwork: **text-only game list for stage 4**. A bounded local artwork cache may be added behind a flag after G4 (disk + HTTP cache on a 2 GB machine — deferred, non-blocking). | User answer Q5 ("don't know") → decide by not blocking on it | revisit after G4 |
+| **D18** | **FFmpeg is consumed STATIC** (`--enable-static --disable-shared`), linked into `knvstd.exe` under the canonical F1 `-static` (D8). The decode.synthetic clip is **embedded in the binary** (`streamer/src/kn_synthetic_clip.h`, generated by `tools/make_synthetic_clip.py` from `streamer/assets/synthetic.264`; 60 frames 320×240 yuv420p, 42 KB). | T10 round 2 proof: GNU ld with `-static` **ignores `.dll.a` import libraries** ("cannot find -lavcodec — have you installed the static version?") — a shared-only FFmpeg cannot link into an F1 binary. Embedded clip: the user's FFmpeg build has no encoder (`--disable-autodetect`, no libx264 — `-preset` unrecognized), and §7.9 says "a BUNDLED .264" — hermetic beats external file. Static also kills DLL deployment failure modes on Win7. | If a future dependency is shared-only (e.g. an NVENC-style DLL), relax `-static` per-target and ship DLLs next to the exe (the CMake POST_BUILD copy path still exists) |
+| **D19** | **Toolchain stays w64devkit** (GCC 16.2.0 + cmake 4.4.3 + ninja, `C:\Programy\w64devkit`). NOT WinLibs, NOT Nuwen, NOT Cygwin. | It is measured end-to-end on the target: T2 (15 variants ran on Win7), T9/T10 (zero-warning builds, correct PE 6.01, imports only KERNEL32/msvcrt/WINMM), FFmpeg built with it works. Cygwin is disqualified by design (POSIX runtime layer, not native Win32). WinLibs-MSVCRT/Nuwen are equivalent-ish but unproven here — switching re-opens R6 for zero gain. | Only if w64devkit develops a blocking defect; WinLibs **MSVCRT** variant (never UCRT — no UCRT on stock Win7) is the designated fallback, re-run T2 before trusting it |
 
 ## Risk register — changes this session
 
@@ -40,6 +88,9 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | R9 | **Mitigated** (60 Hz available and active; user keeps 60 Hz on battery; D9 stands) |
 | R17 | **CLOSED** (GPU does CSC + scale; CPU never touches pixels) |
 | **R25 (new)** | Writing into a **locked DEFAULT NV12** surface is the only video-path operation not yet exercised (lock itself verified OK, pitch = width). P=low, S=high. Mitigation: stage-1 milestone 0 = `knvstd --selftest=d3d.present` fills + presents once in an isolated process **before** the 10-minute G1 run. |
+| **R26 (REVISED, impl round VI/VII)** | The agent sandbox **DOES have a working toolchain** (the round-II "apt fails" era is over): `apt-get update && apt-get install -y gcc cmake ninja-build libc6-dev gcc-mingw-w64-x86-64 gcc-mingw-w64-i686` (~2-4 min). **Packages do NOT persist between chat messages** — reinstall at the start of every session (see Bootstrapping). If apt lists hang, fall back to direct .deb downloads from `deb.debian.org/debian/pool/` + `dpkg -i` (proven: libc6-dev must match installed libc6 `2.36-9+deb12u14`; ninja must be bookworm `1.11.1`, NOT trixie `1.13.2` which needs GLIBC_2.38). Sandbox GCC is 12.2 — the TARGET's GCC 16.2 remains the authority (it catches `-Wformat-truncation` classes GCC 12 misses; see R28). Every C delta still ships through `build_native_tests.sh` + `cross_check.sh` + a target T10 run. |
+| **R27 (new, CLOSED by D18)** | `-static` (F1/D8) vs shared FFmpeg: ld ignores `.dll.a`, error text is misleading ("have you installed the static version?"). Reproduced 1:1 in the sandbox. Mitigation shipped: CMake configure-time FATAL_ERROR with the rebuild recipe when `lib/libavcodec.a` is missing; FFmpeg rebuilt static per D18. |
+| **R28 (new)** | Sandbox GCC 12.2 vs target GCC 16.2 warning drift: T10 round 1 failed on two `-Wformat-truncation` GCC 16 flags that GCC 12 accepted (timestamp formatters). Mitigation: all `snprintf` with time/foreign-string inputs use **explicitly bounded arguments** (modulo/precision), verified at `-O0..-O3`; T10 fails the build on ANY warning so drift can never ship silently. |
 | **R15 (impl round II)** | **Mostly closed.** T8 on the target resolved all 14 Python packages rc=0 (pip honours Requires-Python, so every pin declares 3.8 support): textual 6.2.1, rich 14.3.4, httpx 0.28.1, httpcore 1.0.9, h11 0.16.0, anyio 4.5.2, + 8 more — `python/requirements.txt` updated, wheels cached on target in `tests\t8_wheels\`. Remaining: offline install + runtime smoke at stage 4 (httpx 0.28 removed `proxies=`; textual 6.x API churn vs old docs). |
 | **R26 (new)** | **Sandbox has no compiler and must not install one** (apt installs fail with infrastructure errors; packages do not persist across turns anyway). The compile gate is the TARGET machine: `tests/T9_build_and_test.py` (w64devkit GCC 16.2 + cmake + ninja — the authoritative toolchain; it caught a `-Wstring-compare` that sandbox GCC 12 missed). Consequence: C leaving this workspace is compiled by the user, so review it line-by-line before handing over and keep changes per round small. |
 
@@ -48,63 +99,87 @@ session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOO
 
 ## Next steps (ordered)
 
-1. **T9 on the target** (user): `python tests\T9_build_and_test.py` → send back
-   `T9_skrot.txt` (+ `T9_wynik.txt` on failure). One gate for everything
-   pending: the `-Wstring-compare` fix under GCC 16.2, first compile of
-   `knfec`/`test_knfec` and `kn_aes`/`knsrtp`/`test_knsrtp` (+ vendored
-   tiny-AES-c), and re-run of knlog/knring + JSONL validation on Win7.
-2. **SRTP phase 2**: vetted HMAC-SHA1 (or mbedTLS), auth tag with `be32(roc)`
-   placement (nvst.rs:2820-2872), 2048-packet replay window + ROC estimation
-   (nvst.rs:2635-2705), SRTCP E-bit/index (nvst.rs:4357-4372). Checklist in
-   `docs/SRTP.md`. mbedTLS vendoring decision lands here (TLS/WSS needs it at
-   stage 2 anyway; F1 flags + `_WIN32_WINNT=0x0601` for every vendored file).
-3. **Diagnostic bundle (§7.8)**: store-only zip writer in C, `summary.json`
-   first, registered as a `kn_log_on_failure` callback; ring dumps wired in.
-4. **`knvstd` skeleton**: `--loopback` decode `.264` (FFmpeg, `threads=1`) →
-   DEFAULT NV12 → StretchRect → Present; WASAPI synthetic PCM; self-tests.
-   Milestone 0 = R25 probe (fill locked DEFAULT NV12 in an isolated process).
-   Gate G1 = 30 fps × 10 min, CPU within budget, RSS flat, complete bundle
-   with no network involved.
-5. Stage 4 prep: `pip install --no-index --find-links tests\t8_wheels
-   -r python\requirements.txt` on the target when the TUI work starts.
+1. **USER ACTION — rebuild FFmpeg static (D18/R27), then run T10:**
+   ```bat
+   cd /d C:\Users\KarnyJohnny\Desktop\ffmpeg\ffmpeg-win7-dev
+   make distclean
+   .\configure --arch=x86_64 --target-os=mingw32 --enable-gpl --enable-static --disable-shared --disable-autodetect
+   make -j2
+   make install
+   cd /d "%USERPROFILE%\Desktop\NewKarnyNow\tests"
+   python T10_build_and_test.py
+   ```
+   Expected: `knvstd.exe` links (no DLLs needed anymore), `decode.synthetic`
+   runs the EMBEDDED clip and reports real fps/CPU on the E5500, everything
+   else stays green. Send back `T10_wynik.txt` + `T10_skrot.txt`.
+   (The configure line is identical to the user's proven one except
+   `--enable-static --disable-shared`; CLI ffmpeg.exe/ffprobe.exe stay
+   available for the G2 gate.)
+2. **d3d.formats + d3d.present self-tests** (phase B remainder; R25
+   milestone 0). mingw `d3d9.h` is already exercised in the sandbox
+   cross-build; verify every signature against it (pitfall: never write
+   D3D9 from memory). d3d.present = fill locked DEFAULT NV12 + StretchRect +
+   Present, timed; standalone-process isolation comes free with
+   `knvstd --selftest=`. On AV: degrade permanently, report in evidence
+   (D7 machinery).
+3. **gs.parse self-test** + the RTP/GS parser itself (`kn_gs.c`, analiza/04
+   §1-2): parse kn_ring_dump hexdumps and synthetic KAT packets (little-endian
+   body, `ext[11]` block indices, ≤68 B start-code search — pitfalls 1/2/4).
+   This is also the first stage-2 module.
+4. **Stage 1 `--loopback`**: knvstd grows the video path — decode file →
+   NV12 → locked DEFAULT surface → StretchRect → 1280×800 letterboxed window
+   (D6/D7/D9), perf snapshots (§7.6), WASAPI synthetic PCM. Gate G1: 30 fps
+   × 10 min, CPU ≤ ~45%, RSS flat, bundle complete, no network.
+5. Phase C self-tests (net.dns/tcp443/tls, tls.chain) via **schannel**
+   (Win7-native, zero deps, diagnoses exactly what the C client will use);
+   they gate stage 2 debugging, not stage 1.
+6. Stage 2+ per BOOTSTRAP §12 (protocol without DTLS/SCTP → R3 spike →
+   TUI → hardening). R22 (31-field session_info 1:1) and R23 (RESUME +
+   orphan cleanup) remain mandatory at their stages.
 
 ## Repo layout (this workspace → user machine)
 
 ```
 karnynow/
-├── AGENT-HANDOFF.md            ← recovery doc for a future agent (read §4 first)
-├── PROJECT-STATE.md            ← this file
+├── AGENT-HANDOFF.md            ← snapshot-style handoff (round VI research view)
+├── PROJECT-STATE.md            ← THIS file (living state; read Bootstrapping first)
+├── INTEGRATION.md              ← file-by-file integration notes for the deltas
 ├── docs/
 │   ├── LOGGING.md              ← knlog/knring conformance + API guide
 │   ├── FEC.md                  ← knfec provenance (nvst.rs line refs) + semantics
+│   ├── SRTP.md                 ← knsrtp provenance + phase-2 checklist
 │   ├── analysis/               ← measurement analyses (G0.2 closed here)
 │   └── research/               ← BOOTSTRAP.md + research HANDOFF (copies)
-├── artifacts/
-│   ├── T4-v4/                  ← raw T4 results as received (JSON + skrot)
-│   ├── T8/                     ← resolved cp38 dependency summary
-│   └── nvst-extract/nvst.rs    ← full reference transport source @ a49b124
 ├── streamer/                   ← knvstd (C11)
-│   ├── include/kn/             ← public headers (knlog.h, knring.h, knfec.h)
-│   ├── src/                    ← implementation (+ generated knfec_tables.h)
-│   └── tests/                  ← portable unit tests (run on Linux AND Win7)
+│   ├── include/kn/             ← knlog knring knfec knsrtp kn_aes kn_sha1
+│   │                              kn_diag kn_selftest kn_decode
+│   ├── src/                    ← implementations + GENERATED: knfec_tables.h,
+│   │   │                          knfec_kat_vectors.h, knsrtp_kat_vectors.h,
+│   │   └                          kn_synthetic_clip.h (embedded decode clip)
+│   ├── assets/synthetic.264    ← clip source (regenerate header via tools/)
+│   └── tests/                  ← portable unit tests (run on Linux AND Win7):
+│                                  knlog knring knfec knsrtp kndiag knselftest
 ├── python/                     ← TUI (stage 4); requirements.txt RESOLVED via T8
-├── tests/                      ← T# probes the user runs on the target machine
-│                                 (T8 deps — done; T9 build+test — the compile gate)
-├── tools/                      ← build/verify scripts + fec_reference.py generator
-└── CMakeLists.txt              ← Windows build (w64devkit: cmake + ninja)
+├── tests/                      ← target-machine harnesses T1-T10
+│                                 (T9 = old build gate; T10 = current, supersedes)
+├── tools/                      ← build/verify scripts + KAT generators
+│   (build_native_tests.sh, cross_check.sh, check_jsonl.py, check_zip.py,
+│    fec_reference.py, srtp_reference.py, make_synthetic_clip.py)
+├── third_party/                ← GITIGNORED: tiny-aes-c, crypto-algorithms-sha1
+│                                  (+ ffmpeg-headers in the agent sandbox only)
+└── CMakeLists.txt              ← Windows build (w64devkit: cmake + ninja);
+                                   KN_FFMPEG_PREFIX option, git/flags → build.json
 ```
 
-Maps onto the user's repo `C:\Users\KarnyJohnny\Desktop\NewKarnyNow\` — new dirs merge
-with the existing `tests/` (T1–T7 harnesses stay where they are; T4 v4 results already
-archived here as well).
+Maps onto the user's repo `C:\Users\KarnyJohnny\Desktop\NewKarnyNow\`.
 
 ## Working agreements (carried over, still binding)
 
 - Measure first, then code; every stage has a gate; a failed gate is information.
-- **R26: the sandbox has no compiler and must not install one.** The compile
-  gate is the TARGET machine: `tests/T9_build_and_test.py` (w64devkit GCC 16.2 +
-  cmake + ninja — authoritative; stricter than the old sandbox GCC 12). Review
-  C line-by-line before handing over; keep per-round C deltas small.
+- **Compile gate is two-tier** (R26 revised): sandbox `build_native_tests.sh` +
+  `cross_check.sh` (fast, catches most things) and the TARGET `tests/T10_build_and_test.py`
+  (w64devkit GCC 16.2 — authoritative; it caught `-Wstring-compare` and two
+  `-Wformat-truncation` classes the sandbox GCC 12 missed). Zero warnings on both.
 - Compile before handing over (when a compiler exists: `tools/build_native_tests.sh`,
   `tools/cross_check.sh`); zero warnings with `-Wall -Wextra`.
 - Keep artefacts small: every big JSON gets a `*_skrot`/`*_summary` sibling.
@@ -220,3 +295,78 @@ awaits the next T9 run.
 -> `streamer/src/kn_sha1.c`, `streamer/src/knsrtp.c` (phase 2),
    `streamer/tests/test_knsrtp.c`, `third_party/crypto-algorithms-sha1/`,
    `tools/srtp_reference.py`, `docs/SRTP.md`
+
+### 2026-10-21/22 · impl round VI (second agent chat — workspace handoff via files)
+A second agent chat received the file handoff (BOOTSTRAP.md, research HANDOFF.md,
+analiza/04+05, all streamer sources/tests, tools, T9_wynik.txt) and rebuilt the
+full workspace from it: cloned OpenNOW @ a49b124, **verified every cited nvst.rs
+line reference against the live tree** (derive_aes_cm_key@2873, srtp_aes_cm_iv@2902,
+ReplayWindow@3121, gf256_tables@3717, nvst_cauchy_coefficient@3785 — all exact),
+fetched third_party from upstream, reproduced **T9-equivalent ALL PASS on the
+Linux host** (341 checks) and cross-check zero-warning x64+i686, and confirmed
+the KAT generators reproduce the checked-in vectors **byte-identically**.
+Then implemented the AGENT-HANDOFF priority — **§7.8 diagnostic bundle**:
+`kn_diag` (store-only ZIP, sequential write / never fseek over own output per
+§7.12, `summary.json` as the FIRST entry with per-subsystem verdicts, 8 MiB cap
+enforced continuously — SECONDARY generations dropped whole first, PRIMARY
+tail-kept newest-with-marker, CORE untouchable; auto-trigger through the
+existing `kn_log_failure_cb_register` hook with recursion guard; auto
+build.json/state.json; selftest-provider hook for §7.7 step 4) and the
+**§7.9 self-test registry** `kn_selftest` (12 names; fec.vectors 88 KAT checks
++ srtp.vectors 52+96-op replay FULLY implemented; clock.resolution +
+console.host implemented for Win32; 8 honest phase-B/C stubs that can never
+read as passing; relevance mapping op/code → tests) plus the **knvstd
+skeleton** (`--selftest=<name|all>`, `--diagnostics`, `--version`,
+`--list-selftests`; JSON-lines stdout; exit codes 0/1/2/3). Test tooling:
+`test_kndiag` (109 checks, embeds an independent store-only ZIP reader with
+CRC verification), `test_knselftest`, `tools/check_zip.py` (python zipfile as
+second opinion), `tests/T10_build_and_test.py` (target harness: T9 scope +
+live Win32 self-tests + bundle validation + PE 6.01 check). KAT vectors moved
+`streamer/tests/` → `streamer/src/` (they are production assets now — the
+shipped binary runs them; generators updated; regeneration byte-identical).
+Host suites: 452 checks, 0 failures. → this section, INTEGRATION.md rev 1.
+
+### 2026-10-22 · impl round VII (T10 rounds 1-2 on target + FFmpeg integration)
+**T10 round 1 on the target: 30 checks, 4 failed — zero functional bugs.**
+All four were environment/expectation issues, fixed the same day: (1) GCC 16.2
+flagged two `-Wformat-truncation` in UTC formatters GCC 12 accepted → all
+format inputs modulo-bounded, clean at -O0..-O3 (R28); (2)+(4) `"0x601"` vs
+the stringified `"0x0601"` in test+harness → int-parsed; (3) test_knselftest
+hard-coded host expectations while clock.resolution/console.host really ran
+on Win7 → platform-aware. **First real target evidence for §7.9**: Sleep(1)
+1.25→1.00 ms after timeBeginPeriod(1); ConEmuHk present (build 230724 — D1
+confirmed from inside a shipped binary); fec/srtp vectors pass in the GCC 16.2
+binary; bundle written+validated on Win7 (4863 B, PE 6.01).
+**FFmpeg answered** (open question from round VI): the user built it himself —
+git master N-127939-gbf0e831606, w64devkit GCC 16.2, `--enable-shared
+--disable-static --enable-gpl --disable-autodetect`; ffmpeg.exe runs on Win7.
+Sandbox pulled the headers at the EXACT commit (avcodec 63/avutil 61/swscale
+10.2.100 match) and implemented **`kn_decode`**: Annex-B → av_parser →
+libavcodec h264 threads=1 (D4) → swscale yuv420p→NV12 (no scaling — D6;
+NV12 for the locked DEFAULT surface, never UpdateSurface — R2) → per-frame
+callback; stats frames/fps/cpu%-of-core/worst-frame; 64 MiB input cap;
+av_log mapped INTO knlog media at DEBUG/TRACE (amplification surfaces it
+exactly when needed; no fsync-storm on corrupt-frame spam). Compile-verified
+against the real headers with -Werror on both arches.
+**T10 round 2 on the target: link FAILED** — `cannot find -lavcodec … have you
+installed the static version?` Root cause reproduced 1:1 in the sandbox: the
+canonical F1 `-static` makes ld ignore `.dll.a` import libraries, and the
+FFmpeg build was shared-only. Also: clip generation failed (no libx264 in a
+`--disable-autodetect` build → `-preset` unrecognized), and GCC 16 caught an
+unused-but-set `ok_count` in the Win32 test branch. **Fixes (D18):** FFmpeg
+goes static (user rebuilds — exact recipe in Next steps step 1 and enforced by
+a CMake configure-time FATAL_ERROR with the recipe when `libavcodec.a` is
+missing); decode.synthetic gets a **build-time embedded clip**
+(`streamer/assets/synthetic.264`, 60×320×240 yuv420p 42 KB, →
+`kn_synthetic_clip.h`, hermetic — no encoder needed on target); `kn_decode`
+grew `kn_decode_h264_mem` (file API refactored over a common padded-buffer
+core); T10 hardened (PE-check guard, informational DLL report, embedded-clip
+expectations). Toolchain decision recorded (D19: stay on w64devkit; Cygwin
+disqualified; WinLibs-MSVCRT = designated fallback only). Sandbox suites after
+the fixes: native 452 checks PASS, cross -Werror PASS (incl. kn_decode+
+kn_selftest vs real FFmpeg headers), ctest 8/8, T10 dry-run ALL PASS (29).
+Awaiting: user FFmpeg static rebuild + T10 round 3.
+→ `streamer/{include/kn,src}/kn_decode.*`, `streamer/src/kn_synthetic_clip.h`,
+   `streamer/assets/synthetic.264`, `tools/make_synthetic_clip.py`,
+   `CMakeLists.txt` (KN_FFMPEG_PREFIX + static guard + DLL copy),
+   `tests/T10_build_and_test.py` rev 3, fixes in kn_diag/kn_selftest/tests

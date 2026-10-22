@@ -32,3 +32,7 @@ logs/*.log
 dist/
 build/
 *.egg-info/
+/T10_wynik.txt
+/T10_skrot.txt
+tests/T10_wynik.txt
+tests/T10_skrot.txt

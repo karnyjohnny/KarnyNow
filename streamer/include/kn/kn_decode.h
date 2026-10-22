@@ -67,7 +67,7 @@ const char *kn_decode_backend(void);
 /* Decode a whole Annex-B H.264 file. Returns:
  *   0  success (EOF reached; stats filled; callback saw every frame)
  *  -1  bad args / stub build (kn_decode_available()==0)
- *  -2  cannot open the file
+ *  -2  cannot open the file (or bigger than KN_DECODE_MAX_FILE)
  *  -3  decoder init failed (find/open)
  *  -4  callback asked to abort (stats filled)
  *  -5  read error
@@ -76,6 +76,15 @@ const char *kn_decode_backend(void);
 int kn_decode_h264_file(const char *path, int to_nv12,
                         kn_decode_frame_fn cb, void *userdata,
                         kn_decode_stats *stats);
+
+/* Same pipeline from a memory buffer (Annex-B). The input is copied once
+ * into a padded buffer (the bitstream readers may over-read within
+ * AV_INPUT_BUFFER_PADDING_SIZE — documented FFmpeg requirement), so the
+ * caller's memory (e.g. a const embedded clip) is never touched.
+ * Same return codes as the file variant except -2 (nothing to open) and -5. */
+int kn_decode_h264_mem(const uint8_t *data, size_t len, int to_nv12,
+                       kn_decode_frame_fn cb, void *userdata,
+                       kn_decode_stats *stats);
 
 #ifdef __cplusplus
 }

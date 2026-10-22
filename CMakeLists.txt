@@ -88,6 +88,22 @@ if(KN_FFMPEG_PREFIX)
     message(FATAL_ERROR
       "KN_FFMPEG_PREFIX='${KN_FFMPEG_PREFIX}' has no include/libavcodec/avcodec.h")
   endif()
+  # The canonical F1 link is -static (D8). GNU ld with -static IGNORES the
+  # .dll.a import libraries and searches only for static archives — a
+  # shared-only FFmpeg install fails with a misleading "cannot find
+  # -lavcodec / have you installed the static version" (seen live on the
+  # target, T10 round 2). Catch it at configure time with the recipe:
+  if(NOT EXISTS "${KN_FFMPEG_PREFIX}/lib/libavcodec.a")
+    message(FATAL_ERROR
+      "KN_FFMPEG_PREFIX='${KN_FFMPEG_PREFIX}' has no lib/libavcodec.a.\n"
+      "The F1/D8 link uses -static, which ignores .dll.a import libraries.\n"
+      "Rebuild FFmpeg with static libs (same tree, same toolchain):\n"
+      "  make distclean\n"
+      "  ./configure --arch=x86_64 --target-os=mingw32 --enable-gpl "
+      "--enable-static --disable-shared --disable-autodetect\n"
+      "  make -j2 && make install\n"
+      "(the CLI ffmpeg.exe/ffprobe.exe stay available for G2 verification)")
+  endif()
   message(STATUS "FFmpeg: enabled from ${KN_FFMPEG_PREFIX}")
   target_compile_definitions(kncore PUBLIC KN_HAVE_FFMPEG=1)
   target_include_directories(kncore PUBLIC "${KN_FFMPEG_PREFIX}/include")
@@ -148,8 +164,7 @@ if(KN_FFMPEG_LIBS)
                 ${_kn_ff_dlls} "$<TARGET_FILE_DIR:knvstd>"
         COMMENT "Copying FFmpeg DLLs next to knvstd.exe")
     else()
-      message(WARNING "KN_FFMPEG_PREFIX has no bin/*.dll — put the FFmpeg "
-                      "DLLs next to knvstd.exe manually")
+      message(STATUS "FFmpeg: no bin/*.dll — static build, nothing to copy")
     endif()
   endif()
 endif()

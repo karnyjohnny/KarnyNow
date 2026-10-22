@@ -178,6 +178,7 @@ static void test_run_all_and_render(void)
         if (!strcmp(results[i].name, "clock.resolution") ||
             !strcmp(results[i].name, "console.host"))
             CHECK(results[i].status != KN_ST_SKIPPED, "win32 test executed");
+    CHECK(ok_count >= 2, "at least the offline vector tests are OK on target");
     CHECK(skipped_count == 7 || skipped_count == 8,
           "7 stubs (+decode without ffmpeg/clip) skipped");
     for (i = 0; i < n; ++i)

@@ -38,19 +38,12 @@ LOGDIR = "t10logs"                      # relative to CWD when knvstd runs
 WYNIK = os.path.join(ROOT, "T10_wynik.txt")
 SKROT = os.path.join(ROOT, "T10_skrot.txt")
 
-# FFmpeg dev tree (user's own w64devkit shared build, N-127939-gbf0e831606).
+# FFmpeg dev tree (user's own w64devkit build; MUST be --enable-static, the
+# F1/D8 -static link ignores .dll.a — CMake fails with the recipe if missing).
 # Override with the KN_FFMPEG_PREFIX environment variable if it moves.
 FFMPEG_PREFIX = os.environ.get(
     "KN_FFMPEG_PREFIX",
     r"C:\Users\KarnyJohnny\Desktop\ffmpeg\ffmpeg-win7-dev\usr\local")
-
-# 320x240, 2 s, 30 fps — small enough for a self-test, real enough to prove
-# the h264 decoder + NV12 conversion path (D3/D4/D6 pipeline).
-CLIP_NAME = "synthetic.264"
-CLIP_CMD = ["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=2",
-            "-c:v", "libx264", "-preset", "ultrafast", "-g", "30",
-            "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-f", "h264",
-            CLIP_NAME]
 
 OUT = []
 
@@ -141,20 +134,18 @@ def main():
     warns = [ln for ln in out.splitlines() if "warning:" in ln]
     check(not warns, results, "zero compiler warnings (%d seen)" % len(warns))
 
-    # ---- 1b. synthetic clip for decode.synthetic (§7.9) ----------------
-    clip_path = os.path.join(BUILD, CLIP_NAME)
-    ffmpeg_exe = os.path.join(FFMPEG_PREFIX, "bin", "ffmpeg.exe")
-    if have_ffmpeg and os.path.isfile(ffmpeg_exe) and \
-            not os.path.isfile(clip_path):
-        run([ffmpeg_exe, "-hide_banner", "-loglevel", "error", "-y"] + CLIP_CMD,
-            cwd=BUILD)
-    clip_ready = os.path.isfile(clip_path)
+    # ---- 1b. FFmpeg runtime layout ---------------------------------------
+    # decode.synthetic uses the clip EMBEDDED in the binary (hermetic — the
+    # target FFmpeg build has no encoder and files can go missing), so there
+    # is nothing to generate here. With a static FFmpeg (the required build,
+    # see CMake guard) no DLLs are needed either; report what we see.
     if have_ffmpeg:
-        check(clip_ready, results, "synthetic clip present (%s)" % clip_path)
         dlls = glob.glob(os.path.join(BUILD, "av*.dll")) + \
             glob.glob(os.path.join(BUILD, "sw*.dll"))
-        check(len(dlls) >= 3, results,
-              "FFmpeg DLLs copied next to knvstd.exe (%d)" % len(dlls))
+        if dlls:
+            log("FFmpeg DLLs next to knvstd.exe: %d (shared build)" % len(dlls))
+        else:
+            log("no FFmpeg DLLs next to knvstd.exe (static build — expected)")
 
     # ---- 2. unit tests ------------------------------------------------
     log("\n=== unit tests (on target) ===")
@@ -217,15 +208,16 @@ def main():
                 check(r["status"] in ("ok", "degraded"), results,
                       "console.host not failed (D1): %s" % r["status"])
         # phase B/C stubs report skipped honestly (7 permanent stubs;
-        # decode.synthetic joins them only when FFmpeg or the clip is absent)
+        # decode.synthetic joins them only when the build lacks FFmpeg —
+        # its clip is embedded, so with FFmpeg it always runs)
         skipped = [nm for nm, r in by_name.items() if r["status"] == "skipped"]
-        min_skipped = 7 if (have_ffmpeg and clip_ready) else 8
+        min_skipped = 7 if have_ffmpeg else 8
         check(len(skipped) >= min_skipped, results,
               "phase B/C stubs honestly skipped (%d, min %d)" %
               (len(skipped), min_skipped))
-        # decode.synthetic must REALLY run when we built with FFmpeg + clip
+        # decode.synthetic must REALLY run when we built with FFmpeg
         r = by_name.get("decode.synthetic")
-        if have_ffmpeg and clip_ready:
+        if have_ffmpeg:
             check(r and r["status"] != "skipped", results,
                   "decode.synthetic executed (status=%s)" %
                   (r["status"] if r else "absent"))
@@ -233,7 +225,7 @@ def main():
                 log("  decode.synthetic reason: %s" % r["reason"])
         elif r:
             check(r["status"] == "skipped", results,
-                  "decode.synthetic honestly skipped without ffmpeg/clip")
+                  "decode.synthetic honestly skipped without ffmpeg")
 
     # ---- 4. diagnostic bundle -----------------------------------------
     log("\n=== diagnostic bundle ===")
@@ -302,9 +294,12 @@ def main():
     # ---- 6. PE subsystem version ---------------------------------------
     log("\n=== PE check ===")
     if IS_WINDOWS:
-        v = pe_subsystem_version(exe("knvstd"))
-        check(v == (6, 1), results,
-              "knvstd.exe SubsystemVersion == 6.01 (got %s)" % (v,))
+        if os.path.isfile(exe("knvstd")):
+            v = pe_subsystem_version(exe("knvstd"))
+            check(v == (6, 1), results,
+                  "knvstd.exe SubsystemVersion == 6.01 (got %s)" % (v,))
+        else:
+            check(False, results, "knvstd.exe exists for the PE check")
     else:
         check(os.path.isfile(exe("knvstd")), results,
               "knvstd binary exists (PE check is Windows-only)")

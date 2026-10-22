@@ -1,4 +1,21 @@
-# INTEGRATION NOTES — Round VII delta, rev 2 (kn_diag + kn_selftest + kn_decode + knvstd)
+# INTEGRATION NOTES — Round VII delta, rev 3 (FFmpeg static + embedded clip)
+
+> **Rev 3 supersedes rev 1/2.** The canonical integration document is now
+> `PROJECT-STATE.md` (repo root) — see its "Bootstrapping a NEW agent session"
+> and "Next steps" sections. This file remains as the file-by-file delta note.
+>
+> **Rev 3 headline changes** (after T10 round 2 on the target):
+> 1. FFmpeg MUST be rebuilt `--enable-static --disable-shared` (D18): the F1
+>    `-static` link ignores `.dll.a` — CMake now fails at configure time with
+>    the exact recipe if `lib/libavcodec.a` is missing.
+> 2. `decode.synthetic` uses a clip EMBEDDED at build time
+>    (`streamer/assets/synthetic.264` → `streamer/src/kn_synthetic_clip.h`,
+>    regenerate with `tools/make_synthetic_clip.py`) — the target FFmpeg has
+>    no encoder and external files go missing. `kn_decode_h264_mem()` added.
+> 3. GCC 16.2 fixes: modulo-bounded timestamp formatters (kn_diag,
+>    kn_selftest), `0x0601` expectations, platform-aware test_knselftest,
+>    ok_count read on Win32, T10 PE-check guard.
+> 4. No zip deltas anymore: the user syncs from the workspace/repo directly.
 
 Copy these files into `NewKarnyNow\` preserving paths (overwrite the rev-1
 copies if you already applied them). All code compiles with zero warnings

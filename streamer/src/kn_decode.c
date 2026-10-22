@@ -192,14 +192,14 @@ done:
     return rc;
 }
 
-int kn_decode_h264_file(const char *path, int to_nv12,
-                        kn_decode_frame_fn cb, void *userdata,
-                        kn_decode_stats *stats)
+/* Core decode loop over a padded Annex-B buffer. `data` must have
+ * AV_INPUT_BUFFER_PADDING_SIZE zeroed bytes after `fsz` (bitstream readers
+ * may over-read within the padding — documented FFmpeg requirement);
+ * ownership stays with the caller. */
+static int kd_run(const uint8_t *data, size_t fsz, int to_nv12,
+                  kn_decode_frame_fn cb, void *userdata,
+                  kn_decode_stats *stats)
 {
-    FILE *f;
-    long fsz;
-    uint8_t *data = NULL;
-    size_t rd;
     const AVCodec *codec;
     AVCodecContext *ctx = NULL;
     AVCodecParserContext *parser = NULL;
@@ -210,26 +210,11 @@ int kn_decode_h264_file(const char *path, int to_nv12,
     size_t off = 0;
     int rc = 0, ret;
 
-    if (!path || !stats) return -1;
+    if (!data || fsz == 0 || !stats) return -1;
     memset(stats, 0, sizeof *stats);
     memset(&k, 0, sizeof k);
     k.cb = cb;
     k.ud = userdata;
-
-    f = fopen(path, "rb");
-    if (!f) return -2;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -2; }
-    fsz = ftell(f);
-    rewind(f);
-    if (fsz <= 0 || fsz > KN_DECODE_MAX_FILE) { fclose(f); return -2; }
-    /* AV_INPUT_BUFFER_PADDING_SIZE of zeroed tail: the bitstream readers may
-     * over-read within the padding (documented FFmpeg requirement). */
-    data = (uint8_t *)av_malloc((size_t)fsz + AV_INPUT_BUFFER_PADDING_SIZE);
-    if (!data) { fclose(f); return -2; }
-    memset(data + fsz, 0, AV_INPUT_BUFFER_PADDING_SIZE);
-    rd = fread(data, 1, (size_t)fsz, f);
-    fclose(f);
-    if (rd != (size_t)fsz) { av_free(data); return -5; }
 
     av_log_set_callback(kd_av_log);
 
@@ -322,7 +307,53 @@ out:
     if (frame) av_frame_free(&frame);
     if (parser) av_parser_close(parser);
     if (ctx) avcodec_free_context(&ctx);
-    if (data) av_free(data);
+    return rc;
+}
+
+int kn_decode_h264_mem(const uint8_t *src, size_t len, int to_nv12,
+                       kn_decode_frame_fn cb, void *userdata,
+                       kn_decode_stats *stats)
+{
+    uint8_t *data;
+    int rc;
+    if (!src || len == 0 || !stats) return -1;
+    if (len > KN_DECODE_MAX_FILE) return -2;
+    /* copy into a padded buffer: callers may pass const/readonly memory
+     * (the embedded clip lives in .rodata) */
+    data = (uint8_t *)av_malloc(len + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!data) return -2;
+    memcpy(data, src, len);
+    memset(data + len, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    rc = kd_run(data, len, to_nv12, cb, userdata, stats);
+    av_free(data);
+    return rc;
+}
+
+int kn_decode_h264_file(const char *path, int to_nv12,
+                        kn_decode_frame_fn cb, void *userdata,
+                        kn_decode_stats *stats)
+{
+    FILE *f;
+    long fsz;
+    uint8_t *data;
+    size_t rd;
+    int rc;
+
+    if (!path || !stats) return -1;
+    f = fopen(path, "rb");
+    if (!f) return -2;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -2; }
+    fsz = ftell(f);
+    rewind(f);
+    if (fsz <= 0 || fsz > KN_DECODE_MAX_FILE) { fclose(f); return -2; }
+    data = (uint8_t *)av_malloc((size_t)fsz + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!data) { fclose(f); return -2; }
+    rd = fread(data, 1, (size_t)fsz, f);
+    fclose(f);
+    if (rd != (size_t)fsz) { av_free(data); return -5; }
+    memset(data + fsz, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    rc = kd_run(data, (size_t)fsz, to_nv12, cb, userdata, stats);
+    av_free(data);
     return rc;
 }
 
@@ -342,6 +373,14 @@ int kn_decode_h264_file(const char *path, int to_nv12,
                         kn_decode_stats *stats)
 {
     (void)path; (void)to_nv12; (void)cb; (void)userdata; (void)stats;
+    return -1;
+}
+
+int kn_decode_h264_mem(const uint8_t *data, size_t len, int to_nv12,
+                       kn_decode_frame_fn cb, void *userdata,
+                       kn_decode_stats *stats)
+{
+    (void)data; (void)len; (void)to_nv12; (void)cb; (void)userdata; (void)stats;
     return -1;
 }
 
