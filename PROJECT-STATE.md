@@ -19,13 +19,9 @@ git clone https://github.com/OpenCloudGaming/OpenNOW.git
 #    Key file: native/opennow-streamer/crates/opennow-streamer-transport/src/nvst.rs
 #    Key docs: docs/core-protocol.md, docs/mjolnir-nack-v2.md,
 #              docs/session-start-progress.md, docs/streamer-comparison/*
-# 3. third_party/ is GITIGNORED — fetch it:
-#    a) tiny-AES-c (Unlicense), UNMODIFIED upstream defaults (AES128, ECB+CBC+CTR):
-#       https://raw.githubusercontent.com/kokke/tiny-AES-c/master/aes.{c,h}
-#       -> third_party/tiny-aes-c/
-#    b) Brad Conte SHA-1 (public domain):
-#       https://raw.githubusercontent.com/B-Con/crypto-algorithms/master/sha1.{c,h}
-#       -> third_party/crypto-algorithms-sha1/
+# 3. Run tests/T10_build_and_test.py. It downloads the four small required
+#    AES/SHA-1 source files into the ignored third_party/ tree and verifies
+#    pinned SHA-256 hashes before configuring/building. No manual vendor setup.
 # 4. OPTIONAL (sandbox compile-checks of kn_decode.c only; the TARGET build uses
 #    the user's own FFmpeg dev tree instead): headers at the user's exact commit:
 #       https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/bf0e831606938f530326c9679591109407fa8d0d

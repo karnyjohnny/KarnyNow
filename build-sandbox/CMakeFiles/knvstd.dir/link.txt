@@ -1,1 +1,0 @@
-/usr/bin/cc -O3 -DNDEBUG CMakeFiles/knvstd.dir/streamer/src/knvstd_main.c.o -o knvstd  libkncore.a -lpthread -lm 

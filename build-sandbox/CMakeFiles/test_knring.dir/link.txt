@@ -1,1 +1,0 @@
-/usr/bin/cc -O3 -DNDEBUG CMakeFiles/test_knring.dir/streamer/tests/test_knring.c.o -o test_knring  libkncore.a -lpthread -lm 

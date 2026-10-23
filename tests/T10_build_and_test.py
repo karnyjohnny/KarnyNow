@@ -29,12 +29,15 @@ the repo root (..\\). Send both back; keep logs\\t10_* and the bundle on disk
 in case of failure.
 """
 import glob
+import hashlib
 import json
 import os
 import struct
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -123,6 +126,61 @@ def check(cond, results, label):
     return bool(cond)
 
 
+VENDOR_FILES = [
+    ("third_party/tiny-aes-c/aes.c",
+     "https://raw.githubusercontent.com/kokke/tiny-AES-c/"
+     "23856752fbd139da0b8ca6e471a13d5bcc99a08d/aes.c",
+     "f7f78b44654efd3542b6886923dd05194286807ebcfeb078ea05d21fe901ee9e"),
+    ("third_party/tiny-aes-c/aes.h",
+     "https://raw.githubusercontent.com/kokke/tiny-AES-c/"
+     "23856752fbd139da0b8ca6e471a13d5bcc99a08d/aes.h",
+     "9f74a4de3bd11621ff6e8fb9b352b060f699e6c1c67f81a22d104aacad61a23b"),
+    ("third_party/crypto-algorithms-sha1/sha1.c",
+     "https://raw.githubusercontent.com/B-Con/crypto-algorithms/"
+     "cfbde48414baacf51fc7c74f275190881f037d32/sha1.c",
+     "7e5965e83bcafc361e31aff99136ba5ebae338448d4d33496e11e071ec437029"),
+    ("third_party/crypto-algorithms-sha1/sha1.h",
+     "https://raw.githubusercontent.com/B-Con/crypto-algorithms/"
+     "cfbde48414baacf51fc7c74f275190881f037d32/sha1.h",
+     "b76cc80cfc7a760150f2d0047ad39673d472d09900115bf8361b4e30f398f5b8"),
+]
+
+
+def ensure_vendor_files(results):
+    """Fetch the small, pinned source files omitted from git by .gitignore."""
+    log("\n=== required source dependencies ===")
+    ok = True
+    for relpath, url, expected_hash in VENDOR_FILES:
+        path = os.path.join(ROOT, relpath)
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                actual_hash = hashlib.sha256(f.read()).hexdigest()
+            if actual_hash != expected_hash:
+                check(False, results, "%s has expected SHA-256" % relpath)
+                log("  existing file differs; leaving it untouched")
+                ok = False
+            else:
+                check(True, results, "%s already present and verified" % relpath)
+            continue
+
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                content = response.read()
+            actual_hash = hashlib.sha256(content).hexdigest()
+            if actual_hash != expected_hash:
+                raise ValueError("SHA-256 mismatch: %s" % actual_hash)
+            parent = os.path.dirname(path)
+            if not os.path.isdir(parent):
+                os.makedirs(parent)
+            with open(path, "wb") as f:
+                f.write(content)
+            check(True, results, "%s downloaded and SHA-256 verified" % relpath)
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            check(False, results, "%s available (%s)" % (relpath, exc))
+            ok = False
+    return ok
+
+
 CFG_NAMES = ["default", "tls1.2-explicit", "tls1.0-explicit",
              "tls1.2+manual-validation"]
 
@@ -201,6 +259,8 @@ def main():
     log("T10 build+test+selftests — " + time.strftime("%Y-%m-%d %H:%M:%S"))
     log("repo root: " + ROOT)
 
+    dependencies_ok = ensure_vendor_files(results)
+
     # ---- 0. toolchain ------------------------------------------------
     log("\n=== toolchain ===")
     for cmd in ([sys.executable, "--version"], ["cmake", "--version"],
@@ -217,12 +277,36 @@ def main():
                "-DCMAKE_BUILD_TYPE=Release"]
     if have_ffmpeg:
         cfg_cmd.append("-DKN_FFMPEG_PREFIX=" + FFMPEG_PREFIX)
-    rc, out, _ = run(cfg_cmd)
+    if dependencies_ok:
+        rc, out, _ = run(cfg_cmd)
+    else:
+        rc, out = -1, "Required source dependencies are unavailable."
+        log(out)
     check(rc == 0, results, "cmake configure")
-    rc, out, _ = run(["cmake", "--build", "build"])
+    configure_ok = rc == 0
+    if rc == 0:
+        rc, out, _ = run(["cmake", "--build", "build"])
+    else:
+        rc, out = -1, "Skipped because configure failed."
+        log(out)
     check(rc == 0, results, "ninja build")
     warns = [ln for ln in out.splitlines() if "warning:" in ln]
     check(not warns, results, "zero compiler warnings (%d seen)" % len(warns))
+
+    # Every unit test and the diagnostic/self-test runner must be present in
+    # build/. Retry missing targets explicitly before any binary is launched.
+    required_bins = ["test_knfec", "test_knring", "test_knaudio", "test_kngs",
+                     "test_knselftest", "knvstd", "test_kndiag", "test_knlog",
+                     "test_knsrtp"]
+    missing = [name for name in required_bins if not os.path.isfile(exe(name))]
+    if missing and configure_ok:
+        log("\nmissing build outputs: %s" % ", ".join(name + ".exe" for name in missing))
+        retry_rc, _, _ = run(["cmake", "--build", "build", "--target"] + missing)
+        if retry_rc != 0:
+            check(False, results, "rebuild missing executable targets")
+    for name in required_bins:
+        check(os.path.isfile(exe(name)), results,
+              "%s%s exists in build" % (name, ".exe" if IS_WINDOWS else ""))
 
     # ---- 1b. FFmpeg runtime layout ---------------------------------------
     # decode.synthetic uses the clip EMBEDDED in the binary (hermetic — the

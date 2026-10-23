@@ -1,1 +1,0 @@
-/usr/bin/cc -O3 -DNDEBUG CMakeFiles/knvstd.dir/streamer/src/knvstd_main.c.o -o knvstd   -L/workspaces/KarnyNow/third_party/mbedtls/build/library  -Wl,-rpath,/workspaces/KarnyNow/third_party/mbedtls/build/library libkncore.a -lpthread -lmbedtls -lmbedx509 -lmbedcrypto -lm 

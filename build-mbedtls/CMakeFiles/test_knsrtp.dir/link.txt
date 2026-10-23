@@ -1,1 +1,0 @@
-/usr/bin/cc -O3 -DNDEBUG CMakeFiles/test_knsrtp.dir/streamer/tests/test_knsrtp.c.o -o test_knsrtp   -L/workspaces/KarnyNow/third_party/mbedtls/build/library  -Wl,-rpath,/workspaces/KarnyNow/third_party/mbedtls/build/library libkncore.a -lpthread -lmbedtls -lmbedx509 -lmbedcrypto -lm 

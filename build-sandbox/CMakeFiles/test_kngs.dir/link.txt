@@ -1,1 +1,0 @@
-/usr/bin/cc -O3 -DNDEBUG CMakeFiles/test_kngs.dir/streamer/tests/test_kngs.c.o -o test_kngs  libkncore.a -lpthread -lm 
