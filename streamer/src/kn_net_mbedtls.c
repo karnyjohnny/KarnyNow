@@ -22,6 +22,7 @@
 #include "mbedtls/ssl.h"
 #include "mbedtls/ssl_ciphersuites.h"
 #include "mbedtls/x509_crt.h"
+#include "psa/crypto.h"
 
 #define KN_NET_CONNECT_TIMEOUT_MS 5000
 #define KN_NET_IO_TIMEOUT_MS      10000
@@ -326,8 +327,20 @@ static int kn_tls_session(const char *host, kn_net_tls *tls,
     mbedtls_x509_crt_init(&roots);
     start = kn_mono_ms();
 
-    ret = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
-                                (const unsigned char *)"KarnyNow TLS", 12);
+    {
+        psa_status_t psa_status = psa_crypto_init();
+        if (psa_status != PSA_SUCCESS) {
+            char text[128];
+            snprintf(text, sizeof text, "PSA crypto init failed: %d",
+                     (int)psa_status);
+            if (kn_log_is_initialized())
+                kn_log_simple(KN_CH_DIAG, KN_WARN, NULL, text);
+            ret = MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+        } else {
+            ret = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
+                                        (const unsigned char *)"KarnyNow TLS", 12);
+        }
+    }
     if (ret == 0) ret = kn_load_root_store(&roots);
     if (ret == 0)
         ret = mbedtls_ssl_config_defaults(&config, MBEDTLS_SSL_IS_CLIENT,
