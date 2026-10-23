@@ -48,7 +48,7 @@ sh tools/cross_check.sh            # mingw x64+i686, -Wall -Wextra -Werror, F1 f
 `T10_skrot.txt`. The user runs it quickly and willingly — ask for a
 measurement instead of guessing (§10.7).
 
-## Current status (updated 2026-10-23, impl round XV)
+## Current status (updated 2026-10-23, post-T10 TLS backend work)
 
 | Stage | State |
 |---|---|
@@ -56,7 +56,9 @@ measurement instead of guessing (§10.7).
 | **1 — C skeleton offline + logging subsystem** | **Self-test registry phase A+B COMPLETE and target-verified (T10 round 7: ALL PASS 40/40 — the verification chapter is CLOSED: 7 unit suites green, 8 real self-tests incl. gs.parse 78 checks in the shipped binary, 4 honest phase-C stubs, d3d.present reproduced milestone 0 a second time: pitch 1536, present mean 0.30 ms). STAGE-1 VIDEO LOOP DELIVERED (round XII, sandbox-verified, awaiting target): `knvstd --loopback[=FILE.264] [--loopback-seconds=N]` — decode → paced 30 fps (absolute QPC deadlines, Sleep+spin per R30) → per-row copy into locked DEFAULT NV12 (pitch 1536 ≠ stride 1280) → StretchRect(LINEAR) → letterboxed window → §7.6 perf event every 1000 ms into perf.jsonl (CPU % of ALL cores per §6.1, per-interval deltas, net fields honest zeros). Presenter `kn_d3d_vp_*`: pre-fault at open (first-touch ~28 ms), VEH guard on every CPU write → D7 permanent-degrade latch, device-lost/ESC → graceful stop. New `kn_perf` (K32 counters via PSAPI_VERSION 2 — no psapi.dll import). New asset `streamer/assets/synthetic720.264` (High@5.1 VERIFIED at the SPS byte; landmine: `-preset ultrafast` silently downgrades to Constrained Baseline). New gate `tests/T11_loopback_g1.py` = G1-VIDEO: 10 evidence-computed criteria (30 fps steady, CPU ≤ 45 % all-cores, RSS drift ≤ +4 MiB, late ≤ 0.2 %, perf lines ≥ 95 %, DPST 0, logs WARN/ERROR-free, bundle contains perf.jsonl). Failure → `kn_log_on_failure` → §7.7 amplification + auto-bundle; relevance mapping catches `loopback`. Design: `docs/LOOPBACK.md`. **ROUND XIV COMPLETED THE STAGE-1 DELIVERABLES: WASAPI synthetic PCM (`kn_audio`, docs/AUDIO.md)** — audio opens with the presenter (open failure never kills video; §7.7 amplification + honest summary), `queue_audio_ms` is real device padding, 8th suite `test_knaudio` (22 checks, portable neutral half), T11 now gates FULL G1 (video+audio). G1-VIDEO already PASSED on target (round XIII: T11 600 s 20/20 — fps 30.000, late 0, CPU 13.0 %; overlay confirmed live in the round-XIII re-run: T10 40/40 + T11 quick 20/20 with F5 overlay working). **G1 CLOSED ON TARGET (round XV evidence): T10 round 10 ALL PASS 40/40 + T11 FULL = **G1 PASS 25/25** — fps_mean 30.000, frames_late 2/18 001, CPU 13.3 % all-cores (max-second 51.6 = clip-restart spikes), RSS 22.5→19.8 MB (peak 26.2, drift +2 607 kB), 601 perf lines (600/601 in [27,33]), DPST 0, logs WARN/ERROR-free, bundle 686 kB with perf.jsonl; AUDIO: opened **44100 Hz 2ch float32** (the machine's real mix format — the parser negotiated it, not us), 59 060 events, frames_written 26 462 842 = 100.006 % of realtime, **starved 0**, timeouts 0, buffer_errors 0, queue_audio_ms alive 601/601. **STAGE 1 IS DONE. STAGE 2 OPENED.** Round-XIV omission found+fixed: T10 built test_knaudio.exe but never RAN it (missing from the suites list) — added (round 11 expects 41 checks incl. test_knaudio -> PASS). **Round XV DELIVERED phase C: `kn_net` (schannel/winsock) + the four net self-tests — the §7.9 registry now has ZERO stubs (12/12 implemented).** net.dns/net.tcp443/net.tls/tls.chain probe login.nvidia.com + prod.cloudmatchbeta.nvidiagrid.net with a non-NVIDIA baseline per layer (DNS: stun.l.google.com; TCP/TLS: www.cloudflare.com) so "NVIDIA unreachable" is separable from "no network". TLS = schannel (the stage-2 client's real future stack), verification ALWAYS ON (dwFlags=0 + SNI; a failed handshake is the measurement, never bypassed), stock protocol defaults (grbitEnabledProtocols=0 — the Win7 TLS-1.2 reality is the question). T10 gating policy: dns+tcp443 gated ok/degraded (FAILED = stage-2 blocker → red on purpose), net.tls+tls.chain REPORTED (a Win7 TLS failure is a finding to analyse, not a client bug). Chain details (depth ≤6, per-element subject/issuer/dates/trust + SSL policy verdict) go to diag.log INFO + evidence summary. NEVER YET EXECUTED — round 11 on the target is the first run and a stage-2 planning input. Design/landmines: docs/NET.md. AU assembler stays queued for round XVI. |
 | 2–5 | not started (stage-2 seeds shipped and target-verified: `kn_gs`, `knsrtp` ph1+2, `knfec`) |
 
-**2026-10-23 network T10 run:** build, unit suites, and self-tests are green on the target: `cmake` configure/build rc=0, zero warnings, all 8 unit suites pass, `knvstd --selftest=all` returns exit 0, `d3d.present` milestone 0 passes again, and the diagnostic bundle is produced successfully. The only measured failure is the OS-level TLS probe: `net.dns` and `net.tcp443` are OK, while `net.tls` and `tls.chain` fail on Win7/Schannel across all configs. This is treated as stage-2 network-planning input, not as a client-side code regression.
+**Latest target T10 (2026-10-23 21:18):** `ALL PASS`, 62/62 harness checks, zero compiler warnings, all 8 unit suites pass, D3D/decode self-tests pass, DNS and TCP/443 pass. TLS findings remain: all three Schannel handshakes fail with `0x80090302` (`SEC_E_UNSUPPORTED_FUNCTION`); `tls.chain` cannot handshake. This run used the default Schannel backend; it does NOT test mbedTLS.
+
+**TLS backend work in this workspace:** added `KN_TLS_BACKEND=mbedtls` as an optional static CMake subproject (mbedTLS 3.6.0), implemented a Win32 Winsock backend with bounded connect/I/O, TLS 1.2 minimum, SNI/hostname verification, `MBEDTLS_SSL_VERIFY_REQUIRED`, and roots imported from current-user/local-machine Windows `ROOT` stores opened read-only. T10 can fetch the fixed mbedTLS/framework source archives and verify SHA-256 when that backend is selected. The backend is NOT target-verified: this sandbox has no MinGW compiler, apt failed with permission denied, and Linux tests only build the POSIX skip implementation. Do not treat the Linux mbedTLS build as evidence that the Win32 code compiles or handshakes.
 
 Gate G0.2 evidence and the settled presentation chain: `docs/analysis/G0.2-T4v4-RESULTS.md`.
 One-line summary: **NV12 `StretchRect` from a DEFAULT-pool surface into the backbuffer
@@ -94,24 +96,23 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | **R28 (new)** | Sandbox GCC 12.2 vs target GCC 16.2 warning drift: T10 round 1 failed on two `-Wformat-truncation` GCC 16 flags that GCC 12 accepted (timestamp formatters). Mitigation: all `snprintf` with time/foreign-string inputs use **explicitly bounded arguments** (modulo/precision), verified at `-O0..-O3`; T10 fails the build on ANY warning so drift can never ship silently. Round IX re-confirmed the discipline (cross `-Werror` caught a 64-bit format promotion in the new d3d code on the first pass). **Round XI third incident:** GCC 16 flagged the new `st_gs_parse` capnote (worst case 284 B > 256 B buffer, sandbox GCC 12 default level silent) — fix verified under `-Wformat-truncation=2` (paranoid level) on BOTH toolchains; that flag level is now the pre-check for any new snprintf aggregation before handover. |
 | **R30 (round X: stable pattern, informational)** | `clock.resolution` variance is NOT transient load: rounds 4+5 both measured Sleep(1) 15.6→**2.75/2.88** ms (verdict `degraded`, threshold 2.6 from round 1's 1.25→1.00) with wall tick pinned at 15600 us **even after timeBeginPeriod(1)** (round 1 saw 1250 us ticks — the machine state changed between rounds, probably a reboot cleared whatever had raised the timer). Consequences: (a) treat **~2.9 ms as the realistic Sleep(1) floor** on this machine — enough for 33.3 ms frame pacing at 30 fps, NOT enough for precise 1 ms spins; (b) wall-clock granularity stays 15.6 ms — timestamps below that resolution are quantised; (c) D9 stands stronger than ever: pacing measures real Present intervals, never assumes. Thresholds unchanged (honest `degraded` beats a fudged `ok`). |
 | **R15 (impl round II)** | **Mostly closed.** T8 on the target resolved all 14 Python packages rc=0 (pip honours Requires-Python, so every pin declares 3.8 support): textual 6.2.1, rich 14.3.4, httpx 0.28.1, httpcore 1.0.9, h11 0.16.0, anyio 4.5.2, + 8 more — `python/requirements.txt` updated, wheels cached on target in `tests\t8_wheels\`. Remaining: offline install + runtime smoke at stage 4 (httpx 0.28 removed `proxies=`; textual 6.x API churn vs old docs). |
-| **R26 (new)** | **Sandbox has no compiler and must not install one** (apt installs fail with infrastructure errors; packages do not persist across turns anyway). The compile gate is the TARGET machine: `tests/T9_build_and_test.py` (w64devkit GCC 16.2 + cmake + ninja — the authoritative toolchain; it caught a `-Wstring-compare` that sandbox GCC 12 missed). Consequence: C leaving this workspace is compiled by the user, so review it line-by-line before handing over and keep changes per round small. |
+| **R31 (new)** | This sandbox has host GCC 13.3 and can compile the POSIX branch, but has no MinGW/Windows SDK headers. Installing `gcc-mingw-w64-x86-64` failed because apt cannot write `/var/lib/apt/lists/partial` (permission denied). Thus the new mbedTLS Winsock implementation is not cross-compiled here; target T10 is its first Windows compile gate. |
 
 Everything else (R3 usrsctp/DTLS spike, R7 first real `POST v2/session`, R22 31-field
 session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOOTSTRAP §9.
 
 ## Next steps (ordered)
 
-1. **T10 network result is now in hand**: the 2026-10-23 run is a clean build + self-test pass, with the single stage-2 finding being Win7/Schannel TLS failure (`net.tls`, `tls.chain`) while `net.dns` and `net.tcp443` are OK. The evidence is the input for the network plan, not a regression in the C code.
-2. **Analyse the phase-C results → stage-2 network plan** (schannel TLS
-   version reality on this Win7, cert-chain gaps, endpoint reachability,
-   OS servicing / cipher policy, and the exact WSS+RTSP client design).
+1. **Target-validate mbedTLS.** In cmd/ConEmu run `set KN_TLS_BACKEND=mbedtls` then `python tests\T10_build_and_test.py`. T10 bootstraps the pinned archives, builds the targets and records `tls=mbedtls` in `build.json`. Inspect `net.tls` (all three hosts must verify) and `tls.chain` (must handshake and produce depth >= 1) in the summary/full log/bundle. T10 ALL PASS alone does not prove TLS because these findings are intentionally non-gating. Do not advance stage 2 until these TLS results pass.
+2. If the mbedTLS target build or handshake fails, use `T10_wynik.txt` and `t10logs/diag-*.zip`; diagnose this backend only. Do not modify Windows settings or disable certificate verification.
 3. **AU assembler + reorder buffer on `kn_gs`** (round XVI, docs/GS.md
    "Stage-2 TODOs"): VideoAccessUnitAssembler port (GsFrameHeader,
    expected_access_unit_length, AU caps), reorder + continuity +
    PLI/NACK hooks, FEC recovery (pitfall #4) — offline, KAT-verified via
    gs_reference.py simulation.
 4. Stage 2 sockets: Mjolnir UDP receive loop → kn_ring capture →
-   `--capture`/`--decode` modes; WSS+RTSP client (schannel); G2 gate.
+  `--capture`/`--decode` modes; WSS+RTSP client using the validated TLS
+  backend; G2 gate.
 5. Stage 3+ per BOOTSTRAP §12 (R3 spike → TUI → hardening). R22/R23
    mandatory at their stages.
 
@@ -771,3 +772,36 @@ feed the WSS/RTSP client design and R7).
   `tests/T10_build_and_test.py` (8 suites + net gating policy),
   `CMakeLists.txt` + `tools/{build_native_tests,cross_check}.sh`
   (kn_net + ws2_32/secur32/crypt32), INTEGRATION.md rev 8
+
+### 2026-10-23 · optional mbedTLS backend after target T10
+Target T10 from the user: 62/62 harness checks ALL PASS; Schannel TLS
+findings persist (`net.tls` failed on NVIDIA hosts and Cloudflare with
+0x80090302; `tls.chain` failed because the handshake did not start). T10's
+gated policy now matches the code: DNS/TCP gate, TLS/chain findings report.
+
+Added optional `KN_TLS_BACKEND=mbedtls`: CMake builds pinned mbedTLS 3.6.0
+and its framework as static subprojects (not the Linux `.a` artifacts from
+the sandbox build); `kn_net_mbedtls.c` implements Win32 DNS/TCP/TLS using
+Winsock, TLS 1.2 minimum, SNI + hostname verification, required certificate
+validation, read-only Windows ROOT trust stores, and peer-chain reporting.
+T10 downloads the fixed source archives, validates SHA-256, selects the
+requested backend, and verifies backend identity in build.json. Updated
+`docs/NET.md`; corrected the sandbox prep script to use tag `v3.6.0` and
+initialize the framework submodule.
+
+Validation: default Schannel native CMake build + ctest 10/10; mbedTLS
+selected native CMake build + ctest 10/10; clean temporary checkout fetched
+and verified both pinned mbedTLS archives; T10 Python syntax and diff checks
+pass. Limitation: host GCC builds only POSIX stubs; `apt-get install
+gcc-mingw-w64-x86-64` failed due permission denied. No Windows compilation or
+mbedTLS handshake has occurred yet.
+
+NEXT ACTION: user runs `set KN_TLS_BACKEND=mbedtls` and
+`python tests\T10_build_and_test.py` on Win7. Treat mbedTLS as proven only
+if the Windows build passes, `net.tls` verifies all three hosts, and
+`tls.chain` returns a built chain. Otherwise analyze `T10_wynik.txt` and
+`t10logs/diag-*.zip`; do not advance to WSS/RTSP and never disable verify.
+→ `CMakeLists.txt`, `streamer/src/kn_net_mbedtls.c` (new),
+  `streamer/src/kn_net.c`, `streamer/include/kn/kn_net.h`,
+  `streamer/src/kn_selftest.c`, `tests/T10_build_and_test.py`,
+  `tools/prepare_mbedtls_sandbox.sh`, `docs/NET.md`, this file

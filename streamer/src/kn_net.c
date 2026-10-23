@@ -1,17 +1,17 @@
-/* kn_net.c — phase-C network probes (contract: kn_net.h).
+/* kn_net.c — phase-C Schannel probes (contract: kn_net.h).
  *
- * schannel + winsock + crypt32, every pattern per MSDN's documented
+ * Winsock + Schannel + crypt32, every pattern per MSDN's documented
  * "Creating an Schannel Security Context" flow; all spellings verified
  * against the mingw-w64 headers this round (sspi.h/schannel.h/wincrypt.h —
  * the d3d9/wasapi lesson: never from memory). Verification is NEVER
  * disabled (working agreement): SNI target name is passed, dwFlags = 0
- * (schannel auto credential validation), and a failed verification is
+ * (Schannel auto credential validation), and a failed verification is
  * REPORTED as the measurement (sec_status), not worked around.
  *
  * mingw's schannel.h predates TLS 1.1+; the SP_PROT_* client bits below
  * are the stable ABI values from the Windows SDK (decode-only use: we
  * never ENABLE specific protocols — grbitEnabledProtocols stays 0 so the
- * probe measures the machine's stock schannel defaults, which is exactly
+ * probe measures the machine's stock Schannel defaults, which is exactly
  * the stage-2 question on Win7).
  */
 #include "kn/kn_net.h"
@@ -28,47 +28,6 @@
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/error.h"
-
-int kn_net_available(void) { return 1; }
-
-int kn_net_dns_lookup(const char *host, kn_net_dns *out)
-{
-    (void)host;
-    if (!out) return -1;
-    memset(out, 0, sizeof *out);
-    out->rc = -1;
-    return -1;
-}
-
-int kn_net_tcp_connect443(const char *host, kn_net_tcp *out)
-{
-    (void)host;
-    if (!out) return -1;
-    memset(out, 0, sizeof *out);
-    out->rc = -4;
-    return -1;
-}
-
-int kn_net_tls_probe(const char *host, kn_net_tls *out)
-{
-    (void)host;
-    if (!out) return -1;
-    memset(out, 0, sizeof *out);
-    out->rc = -3;
-    out->sec_status = -1;
-    return -1;
-}
-
-int kn_net_chain_dump(const char *host, kn_net_chain *out)
-{
-    (void)host;
-    if (!out) return -1;
-    memset(out, 0, sizeof *out);
-    out->rc = -3;
-    out->sec_status = -1;
-    return -1;
-}
-
 #else
 
 #ifdef _WIN32

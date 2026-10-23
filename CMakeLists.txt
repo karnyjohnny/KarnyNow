@@ -48,17 +48,24 @@ add_library(kncore STATIC
 )
 set(KN_TLS_BACKEND "schannel" CACHE STRING "TLS backend: schannel or mbedtls")
 set_property(CACHE KN_TLS_BACKEND PROPERTY STRINGS schannel mbedtls)
+if(NOT KN_TLS_BACKEND STREQUAL "schannel" AND
+   NOT KN_TLS_BACKEND STREQUAL "mbedtls")
+  message(FATAL_ERROR "KN_TLS_BACKEND must be schannel or mbedtls")
+endif()
 if(KN_TLS_BACKEND STREQUAL "mbedtls")
-  add_compile_definitions(KN_TLS_BACKEND_MBEDTLS=1)
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/build/library/libmbedtls.a")
-    target_include_directories(kncore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include")
-    target_link_directories(kncore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/build/library")
-    target_link_libraries(kncore INTERFACE mbedtls mbedx509 mbedcrypto)
-  else()
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt")
     message(FATAL_ERROR
-      "KN_TLS_BACKEND=mbedtls requires static mbedTLS under third_party/mbedtls/build/library; "
-      "build it first with tools/prepare_mbedtls_sandbox.sh or by configuring mbedTLS with static libs.")
+      "KN_TLS_BACKEND=mbedtls requires mbedTLS 3.6.0 source in third_party/mbedtls")
   endif()
+  set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+  set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
+  set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
+  set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+  add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
+  target_compile_definitions(kncore PRIVATE KN_TLS_BACKEND_MBEDTLS=1)
+  target_sources(kncore PRIVATE streamer/src/kn_net_mbedtls.c)
+  target_link_libraries(kncore PUBLIC mbedtls mbedx509 mbedcrypto)
 endif()
 
 target_include_directories(kncore PUBLIC streamer/include)
@@ -154,6 +161,7 @@ if(KN_FFMPEG_PREFIX)
 else()
   set(_kn_ffmpeg "ffmpeg=disabled")
 endif()
+string(APPEND _kn_ffmpeg ",tls=${KN_TLS_BACKEND}")
 
 target_compile_definitions(kncore PRIVATE
   KN_DIAG_BUILD_GIT_REV="${KN_GIT_REV}"

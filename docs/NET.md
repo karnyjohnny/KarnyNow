@@ -1,30 +1,30 @@
 # Phase-C network probes (`kn_net`) — implementation notes
 
-Status: **IMPLEMENTED, sandbox-verified** (native 8 suites PASS incl.
-test_knselftest 97; cross `-Werror` x64/i686 clean; kn_selftest +
-knvstd_main clean under `-Wformat-truncation=2` at -O0/-O2/-O3; ctest
-10/10; T10 dry-run ALL PASS 38 on POSIX with all four probes honestly
-skipped). **The probes have NEVER EXECUTED** — they need winsock +
-schannel + a real network: **T10 round 11 on the target is the first
-run**, and its output is a stage-2 planning input, not just a gate.
+Status: **Schannel probe executed on target; optional mbedTLS backend
+implemented but awaiting target compilation and handshake test.** T10 on
+2026-10-23 passed its 62 harness checks after the TLS gate policy was
+implemented. The Schannel baseline and both NVIDIA TLS handshakes failed
+with `0x80090302`; DNS and TCP/443 passed. The mbedTLS-selected POSIX
+configure/build and ctest pass 10/10, but that host compiles only the
+POSIX network stubs. Windows/Winsock code has not yet been compiled in the
+sandbox because MinGW installation is blocked by container permissions.
 
 With this delta the §7.9 registry has **NO stubs left: 12/12 self-tests
 implemented.**
 
-## Why these four, and why schannel
+## Why these four, and backend policy
 
 §7.9 defines phase C as the network diagnostics that separate *"our
 protocol code is broken"* from *"this machine cannot even talk to the
-endpoints"*. They gate stage-2 debugging. The TLS stack is **schannel** —
-Win7-native, zero dependencies, and exactly what the stage-2 C client
-will use, so the probe diagnoses the REAL future stack (a green probe
-with OpenSSL would prove nothing about Win7 schannel + the stale cert
-store).
+endpoints"*. They gate stage-2 debugging. Schannel remains the default
+backend and measures the target's native TLS stack. Optional mbedTLS
+tests an app-embedded TLS path without changing Windows.
 
-Working agreements honored: verification is NEVER disabled (SNI target
-name passed to InitializeSecurityContext, `dwFlags = 0` = schannel auto
-credential validation); a failed handshake is REPORTED with its raw
-SECURITY_STATUS — the measurement, not something to work around.
+Both backends must verify the certificate chain and target hostname.
+Schannel uses its normal validation; mbedTLS imports roots from the
+current-user and local-machine Windows `ROOT` stores opened read-only and
+sets `MBEDTLS_SSL_VERIFY_REQUIRED` plus SNI/hostname validation. A failed
+handshake is reported, never bypassed.
 
 ## The endpoints (from the research index, BOOTSTRAP §5)
 
@@ -69,13 +69,27 @@ scope for the 443/TLS probes.)
   predates TLS 1.1+, so the 1.1/1.2/1.3 client bits are defined locally
   (stable ABI values, decode-only use).
 
+## Optional mbedTLS backend
+
+Select with `KN_TLS_BACKEND=mbedtls` (or `set KN_TLS_BACKEND=mbedtls` in
+cmd/ConEmu before running T10). T10 downloads mbedTLS 3.6.0 and its
+framework at fixed revisions, validates both archive SHA-256 values, and
+builds the static CMake targets with the active toolchain. The backend
+uses bounded Winsock connections, requires TLS 1.2 or newer, verifies the
+hostname/SNI, and imports roots from Windows stores in read-only mode.
+
+Sandbox tests exercise only the POSIX skip path, not this backend's
+Winsock implementation. The target T10 is the first supported-compiler
+build and real mbedTLS handshake test. Build metadata records
+`tls=mbedtls` so its result cannot be mistaken for a Schannel run.
+
 ## Verdict semantics (and T10's gating policy)
 
 | Test | ok | degraded | failed |
 |---|---|---|---|
 | net.dns | all resolve | — | baseline dead (no DNS at all) OR an NVIDIA host dead (stage-2 blocker) |
 | net.tcp443 | all connect | — | baseline dead (no egress) OR NVIDIA refused/timeout |
-| net.tls | all verify, all ≥ TLS 1.2 | all verify but some host negotiated < TLS 1.2 | baseline TLS dead (schannel/egress) OR NVIDIA handshake failed (sec_status reported) |
+| net.tls | all verify, all ≥ TLS 1.2 | all verify but some host negotiated < TLS 1.2 | baseline TLS dead (backend/egress) OR NVIDIA handshake failed (sec_status reported) |
 | tls.chain | chain clean (trust 0, policy 0) | chain BUILT but flagged (the §7.9 stale-store finding) | handshake/chain build failed |
 
 T10 gates **net.dns + net.tcp443** on ok/degraded (a connected machine
@@ -103,10 +117,13 @@ red verdict. The skrot shows all four statuses either way.
 
 ## Stage-2 follow-ups from here
 
-- The round-11 probe RESULTS drive the WSS+RTSP client design: negotiated
-  TLS version (Win7 schannel ceiling), cert-store gaps (roots to install
-  via Windows Update vs. a bundled-store decision — never a bypass),
-  endpoint reachability (CDN vs regional blocking).
+- First pass the mbedTLS target gate: Windows build, verified TLS on the
+  two NVIDIA endpoints and Cloudflare, and a non-empty validated peer
+  chain. The latest Schannel T10 was network-reachable but failed TLS with
+  `0x80090302` on all three hosts.
+- After that gate, use the selected backend for the WSS+RTSP client and
+  measure its negotiated TLS version, certificate chain and endpoint
+  reachability. Never disable certificate verification.
 - Reuse: `kn_tls_session` core becomes the transport's TLS layer (the
   WSS client grows a send/recv over the established context —
   EncryptMessage/DecryptMessage with the SECPKG_ATTR_STREAM_SIZES).

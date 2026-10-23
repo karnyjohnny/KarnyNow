@@ -5,17 +5,14 @@
  * target machine itself:
  *   - do the real GFN endpoints resolve?            (net.dns)
  *   - is outbound TCP/443 open to them?              (net.tcp443)
- *   - what TLS does Win7 schannel negotiate with them, and does the
+ *   - what TLS does the selected backend negotiate with them, and does the
  *     certificate VERIFY? (net.tls — never bypass verification; a failure
  *     here is the measurement, not something to work around)
- *   - what chain does the OS build for login.nvidia.com? (tls.chain —
- *     §7.9: the "stale Win7 store" diagnostic)
+ *   - what peer chain is presented for login.nvidia.com? (tls.chain)
  *
- * TLS is done with **schannel** (Win7-native, zero dependencies — exactly
- * what the future C client will use, so the probe diagnoses the real
- * stack, not a stand-in). The probe reports what the SYSTEM DEFAULT
- * configuration negotiates (grbitEnabledProtocols = 0): a machine without
- * the TLS-1.2 client defaults enabled shows up here truthfully.
+ * The default backend is Schannel. The optional mbedTLS backend verifies
+ * hostnames and certificates against the Windows ROOT stores opened read-only.
+ * Neither backend may skip certificate verification.
  *
  * All probes are bounded (DNS/connect ~5 s, socket I/O 10 s, whole TLS
  * probe well under §7.9's "~1 s each" ideal — network reality allowed up

@@ -43,6 +43,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef KN_TLS_BACKEND_MBEDTLS
+#define KN_TLS_BACKEND_NAME "mbedTLS"
+#else
+#define KN_TLS_BACKEND_NAME "Schannel"
+#endif
+
 #ifndef _WIN32
 #  include <unistd.h>       /* readlink for the exe-dir clip probe */
 #endif
@@ -1264,8 +1270,8 @@ static int st_gs_parse(kn_st_result *r)
  * OAuth device grant, prod.cloudmatchbeta.nvidiagrid.net for CloudMatch,
  * s1.stun.gamestream.nvidia.com / stun.l.google.com for STUN) plus one
  * non-NVIDIA baseline per layer, so "NVIDIA unreachable" is separable from
- * "this machine has no network". TLS runs on schannel — the SAME stack the
- * stage-2 client will use — with verification ALWAYS ON (working
+ * "this machine has no network". TLS runs through the selected backend,
+ * with verification ALWAYS ON (working
  * agreement): a failed handshake is the measurement, reported with its
  * SECURITY_STATUS, never bypassed. */
 
@@ -1444,21 +1450,25 @@ static int st_net_tls(kn_st_result *r)
     char extra[832];
     int i, base_ok, old_proto = 0;
 
-    if (!kn_net_available()) { st_net_skip_posix(r, "schannel TLS"); return 0; }
+    if (!kn_net_available()) {
+        st_net_skip_posix(r, KN_TLS_BACKEND_NAME " TLS");
+        return 0;
+    }
     memset(&t, 0, sizeof t);
     for (i = 0; i < K_NET_NVIDIA_N; ++i)
         (void)kn_net_tls_probe(k_net_nvidia[i], &d[i]);
     (void)kn_net_tls_probe(K_NET_TLS_BASELINE, &d[K_NET_NVIDIA_N]);
     base_ok = (d[K_NET_NVIDIA_N].rc == 0);
 
-    STV(t, base_ok, "baseline TLS handshake verifies (schannel works)");
+    STV(t, base_ok, "baseline TLS handshake verifies (" KN_TLS_BACKEND_NAME
+        " works)");
     for (i = 0; i < K_NET_NVIDIA_N; ++i) {
         char nm[80];
         snprintf(nm, sizeof nm, "%.40s TLS handshake VERIFIES", k_net_nvidia[i]);
         STV(t, d[i].rc == 0, nm);
     }
     for (i = 0; i <= K_NET_NVIDIA_N; ++i)
-        if (d[i].rc == 0 && (d[i].protocol & 0x00000A00ul) == 0)
+        if (d[i].rc == 0 && (d[i].protocol & 0x00002800ul) == 0)
             old_proto = 1;      /* below TLS1.2 (0x800) / TLS1.3 (0x2000) */
 
     if (!base_ok || t.failures > 0)
@@ -1470,8 +1480,9 @@ static int st_net_tls(kn_st_result *r)
 
     if (r->status == KN_ST_OK)
         snprintf(r->reason, sizeof r->reason,
-                 "schannel TLS verified on all %d hosts: login %.5s "
-                 "cipher %u-bit, leaf '%.40s'", K_NET_NVIDIA_N + 1,
+                 "%s TLS verified on all %d hosts: login %.5s "
+                 "cipher %u-bit, leaf '%.40s'", KN_TLS_BACKEND_NAME,
+                 K_NET_NVIDIA_N + 1,
                  d[0].protocol_name, d[0].cipher_bits % 100000u,
                  d[0].subject);
     else if (r->status == KN_ST_DEGRADED)
@@ -1481,16 +1492,17 @@ static int st_net_tls(kn_st_result *r)
                  d[0].protocol_name);
     else if (!base_ok)
         snprintf(r->reason, sizeof r->reason,
-                 "baseline TLS FAILED (sec 0x%08lx) — schannel/egress issue, "
+                 "baseline TLS FAILED (sec 0x%08lx) — %s/egress issue, "
                  "NVIDIA endpoints not judgeable",
-                 (unsigned long)d[K_NET_NVIDIA_N].sec_status);
+                 (unsigned long)d[K_NET_NVIDIA_N].sec_status,
+                 KN_TLS_BACKEND_NAME);
     else
         snprintf(r->reason, sizeof r->reason,
                  "TLS to an NVIDIA endpoint FAILED (login sec 0x%08lx, "
-                 "cloudmatch sec 0x%08lx) while baseline works — Win7 TLS "
+                 "cloudmatch sec 0x%08lx) while baseline works — %s "
                  "reality: analyse version/cert store (tls.chain) BEFORE "
                  "stage 2", (unsigned long)d[0].sec_status,
-                 (unsigned long)d[1].sec_status);
+                 (unsigned long)d[1].sec_status, KN_TLS_BACKEND_NAME);
 
     {
         char per[K_NET_NVIDIA_N + 1][256];
@@ -1531,7 +1543,10 @@ static int st_tls_chain(kn_st_result *r)
     st_tally t;
     char extra[768];
 
-    if (!kn_net_available()) { st_net_skip_posix(r, "schannel chain"); return 0; }
+    if (!kn_net_available()) {
+        st_net_skip_posix(r, KN_TLS_BACKEND_NAME " chain");
+        return 0;
+    }
     memset(&t, 0, sizeof t);
     (void)kn_net_chain_dump("login.nvidia.com", &c);
 

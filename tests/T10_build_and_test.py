@@ -30,11 +30,15 @@ in case of failure.
 """
 import glob
 import hashlib
+import io
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -64,6 +68,7 @@ def _pick_ffmpeg_prefix():
 
 
 FFMPEG_PREFIX = _pick_ffmpeg_prefix()
+TLS_BACKEND = os.environ.get("KN_TLS_BACKEND", "schannel").strip().lower()
 
 OUT = []
 
@@ -181,8 +186,89 @@ def ensure_vendor_files(results):
     return ok
 
 
+def _extract_pinned_tarball(url, expected_hash, destination):
+    with urllib.request.urlopen(url, timeout=60) as response:
+        archive_bytes = response.read()
+    actual_hash = hashlib.sha256(archive_bytes).hexdigest()
+    if actual_hash != expected_hash:
+        raise ValueError("archive SHA-256 mismatch: %s" % actual_hash)
+
+    if not os.path.isdir(destination):
+        os.makedirs(destination)
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+        for member in archive.getmembers():
+            parts = [part for part in member.name.replace("\\", "/").split("/")
+                     if part]
+            if not parts:
+                continue
+            if parts[0] in (".", ".."):
+                raise ValueError("unsafe archive member: %s" % member.name)
+            relative = parts[1:]
+            if not relative:
+                continue
+            if any(part in ("", ".", "..") for part in relative):
+                raise ValueError("unsafe archive member: %s" % member.name)
+            path = os.path.join(destination, *relative)
+            if member.isdir():
+                if not os.path.isdir(path):
+                    os.makedirs(path)
+            elif member.isfile():
+                parent = os.path.dirname(path)
+                if not os.path.isdir(parent):
+                    os.makedirs(parent)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError("cannot read archive member: %s" % member.name)
+                with source, open(path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+            else:
+                raise ValueError("unsupported archive member: %s" % member.name)
+
+
+def ensure_mbedtls_source(results):
+    """Fetch pinned mbedTLS source only when the selected backend needs it."""
+    source = os.path.join(ROOT, "third_party", "mbedtls")
+    cmake_file = os.path.join(source, "CMakeLists.txt")
+    framework_cmake = os.path.join(source, "framework", "CMakeLists.txt")
+    if os.path.isfile(cmake_file) and os.path.isfile(framework_cmake):
+        with open(cmake_file, "r", encoding="utf-8") as f:
+            version_ok = "VERSION 3.6.0" in f.read()
+        check(version_ok, results, "mbedTLS source version is 3.6.0")
+        return version_ok
+
+    vendor_root = os.path.join(ROOT, "third_party")
+    stage = tempfile.mkdtemp(prefix="mbedtls-stage-", dir=vendor_root)
+    staged_source = os.path.join(stage, "mbedtls")
+    try:
+        _extract_pinned_tarball(
+            "https://codeload.github.com/Mbed-TLS/mbedtls/tar.gz/"
+            "2ca6c285a0dd3f33982dd57299012dacab1ff206",
+            "e78c5a58392ab1abe72b664934a2e6727b938f8d81fbeed4c59548106a747560",
+            staged_source)
+        _extract_pinned_tarball(
+            "https://codeload.github.com/Mbed-TLS/mbedtls-framework/tar.gz/"
+            "750634d3a51eb9d61b59fd5d801546927c946588",
+            "4845b5ae123c036cf9ec9e0ff0478a24b2be95450fc36a0fb80e2748518b424f",
+            os.path.join(staged_source, "framework"))
+        with open(os.path.join(staged_source, "CMakeLists.txt"),
+                  "r", encoding="utf-8") as f:
+            version_ok = "VERSION 3.6.0" in f.read()
+        if not version_ok:
+            raise ValueError("downloaded source is not mbedTLS 3.6.0")
+        if os.path.exists(source):
+            raise ValueError("incomplete third_party/mbedtls exists; left untouched")
+        os.rename(staged_source, source)
+        check(True, results, "pinned mbedTLS 3.6.0 source downloaded and verified")
+        return True
+    except (OSError, urllib.error.URLError, tarfile.TarError, ValueError) as exc:
+        check(False, results, "mbedTLS source available (%s)" % exc)
+        return False
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
 def net_tls_finding(ev):
-    """Render the Schannel measurements available in the current probe."""
+    """Render the per-host measurements available in the selected TLS probe."""
     if not isinstance(ev, dict):
         log("  (net.tls evidence missing)")
         return
@@ -203,6 +289,12 @@ def main():
     log("repo root: " + ROOT)
 
     dependencies_ok = ensure_vendor_files(results)
+    tls_backend_ok = TLS_BACKEND in ("schannel", "mbedtls")
+    check(tls_backend_ok, results,
+          "TLS backend is supported (%s)" % TLS_BACKEND)
+    if TLS_BACKEND == "mbedtls":
+        tls_backend_ok = ensure_mbedtls_source(results) and tls_backend_ok
+    dependencies_ok = dependencies_ok and tls_backend_ok
 
     # ---- 0. toolchain ------------------------------------------------
     log("\n=== toolchain ===")
@@ -212,12 +304,14 @@ def main():
 
     # ---- 1. configure + build ----------------------------------------
     log("\n=== build ===")
+    log("TLS backend: %s" % TLS_BACKEND)
     have_ffmpeg = os.path.isfile(
         os.path.join(FFMPEG_PREFIX, "include", "libavcodec", "avcodec.h"))
     log("ffmpeg dev prefix: %s (%s)" %
         (FFMPEG_PREFIX, "FOUND" if have_ffmpeg else "not found — stub build"))
     cfg_cmd = ["cmake", "--fresh", "-G", "Ninja", "-B", "build",
-               "-DCMAKE_BUILD_TYPE=Release"]
+               "-DCMAKE_BUILD_TYPE=Release",
+               "-DKN_TLS_BACKEND=" + TLS_BACKEND]
     if have_ffmpeg:
         cfg_cmd.append("-DKN_FFMPEG_PREFIX=" + FFMPEG_PREFIX)
     if dependencies_ok:
@@ -482,6 +576,8 @@ def main():
                  str(bj.get("compiler"))[:40]))
             log("  build.json flags: %s" % bj.get("flags"))
             log("  build.json extras: %s" % bj.get("extras"))
+            check("tls=" + TLS_BACKEND in str(bj.get("extras", "")), results,
+                "build.json records TLS backend %s" % TLS_BACKEND)
             if have_ffmpeg:
                 check("ffmpeg=" in str(bj.get("extras", "")) and
                       "disabled" not in str(bj.get("extras", "")), results,

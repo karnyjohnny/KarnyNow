@@ -24,10 +24,11 @@ mkdir -p third_party
 cd third_party
 
 if [[ ! -d mbedtls ]]; then
-  git clone --depth 1 --branch mbedtls-3.6.0 https://github.com/Mbed-TLS/mbedtls.git
+  git clone --depth 1 --branch v3.6.0 https://github.com/Mbed-TLS/mbedtls.git
 fi
 
 cd mbedtls
+git submodule update --init --recursive
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DENABLE_PROGRAMS=OFF \
