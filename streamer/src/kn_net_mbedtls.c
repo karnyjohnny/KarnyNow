@@ -255,7 +255,7 @@ static void kn_copy_chain(const mbedtls_ssl_context *ssl,
                       elem->issuer, sizeof elem->issuer);
         kn_cert_date(&cert->valid_from, elem->not_before,
                      sizeof elem->not_before);
-        kn_cert_date(&cert->valid_to, elem->valid_to,
+        kn_cert_date(&cert->valid_to, elem->not_after,
                      sizeof elem->not_after);
         elem->trust_error = (unsigned long)verify_flags;
         ++chain->depth;
@@ -352,11 +352,13 @@ static int kn_tls_session(const char *host, kn_net_tls *tls,
         tls->protocol = version && strcmp(version, "TLSv1.3") == 0 ? 0x2000ul :
                         version && strcmp(version, "TLSv1.2") == 0 ? 0x0800ul : 0;
         kn_json_copy(tls->protocol_name, sizeof tls->protocol_name, version);
-        tls->cipher_alg = suite ? (unsigned)suite->cipher : 0;
+        tls->cipher_alg = suite ?
+            (unsigned)suite->MBEDTLS_PRIVATE(cipher) : 0;
         tls->cipher_bits = suite ? (unsigned)
             mbedtls_ssl_ciphersuite_get_cipher_key_bitlen(suite) : 0;
-        tls->hash_alg = suite ? (unsigned)suite->mac : 0;
-        tls->exch_alg = suite ? (unsigned)suite->key_exchange : 0;
+        tls->hash_alg = suite ? (unsigned)suite->MBEDTLS_PRIVATE(mac) : 0;
+        tls->exch_alg = suite ?
+            (unsigned)suite->MBEDTLS_PRIVATE(key_exchange) : 0;
         tls->exch_bits = 0;
         kn_cert_names(peer, tls->subject, sizeof tls->subject,
                       tls->issuer, sizeof tls->issuer);

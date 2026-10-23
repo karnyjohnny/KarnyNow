@@ -79,7 +79,9 @@ def main():
         rc, output = -1, "Skipped because configure failed."
     built = check(rc == 0, "build knvstd only")
     warnings = [line for line in output.splitlines() if "warning:" in line]
-    if IS_WINDOWS:
+    if not built:
+        log("SKIP compiler warning check because knvstd build failed")
+    elif IS_WINDOWS:
         check(not warnings, "zero compiler warnings (%d seen)" % len(warnings))
     else:
         log("POSIX compiler warnings (informational): %d" % len(warnings))
