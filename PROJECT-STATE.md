@@ -58,7 +58,7 @@ measurement instead of guessing (§10.7).
 
 **Latest target T10 (2026-10-23 21:18):** `ALL PASS`, 62/62 harness checks, zero compiler warnings, all 8 unit suites pass, D3D/decode self-tests pass, DNS and TCP/443 pass. TLS findings remain: all three Schannel handshakes fail with `0x80090302` (`SEC_E_UNSUPPORTED_FUNCTION`); `tls.chain` cannot handshake. This run used the default Schannel backend; it does NOT test mbedTLS.
 
-**TLS backend work in this workspace:** added `KN_TLS_BACKEND=mbedtls` as an optional static CMake subproject (mbedTLS 3.6.0), implemented a Win32 Winsock backend with bounded connect/I/O, TLS 1.2 minimum, SNI/hostname verification, `MBEDTLS_SSL_VERIFY_REQUIRED`, and roots imported from current-user/local-machine Windows `ROOT` stores opened read-only. T10 can fetch the fixed mbedTLS/framework source archives and verify SHA-256 when that backend is selected. The backend is NOT target-verified: this sandbox has no MinGW compiler, apt failed with permission denied, and Linux tests only build the POSIX skip implementation. Do not treat the Linux mbedTLS build as evidence that the Win32 code compiles or handshakes.
+**TLS backend work:** added `KN_TLS_BACKEND=mbedtls` as an optional static CMake subproject (mbedTLS 3.6.0), with bounded Win32 Winsock, TLS 1.2 minimum, SNI/hostname verification, `MBEDTLS_SSL_VERIFY_REQUIRED`, and read-only Windows ROOT-store imports. T12 on the target configured successfully and compiled 112/138 objects, then failed in upstream `ssl_tls13_keys.c`: GCC 16's `-Werror=unterminated-string-initialization` rejects mbedTLS's intentional `sizeof(label)-1` TLS label arrays. A CMake exception is now scoped to the `mbedtls` target and that diagnostic only. The Win32 network source has NOT compiled yet; rerun target T12 with this patch before claiming backend build or handshake success.
 
 Gate G0.2 evidence and the settled presentation chain: `docs/analysis/G0.2-T4v4-RESULTS.md`.
 One-line summary: **NV12 `StretchRect` from a DEFAULT-pool surface into the backbuffer
@@ -96,14 +96,14 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | **R28 (new)** | Sandbox GCC 12.2 vs target GCC 16.2 warning drift: T10 round 1 failed on two `-Wformat-truncation` GCC 16 flags that GCC 12 accepted (timestamp formatters). Mitigation: all `snprintf` with time/foreign-string inputs use **explicitly bounded arguments** (modulo/precision), verified at `-O0..-O3`; T10 fails the build on ANY warning so drift can never ship silently. Round IX re-confirmed the discipline (cross `-Werror` caught a 64-bit format promotion in the new d3d code on the first pass). **Round XI third incident:** GCC 16 flagged the new `st_gs_parse` capnote (worst case 284 B > 256 B buffer, sandbox GCC 12 default level silent) — fix verified under `-Wformat-truncation=2` (paranoid level) on BOTH toolchains; that flag level is now the pre-check for any new snprintf aggregation before handover. |
 | **R30 (round X: stable pattern, informational)** | `clock.resolution` variance is NOT transient load: rounds 4+5 both measured Sleep(1) 15.6→**2.75/2.88** ms (verdict `degraded`, threshold 2.6 from round 1's 1.25→1.00) with wall tick pinned at 15600 us **even after timeBeginPeriod(1)** (round 1 saw 1250 us ticks — the machine state changed between rounds, probably a reboot cleared whatever had raised the timer). Consequences: (a) treat **~2.9 ms as the realistic Sleep(1) floor** on this machine — enough for 33.3 ms frame pacing at 30 fps, NOT enough for precise 1 ms spins; (b) wall-clock granularity stays 15.6 ms — timestamps below that resolution are quantised; (c) D9 stands stronger than ever: pacing measures real Present intervals, never assumes. Thresholds unchanged (honest `degraded` beats a fudged `ok`). |
 | **R15 (impl round II)** | **Mostly closed.** T8 on the target resolved all 14 Python packages rc=0 (pip honours Requires-Python, so every pin declares 3.8 support): textual 6.2.1, rich 14.3.4, httpx 0.28.1, httpcore 1.0.9, h11 0.16.0, anyio 4.5.2, + 8 more — `python/requirements.txt` updated, wheels cached on target in `tests\t8_wheels\`. Remaining: offline install + runtime smoke at stage 4 (httpx 0.28 removed `proxies=`; textual 6.x API churn vs old docs). |
-| **R31 (new)** | This sandbox has host GCC 13.3 and can compile the POSIX branch, but has no MinGW/Windows SDK headers. Installing `gcc-mingw-w64-x86-64` failed because apt cannot write `/var/lib/apt/lists/partial` (permission denied). Thus the new mbedTLS Winsock implementation is not cross-compiled here; target T10 is its first Windows compile gate. |
+| **R31 (updated)** | Sandbox has host GCC 13.3 but no MinGW/Windows SDK headers (apt install denied). The target's w64devkit GCC 16.2 exposed an upstream mbedTLS TLS-label warning under `-Werror`; the fix suppresses only that warning on the mbedtls CMake target. Target T12 must confirm that suppression and then compile `kn_net_mbedtls.c`. |
 
 Everything else (R3 usrsctp/DTLS spike, R7 first real `POST v2/session`, R22 31-field
 session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOOTSTRAP §9.
 
 ## Next steps (ordered)
 
-1. **Target-validate mbedTLS with network-only T12.** In cmd/ConEmu run `set KN_TLS_BACKEND=mbedtls` then `python tests\T12_network.py`. It builds only `knvstd`; no GPU/decoder/unit suites. T12 bootstraps the pinned archives and records `tls=mbedtls` in `build.json`. Require `net.tls=ok` for all three hosts and `tls.chain=ok` with depth >= 1 and zero trust/policy flags. Do not advance stage 2 until these pass.
+1. **Retry mbedTLS network-only T12 with the GCC 16 warning fix.** Sync the latest CMake patch to the laptop, then in cmd/ConEmu run `set KN_TLS_BACKEND=mbedtls` and `python tests\T12_network.py`. It builds only `knvstd`; no GPU/decoder/unit suites. First confirm build reaches `kn_net_mbedtls.c` and links. Then require `net.tls=ok` for all three hosts and `tls.chain=ok` with depth >= 1 and zero trust/policy flags. Do not advance stage 2 until these pass.
 2. If the mbedTLS target build or handshake fails, use `T12_wynik.txt` and `t12logs/diag-*.zip`; diagnose this backend only. Do not modify Windows settings or disable certificate verification. Run full T10 after the TLS backend passes or when changes touch non-network build/runtime behavior.
 3. **AU assembler + reorder buffer on `kn_gs`** (round XVI, docs/GS.md
    "Stage-2 TODOs"): VideoAccessUnitAssembler port (GsFrameHeader,
@@ -821,5 +821,19 @@ Validation: T12 POSIX dry-run built knvstd only, all four network probes
 reported skipped, bundle/JSONL checks passed, and verdict was explicitly
 `DRY-RUN ONLY`. It is not a network result. Existing Linux GCC warnings in
 knlog are informational for POSIX T12; the Windows target still gates zero
-warnings. Next action remains target T12 with `KN_TLS_BACKEND=mbedtls`.
+warnings. The user's first mbedTLS target run then exposed the GCC 16
+upstream-label warning; scoped suppression has been added but is not target-
+verified yet. Next action is the same target T12 retry.
 → `tests/T12_network.py` (new), `.gitignore`, `tests/README.md`, this file
+
+### 2026-10-23 · first target T12 mbedTLS compile
+User ran T12 with `KN_TLS_BACKEND=mbedtls`. Archive download/hash checks and
+CMake configure passed. GCC 16.2 failed while compiling upstream
+`third_party/mbedtls/library/ssl_tls13_keys.c` because its intentionally
+non-NUL-terminated label arrays trigger `-Werror=unterminated-string-
+initialization`. Build stopped before `kn_net_mbedtls.c`, so no Win32 app
+backend compile or TLS handshake was tested. Added a CMake suppression only
+to the `mbedtls` target for GCC MinGW >= 16; all other targets/warnings stay
+strict. Sandbox mbedTLS CMake build + ctest 10/10 pass. User should sync this
+patch and rerun only `set KN_TLS_BACKEND=mbedtls` + `python
+tests\T12_network.py`; no need for full T10 on this retry.

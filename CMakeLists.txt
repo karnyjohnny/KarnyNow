@@ -63,6 +63,11 @@ if(KN_TLS_BACKEND STREQUAL "mbedtls")
   set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
   set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
   add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
+  if(MINGW AND CMAKE_C_COMPILER_ID STREQUAL "GNU" AND
+     CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+    target_compile_options(mbedtls PRIVATE
+      -Wno-unterminated-string-initialization)
+  endif()
   target_compile_definitions(kncore PRIVATE KN_TLS_BACKEND_MBEDTLS=1)
   target_sources(kncore PRIVATE streamer/src/kn_net_mbedtls.c)
   target_link_libraries(kncore PUBLIC mbedtls mbedx509 mbedcrypto)
