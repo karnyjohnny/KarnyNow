@@ -13,8 +13,11 @@
 #include <limits.h>
 #include <stdio.h>
 
+#include "kn/knlog.h"
+#include "mbedtls/debug.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
+#include "mbedtls/error.h"
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/ssl_ciphersuites.h"
@@ -22,8 +25,30 @@
 
 #define KN_NET_CONNECT_TIMEOUT_MS 5000
 #define KN_NET_IO_TIMEOUT_MS      10000
+#define KN_MBEDTLS_DEBUG_LEVEL    2
 
 static int g_wsa_refs;
+
+static void kn_mbed_debug(void *ctx, int level, const char *file, int line,
+                          const char *message)
+{
+    char text[256];
+    (void)ctx;
+    if (level > KN_MBEDTLS_DEBUG_LEVEL || !kn_log_is_initialized()) return;
+    snprintf(text, sizeof text, "mbedTLS[%d] %.80s:%d %.150s", level,
+             file ? file : "?", line, message ? message : "");
+    kn_log_simple(KN_CH_DIAG, KN_INFO, NULL, text);
+}
+
+static void kn_mbed_log_error(const char *phase, int error)
+{
+    char text[160], detail[96];
+    if (!kn_log_is_initialized()) return;
+    mbedtls_strerror(error, detail, sizeof detail);
+    snprintf(text, sizeof text, "mbedTLS %s failed: -0x%04x (%s)",
+             phase, (unsigned)(-error) & 0xffffu, detail);
+    kn_log_simple(KN_CH_DIAG, KN_WARN, NULL, text);
+}
 
 static int kn_wsa_begin(void)
 {
@@ -311,6 +336,8 @@ static int kn_tls_session(const char *host, kn_net_tls *tls,
         mbedtls_ssl_conf_authmode(&config, MBEDTLS_SSL_VERIFY_REQUIRED);
         mbedtls_ssl_conf_ca_chain(&config, &roots, NULL);
         mbedtls_ssl_conf_rng(&config, mbedtls_ctr_drbg_random, &drbg);
+        mbedtls_ssl_conf_dbg(&config, kn_mbed_debug, NULL);
+        mbedtls_debug_set_threshold(KN_MBEDTLS_DEBUG_LEVEL);
         mbedtls_ssl_conf_min_tls_version(&config, MBEDTLS_SSL_VERSION_TLS1_2);
         ret = mbedtls_ssl_setup(&ssl, &config);
     }
@@ -330,6 +357,7 @@ static int kn_tls_session(const char *host, kn_net_tls *tls,
         tls->sec_status = ret;
     }
     if (ret != 0) {
+        kn_mbed_log_error("TLS handshake", ret);
         if (tls) tls->rc = -3;
         if (chain) chain->rc = -3;
         ret = -3;
@@ -339,6 +367,7 @@ static int kn_tls_session(const char *host, kn_net_tls *tls,
     peer = mbedtls_ssl_get_peer_cert(&ssl);
     if (!peer || mbedtls_ssl_get_verify_result(&ssl) != 0) {
         ret = MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+        kn_mbed_log_error("certificate verification", ret);
         if (tls) { tls->rc = -3; tls->sec_status = ret; }
         if (chain) { chain->rc = -3; chain->sec_status = ret; }
         ret = -3;
@@ -368,6 +397,7 @@ static int kn_tls_session(const char *host, kn_net_tls *tls,
     ret = 0;
 
 cleanup_tls:
+    mbedtls_debug_set_threshold(0);
     mbedtls_ssl_free(&ssl);
     mbedtls_ssl_config_free(&config);
     mbedtls_x509_crt_free(&roots);
