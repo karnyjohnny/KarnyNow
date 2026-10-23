@@ -1,0 +1,164 @@
+Start testing: Oct 23 18:32 UTC
+----------------------------------------------------------
+1/10 Testing: test_knlog
+1/10 Test: test_knlog
+Command: "/workspaces/KarnyNow/build-sandbox/test_knlog"
+Directory: /workspaces/KarnyNow/build-sandbox
+"test_knlog" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+test_knlog: 105 checks, 0 failures -> PASS
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"test_knlog" end time: Oct 23 18:32 UTC
+"test_knlog" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/10 Testing: test_knring
+2/10 Test: test_knring
+Command: "/workspaces/KarnyNow/build-sandbox/test_knring"
+Directory: /workspaces/KarnyNow/build-sandbox
+"test_knring" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+test_knring: 34 checks, 0 failures -> PASS
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_knring" end time: Oct 23 18:32 UTC
+"test_knring" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/10 Testing: test_knfec
+3/10 Test: test_knfec
+Command: "/workspaces/KarnyNow/build-sandbox/test_knfec"
+Directory: /workspaces/KarnyNow/build-sandbox
+"test_knfec" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+  property round-trips executed: 200/200
+test_knfec: 125 checks, 0 failures -> PASS
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_knfec" end time: Oct 23 18:32 UTC
+"test_knfec" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/10 Testing: test_knsrtp
+4/10 Test: test_knsrtp
+Command: "/workspaces/KarnyNow/build-sandbox/test_knsrtp"
+Directory: /workspaces/KarnyNow/build-sandbox
+"test_knsrtp" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+test_knsrtp: 77 checks, 0 failures -> PASS
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"test_knsrtp" end time: Oct 23 18:32 UTC
+"test_knsrtp" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/10 Testing: test_kndiag
+5/10 Test: test_kndiag
+Command: "/workspaces/KarnyNow/build-sandbox/test_kndiag"
+Directory: /workspaces/KarnyNow/build-sandbox
+"test_kndiag" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+test_kndiag: 109 checks, 0 failures -> PASS
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"test_kndiag" end time: Oct 23 18:32 UTC
+"test_kndiag" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/10 Testing: test_knselftest
+6/10 Test: test_knselftest
+Command: "/workspaces/KarnyNow/build-sandbox/test_knselftest"
+Directory: /workspaces/KarnyNow/build-sandbox
+"test_knselftest" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+test_knselftest: 97 checks, 0 failures -> PASS
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"test_knselftest" end time: Oct 23 18:32 UTC
+"test_knselftest" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/10 Testing: test_kngs
+7/10 Test: test_kngs
+Command: "/workspaces/KarnyNow/build-sandbox/test_kngs"
+Directory: /workspaces/KarnyNow/build-sandbox
+"test_kngs" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+test_kngs: 105 checks, 0 failures -> PASS
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_kngs" end time: Oct 23 18:32 UTC
+"test_kngs" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/10 Testing: test_knaudio
+8/10 Test: test_knaudio
+Command: "/workspaces/KarnyNow/build-sandbox/test_knaudio"
+Directory: /workspaces/KarnyNow/build-sandbox
+"test_knaudio" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+test_knaudio: 22 checks, 0 failures -> PASS
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_knaudio" end time: Oct 23 18:32 UTC
+"test_knaudio" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/10 Testing: knvstd_selftest_fec
+9/10 Test: knvstd_selftest_fec
+Command: "/workspaces/KarnyNow/build-sandbox/knvstd" "--selftest=fec.vectors" "--log-dir=knvstd_testlogs"
+Directory: /workspaces/KarnyNow/build-sandbox
+"knvstd_selftest_fec" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+{"generated_utc":"2026-10-23T18:32:16.697Z","count":1,"results":[{"name":"fec.vectors","status":"ok","ms":1,"checks":88,"failures":0,"reason":"all 88 known-answer checks passed","evidence":{"checks":88,"failures":0,"first_failure":"","vectors":"knfec_kat_vectors.h (tools/fec_reference.py)"}}],"truncated":false}
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"knvstd_selftest_fec" end time: Oct 23 18:32 UTC
+"knvstd_selftest_fec" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/10 Testing: knvstd_selftest_list
+10/10 Test: knvstd_selftest_list
+Command: "/workspaces/KarnyNow/build-sandbox/knvstd" "--list-selftests"
+Directory: /workspaces/KarnyNow/build-sandbox
+"knvstd_selftest_list" start time: Oct 23 18:32 UTC
+Output:
+----------------------------------------------------------
+{"selftests":["fec.vectors","srtp.vectors","clock.resolution","console.host","d3d.formats","d3d.present","decode.synthetic","gs.parse","net.dns","net.tcp443","net.tls","tls.chain"],"count":12}
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"knvstd_selftest_list" end time: Oct 23 18:32 UTC
+"knvstd_selftest_list" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 23 18:32 UTC

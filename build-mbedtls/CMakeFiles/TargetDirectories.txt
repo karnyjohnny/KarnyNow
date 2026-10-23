@@ -1,0 +1,13 @@
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/kncore.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/test_knlog.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/test_knring.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/test_knfec.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/test_knsrtp.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/test_kndiag.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/test_knselftest.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/test_kngs.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/test_knaudio.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/knvstd.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/test.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/edit_cache.dir
+/workspaces/KarnyNow/build-mbedtls/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,11 @@
+test_knlog 2 0.0324136
+test_knring 2 0.000963059
+test_knfec 2 0.00222368
+test_knsrtp 2 0.00596891
+test_kndiag 2 0.0173387
+test_knselftest 2 0.00348412
+test_kngs 2 0.00127972
+test_knaudio 2 0.00177223
+knvstd_selftest_fec 2 0.00554458
+knvstd_selftest_list 2 0.000790606
+---

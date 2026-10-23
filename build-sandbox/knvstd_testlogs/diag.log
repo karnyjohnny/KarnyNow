@@ -1,0 +1,2 @@
+2026-10-23T18:31:58.930Z INFO  [diag] selftest_result name=fec.vectors status=ok ms=0 checks=88 failures=0 reason="all 88 known-answer checks passed"
+2026-10-23T18:32:16.697Z INFO  [diag] selftest_result name=fec.vectors status=ok ms=1 checks=88 failures=0 reason="all 88 known-answer checks passed"

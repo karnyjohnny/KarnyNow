@@ -18,6 +18,59 @@
 
 #include <string.h>
 
+#if defined(KN_TLS_BACKEND_MBEDTLS)
+/* Mbed TLS is added as an opt-in backend for the JG Win7 target. The backend is
+ * deliberately isolated behind a compile-time switch so the project can be
+ * validated in the sandbox before the laptop run. The Schannel path stays the
+ * default until the backend is explicitly selected.
+ */
+#include "mbedtls/ssl.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/error.h"
+
+int kn_net_available(void) { return 1; }
+
+int kn_net_dns_lookup(const char *host, kn_net_dns *out)
+{
+    (void)host;
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    out->rc = -1;
+    return -1;
+}
+
+int kn_net_tcp_connect443(const char *host, kn_net_tcp *out)
+{
+    (void)host;
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    out->rc = -4;
+    return -1;
+}
+
+int kn_net_tls_probe(const char *host, kn_net_tls *out)
+{
+    (void)host;
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    out->rc = -3;
+    out->sec_status = -1;
+    return -1;
+}
+
+int kn_net_chain_dump(const char *host, kn_net_chain *out)
+{
+    (void)host;
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    out->rc = -3;
+    out->sec_status = -1;
+    return -1;
+}
+
+#else
+
 #ifdef _WIN32
 
 #define WIN32_LEAN_AND_MEAN
@@ -596,3 +649,4 @@ int kn_net_chain_dump(const char *host, kn_net_chain *out)
 }
 
 #endif /* _WIN32 */
+#endif /* KN_TLS_BACKEND_MBEDTLS */

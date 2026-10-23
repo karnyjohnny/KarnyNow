@@ -46,6 +46,21 @@ add_library(kncore STATIC
   third_party/tiny-aes-c/aes.c
   third_party/crypto-algorithms-sha1/sha1.c
 )
+set(KN_TLS_BACKEND "schannel" CACHE STRING "TLS backend: schannel or mbedtls")
+set_property(CACHE KN_TLS_BACKEND PROPERTY STRINGS schannel mbedtls)
+if(KN_TLS_BACKEND STREQUAL "mbedtls")
+  add_compile_definitions(KN_TLS_BACKEND_MBEDTLS=1)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/build/library/libmbedtls.a")
+    target_include_directories(kncore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include")
+    target_link_directories(kncore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/build/library")
+    target_link_libraries(kncore INTERFACE mbedtls mbedx509 mbedcrypto)
+  else()
+    message(FATAL_ERROR
+      "KN_TLS_BACKEND=mbedtls requires static mbedTLS under third_party/mbedtls/build/library; "
+      "build it first with tools/prepare_mbedtls_sandbox.sh or by configuring mbedTLS with static libs.")
+  endif()
+endif()
+
 target_include_directories(kncore PUBLIC streamer/include)
 # System libraries every consumer of the self-test core needs on Windows:
 #   d3d9  — kn_d3d (D7 probes, R25 milestone 0); d3d9.dll is OS-built-in on

@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/test_knfec.dir/streamer/tests/test_knfec.c.o -o test_knfec  libkncore.a -lpthread -lm 

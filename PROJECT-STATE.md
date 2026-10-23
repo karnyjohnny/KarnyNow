@@ -60,6 +60,8 @@ measurement instead of guessing (§10.7).
 | **1 — C skeleton offline + logging subsystem** | **Self-test registry phase A+B COMPLETE and target-verified (T10 round 7: ALL PASS 40/40 — the verification chapter is CLOSED: 7 unit suites green, 8 real self-tests incl. gs.parse 78 checks in the shipped binary, 4 honest phase-C stubs, d3d.present reproduced milestone 0 a second time: pitch 1536, present mean 0.30 ms). STAGE-1 VIDEO LOOP DELIVERED (round XII, sandbox-verified, awaiting target): `knvstd --loopback[=FILE.264] [--loopback-seconds=N]` — decode → paced 30 fps (absolute QPC deadlines, Sleep+spin per R30) → per-row copy into locked DEFAULT NV12 (pitch 1536 ≠ stride 1280) → StretchRect(LINEAR) → letterboxed window → §7.6 perf event every 1000 ms into perf.jsonl (CPU % of ALL cores per §6.1, per-interval deltas, net fields honest zeros). Presenter `kn_d3d_vp_*`: pre-fault at open (first-touch ~28 ms), VEH guard on every CPU write → D7 permanent-degrade latch, device-lost/ESC → graceful stop. New `kn_perf` (K32 counters via PSAPI_VERSION 2 — no psapi.dll import). New asset `streamer/assets/synthetic720.264` (High@5.1 VERIFIED at the SPS byte; landmine: `-preset ultrafast` silently downgrades to Constrained Baseline). New gate `tests/T11_loopback_g1.py` = G1-VIDEO: 10 evidence-computed criteria (30 fps steady, CPU ≤ 45 % all-cores, RSS drift ≤ +4 MiB, late ≤ 0.2 %, perf lines ≥ 95 %, DPST 0, logs WARN/ERROR-free, bundle contains perf.jsonl). Failure → `kn_log_on_failure` → §7.7 amplification + auto-bundle; relevance mapping catches `loopback`. Design: `docs/LOOPBACK.md`. **ROUND XIV COMPLETED THE STAGE-1 DELIVERABLES: WASAPI synthetic PCM (`kn_audio`, docs/AUDIO.md)** — audio opens with the presenter (open failure never kills video; §7.7 amplification + honest summary), `queue_audio_ms` is real device padding, 8th suite `test_knaudio` (22 checks, portable neutral half), T11 now gates FULL G1 (video+audio). G1-VIDEO already PASSED on target (round XIII: T11 600 s 20/20 — fps 30.000, late 0, CPU 13.0 %; overlay confirmed live in the round-XIII re-run: T10 40/40 + T11 quick 20/20 with F5 overlay working). **G1 CLOSED ON TARGET (round XV evidence): T10 round 10 ALL PASS 40/40 + T11 FULL = **G1 PASS 25/25** — fps_mean 30.000, frames_late 2/18 001, CPU 13.3 % all-cores (max-second 51.6 = clip-restart spikes), RSS 22.5→19.8 MB (peak 26.2, drift +2 607 kB), 601 perf lines (600/601 in [27,33]), DPST 0, logs WARN/ERROR-free, bundle 686 kB with perf.jsonl; AUDIO: opened **44100 Hz 2ch float32** (the machine's real mix format — the parser negotiated it, not us), 59 060 events, frames_written 26 462 842 = 100.006 % of realtime, **starved 0**, timeouts 0, buffer_errors 0, queue_audio_ms alive 601/601. **STAGE 1 IS DONE. STAGE 2 OPENED.** Round-XIV omission found+fixed: T10 built test_knaudio.exe but never RAN it (missing from the suites list) — added (round 11 expects 41 checks incl. test_knaudio -> PASS). **Round XV DELIVERED phase C: `kn_net` (schannel/winsock) + the four net self-tests — the §7.9 registry now has ZERO stubs (12/12 implemented).** net.dns/net.tcp443/net.tls/tls.chain probe login.nvidia.com + prod.cloudmatchbeta.nvidiagrid.net with a non-NVIDIA baseline per layer (DNS: stun.l.google.com; TCP/TLS: www.cloudflare.com) so "NVIDIA unreachable" is separable from "no network". TLS = schannel (the stage-2 client's real future stack), verification ALWAYS ON (dwFlags=0 + SNI; a failed handshake is the measurement, never bypassed), stock protocol defaults (grbitEnabledProtocols=0 — the Win7 TLS-1.2 reality is the question). T10 gating policy: dns+tcp443 gated ok/degraded (FAILED = stage-2 blocker → red on purpose), net.tls+tls.chain REPORTED (a Win7 TLS failure is a finding to analyse, not a client bug). Chain details (depth ≤6, per-element subject/issuer/dates/trust + SSL policy verdict) go to diag.log INFO + evidence summary. NEVER YET EXECUTED — round 11 on the target is the first run and a stage-2 planning input. Design/landmines: docs/NET.md. AU assembler stays queued for round XVI. |
 | 2–5 | not started (stage-2 seeds shipped and target-verified: `kn_gs`, `knsrtp` ph1+2, `knfec`) |
 
+**2026-10-23 network T10 run:** build, unit suites, and self-tests are green on the target: `cmake` configure/build rc=0, zero warnings, all 8 unit suites pass, `knvstd --selftest=all` returns exit 0, `d3d.present` milestone 0 passes again, and the diagnostic bundle is produced successfully. The only measured failure is the OS-level TLS probe: `net.dns` and `net.tcp443` are OK, while `net.tls` and `tls.chain` fail on Win7/Schannel across all configs. This is treated as stage-2 network-planning input, not as a client-side code regression.
+
 Gate G0.2 evidence and the settled presentation chain: `docs/analysis/G0.2-T4v4-RESULTS.md`.
 One-line summary: **NV12 `StretchRect` from a DEFAULT-pool surface into the backbuffer
 works (S_OK, 3.0 ms incl. Present); SYSTEMMEM NV12 fill crashes the driver (0xC0000005,
@@ -103,24 +105,10 @@ session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOO
 
 ## Next steps (ordered)
 
-1. **USER ACTION — T10 round 11** (8 suites now RUN — round 10 built
-   test_knaudio but the suites list missed it, fixed; expected ALL PASS
-   41/41) **and it now executes the phase-C network self-tests** (they
-   leave the stub state in this round):
-   ```bat
-   cd /d "%USERPROFILE%\Desktop\NewKarnyNow\tests"
-   python T10_build_and_test.py
-   ```
-   net.dns/net.tcp443/net.tls/tls.chain run ON THE TARGET against the real
-   endpoints (login.nvidia.com, prod.cloudmatchbeta.nvidiagrid.net, +
-   a non-NVIDIA baseline) — needs internet, ~30 s extra. Their statuses
-   are MEASUREMENTS: net.tls `failed` on Win7 is a stage-2 finding to
-   analyse (TLS version / cert store), not automatically a client bug —
-   T10 gates dns/tcp443 on ok|degraded but only REPORTS net.tls/tls.chain.
-   Send back `T10_wynik.txt` + `T10_skrot.txt`.
+1. **T10 network result is now in hand**: the 2026-10-23 run is a clean build + self-test pass, with the single stage-2 finding being Win7/Schannel TLS failure (`net.tls`, `tls.chain`) while `net.dns` and `net.tcp443` are OK. The evidence is the input for the network plan, not a regression in the C code.
 2. **Analyse the phase-C results → stage-2 network plan** (schannel TLS
-   version reality on this Win7, cert-chain gaps, endpoint reachability;
-   feeds R7 and the WSS+RTSP client design).
+   version reality on this Win7, cert-chain gaps, endpoint reachability,
+   OS servicing / cipher policy, and the exact WSS+RTSP client design).
 3. **AU assembler + reorder buffer on `kn_gs`** (round XVI, docs/GS.md
    "Stage-2 TODOs"): VideoAccessUnitAssembler port (GsFrameHeader,
    expected_access_unit_length, AU caps), reorder + continuity +
@@ -204,6 +192,9 @@ Maps onto the user's repo `C:\Users\KarnyJohnny\Desktop\NewKarnyNow\`.
   boundary).
 
 ## Session log (implementation)
+
+### 2026-10-23 · impl round XV (T10 network run)
+The target T10 run completed with a clean build and a green self-test set: configure/build rc=0, zero warnings, 8 unit suites passed, `knvstd --selftest=all` exit 0, `d3d.present` milestone 0 passed, and the diagnostic bundle was generated. The sole environment-level finding was `net.tls` and `tls.chain` failing on Win7/Schannel across all tested configs (`0x80090302` / `0x80090326`, alert `2/70`), while `net.dns` and `net.tcp443` remained OK. Interpretation: stage-2 network/input issue (Win7 TLS stack, service pack / cipher policy / cert chain), not a build regression.
 
 ### 2026-10-21 · impl round I
 Received T4 v4 results (`T4_wynik.json` complete this time — writer fix proven) and the

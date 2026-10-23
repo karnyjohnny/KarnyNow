@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/test_knaudio.dir/streamer/tests/test_knaudio.c.o -o test_knaudio  libkncore.a -lpthread -lm 

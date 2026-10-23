@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/test_kndiag.dir/streamer/tests/test_kndiag.c.o -o test_kndiag   -L/workspaces/KarnyNow/third_party/mbedtls/build/library  -Wl,-rpath,/workspaces/KarnyNow/third_party/mbedtls/build/library libkncore.a -lpthread -lmbedtls -lmbedx509 -lmbedcrypto -lm 
