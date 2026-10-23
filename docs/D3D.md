@@ -1,9 +1,13 @@
 # D3D9 presentation probes (`kn_d3d`) — implementation notes
 
-Status: **IMPLEMENTED, sandbox-verified (native 454 checks + cross `-Werror`
-x64/i686 + ctest 8/8 + T10 POSIX dry-run ALL PASS 31). NOT YET RUN ON THE
-TARGET** — the authoritative execution is T10 round 5 on the Win7 machine
-(the sandbox has no D3D9 runtime; only compile + link evidence exists here).
+Status: **VERIFIED ON THE TARGET (T10 round 5, 2026-10-23, Win7 x64, GCC
+16.2.0): `d3d.formats` ok (10 checks) + `d3d.present` ok (11 checks,
+30/30 iterations) — R25 MILESTONE 0 PASSED, R25 CLOSED.** Sandbox gates
+before the run: native suites PASS, cross `-Werror` x64+i686 clean, ctest
+8/8, T10 POSIX dry-run ALL PASS. Target evidence (round 5) is summarized in
+the section "Target evidence" below; raw files in `artifacts/T10-round5/`
+(workspace) and the committed `t10logs/` bundle
+`diag-20261023T063643Z-1e10db8e.zip`.
 
 Scope v0 (phase B of §7.9): the two capability probes behind the
 `d3d.formats` and `d3d.present` self-tests. Stage 1's `--loopback` presenter
@@ -87,6 +91,64 @@ keywords** — so the marker here is:
 
 State crossing the setjmp/longjmp boundary is static or struct-borne (no
 clobbered locals — `-Wclobbered`-clean at `-O0..-O3` on both arches).
+
+## Target evidence (T10 round 5, 2026-10-23, E5500 + Intel 8086:2a42)
+
+`d3d.formats` (ok, 115 ms, 10 checks) — every value matches G0.2 exactly:
+
+| Field | Round-5 value | G0.2 expectation |
+|---|---|---|
+| adapter / driver | `8086:2a42`, `0x0008000f000a0b35` (8.15.10.2869) | match |
+| mode / backbuffer | `1280x800@60`, X8R8G8B8, 16 modes, 60 Hz-at-res: 1 | match |
+| CheckDeviceFormat | nv12/yuy2/uyvy/x8/a8/r5g6 all OK, x1r5g5b5 refused | match §2.2 |
+| conversions | nv12→bb OK, yuy2→bb OK, x8→bb OK, bb→nv12 refused | match §2.3 |
+| `srf_caps` | `0x03000300` (LINEAR+POINT, min+mag) | match §2.1 |
+| CreateDevice | **HWVP `0x0` AND SWVP `0x0`** | **CORRECTION — see below** |
+
+> **Correction to G0.2 §2.1** ("SOFTWARE_VERTEXPROCESSING fails with
+> E_FAIL"): T4's `main()` only attempted SWVP as a fallback when HWVP
+> FAILED — on this machine HWVP succeeded, so the SWVP attempt never ran
+> and the reported `E_FAIL` was the variable's init value. The round-5
+> probe attempts both sequentially (each device released before the next):
+> **both return S_OK**. Production rule is unchanged (HAL + HWVP — D7;
+> SWVP would move vertex work to the 2-core CPU), but the "SWVP is
+> broken on this driver" belief is dead.
+
+`d3d.present` (ok, 176-189 ms, 11 checks, standalone AND in-`--all`):
+
+| Field | Standalone | In `--selftest=all` |
+|---|---|---|
+| iterations | 30/30 | 30/30 |
+| **pitch (1280×720 NV12 DEFAULT)** | **1536** | **1536** |
+| fill mean / **max** | 2.13 ms / **28.36 ms** | 2.13 ms / **28.65 ms** |
+| StretchRect+Present mean / max | 0.43 / 5.86 ms | 0.28 / 4.98 ms |
+| read-back mismatches | 0 | 0 |
+| bytes per fill | 1 658 880 (= 1536×720×1.5) | same |
+| every HRESULT / VEH / latch | 0x0 / 0x0 / false | same |
+
+**New hard facts for stage 1 (both were invisible until now):**
+
+1. **Pitch ≠ width.** 1280×720 NV12 DEFAULT locks with **pitch 1536**
+   (1280+256; T4 measured pitch==width at 960×540 and 1280×800, so the
+   driver's alignment depends on dimensions in a way we cannot predict —
+   never assume, always read `D3DLOCKED_RECT.Pitch`). Consequence: the
+   loopback path copies decoded NV12 into the locked surface **per row**
+   (`min(kn_decode stride, surface pitch)` bytes × height, Y plane and UV
+   plane separately) — a whole-buffer memcpy is WRONG. The milestone fill
+   passed 30/30 precisely because it honoured 1536.
+2. **First-touch cost.** `fill_max ≈ 28 ms` on the FIRST iteration (mean
+   2.13) — first CPU touch of freshly created stolen UMA memory pays
+   page-fault/zeroing cost. Stage 1 must **pre-fault the surface** (one
+   throwaway fill+present during setup, before the paced loop) or eat a
+   dropped frame at stream start.
+3. Presentation is even cheaper than G0.2 measured: 0.28-0.43 ms mean for
+   the 1:1 720p→(0,40,1280,760) letterbox (G0.2's 3.0 ms was a SCALED
+   960×540→fullscreen stretch; max ~5-6 ms occasional). The 30 fps budget
+   (33.3 ms) has ~10× headroom for the GPU side.
+4. The VEH guard armed and disarmed cleanly twice per T10 run and never
+   fired (no AV) — the happy path is proven; the catch path itself remains
+   UNVERIFIED (cannot be provoked without risking the driver; it stays
+   labelled as such — R29 note).
 
 ## Probe design
 

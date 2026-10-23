@@ -5,8 +5,8 @@ verification on the TARGET machine (Windows 7, w64devkit toolchain).
 Successor to T9: same build+test gate, extended with the new deliverables
 (BOOTSTRAP §7.8/§7.9):
   1. cmake configure + ninja build (zero warnings expected)
-  2. seven unit-test binaries: knlog knring knfec knsrtp kndiag knselftest
-     kngs
+  2. eight unit-test binaries: knlog knring knfec knsrtp kndiag knselftest
+     kngs knaudio
   3. knvstd --list-selftests / --selftest=all  (REAL Win32 execution of
      clock.resolution, console.host, d3d.formats, d3d.present and
      decode.synthetic — the sandbox can only compile them). d3d.present
@@ -170,7 +170,7 @@ def main():
     # ---- 2. unit tests ------------------------------------------------
     log("\n=== unit tests (on target) ===")
     suites = ["test_knlog", "test_knring", "test_knfec", "test_knsrtp",
-              "test_kndiag", "test_knselftest", "test_kngs"]
+              "test_kndiag", "test_knselftest", "test_kngs", "test_knaudio"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out
@@ -268,14 +268,35 @@ def main():
             if r:
                 check(r["status"] in ("ok", "degraded"), results,
                       "console.host not failed (D1): %s" % r["status"])
-        # phase C stubs report skipped honestly (4 permanent stubs left:
-        # the net/tls names; decode.synthetic joins them only when the build
-        # lacks FFmpeg — its clip is embedded)
+        # phase C net probes: REAL measurements on the target, skipped on a
+        # POSIX dry-run. Gating policy: dns + tcp443 must be ok/degraded on
+        # a networked machine (FAILED there = stage-2 blocker -> red T10 on
+        # purpose); net.tls / tls.chain are REPORTED (their failure is a
+        # Win7-TLS FINDING to analyse, not automatically a client bug).
+        for nm in ("net.dns", "net.tcp443", "net.tls", "tls.chain"):
+            r = by_name.get(nm)
+            if IS_WINDOWS:
+                check(r and r["status"] != "skipped", results,
+                      "%s executed on Win32 (status=%s)" %
+                      (nm, r["status"] if r else "absent"))
+                if r:
+                    log("  %s reason: %s" % (nm, r["reason"]))
+                if nm in ("net.dns", "net.tcp443"):
+                    check(r and r["status"] in ("ok", "degraded"), results,
+                          "%s usable verdict: %s" %
+                          (nm, r["status"] if r else "absent"))
+            else:
+                check(r and r["status"] == "skipped", results,
+                      "%s skipped on posix host dry-run" % nm)
+        # the registry has NO stubs left (round XV); decode.synthetic joins
+        # the skipped list only when the build lacks FFmpeg
         skipped = [nm for nm, r in by_name.items() if r["status"] == "skipped"]
-        min_skipped = 4 if have_ffmpeg else 5
-        check(len(skipped) >= min_skipped, results,
-              "phase B/C stubs honestly skipped (%d, min %d)" %
-              (len(skipped), min_skipped))
+        min_skipped = 0 if have_ffmpeg else 1
+        max_skipped = 0 if (have_ffmpeg and IS_WINDOWS) else (
+            4 if not IS_WINDOWS else 1)
+        check(min_skipped <= len(skipped) <= (max_skipped if IS_WINDOWS else 9),
+              results, "no stubs left: %d skipped (platform/ffmpeg only)" %
+              len(skipped))
         # decode.synthetic must REALLY run when we built with FFmpeg — and
         # since the parser-flush fix (T10 round 4: 59/60) it must be OK:
         # 60/60 frames from the embedded clip.

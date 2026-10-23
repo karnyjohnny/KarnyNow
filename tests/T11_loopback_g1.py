@@ -12,6 +12,11 @@ G1 criteria (BOOTSTRAP §12 stage 1) FROM THE EVIDENCE:
   * bundle complete        — post-run --diagnostics + zipfile validation
   * no network involved    — the mode is loopback by construction
   * no WARN/ERROR anywhere in t11logs/*.log
+  * audio alive            — WASAPI opened, frames_written ~ realtime,
+                             starved/timeouts/buffer_errors near zero,
+                             queue_audio_ms alive in >= 80% of perf lines
+                             (stage-1 "Plus WASAPI with synthetic PCM" —
+                             this makes the verdict FULL G1, not G1-video)
 
 Prerequisite: T10 has built build\\knvstd.exe (T11 does NOT build; run T10
 first after syncing). The WASAPI half of stage 1 is NOT gated here yet —
@@ -149,7 +154,7 @@ def main(argv):
               "cpu_process_pct_mean", "cpu_process_pct_max", "rss_kb_first",
               "rss_kb_last", "rss_kb_peak", "refresh_hz_initial",
               "refresh_hz_last", "dpst_change_detected", "perf_lines",
-              "vp_rc", "decode_rc", "fault"):
+              "vp_rc", "decode_rc", "fault", "audio"):
         log("  %-24s %s" % (k, summary.get(k)))
 
     check(summary.get("budget_valid") is True and
@@ -166,6 +171,24 @@ def main(argv):
     check(cpu_mean <= 45.0, results,
           "CPU within budget: %.1f%% of all cores <= 45%% (§6.1: decode+NV12 "
           "alone = 28.9%%)" % cpu_mean)
+
+    # ---- audio (WASAPI synthetic PCM — completes stage 1 => FULL G1) ----
+    aud = summary.get("audio") or {}
+    check(aud.get("opened") is True, results,
+          "audio opened (WASAPI, mix format: %s)" % aud.get("format"))
+    if aud.get("opened"):
+        starved = int(aud.get("starved", -1))
+        timeouts = int(aud.get("wait_timeouts", -1))
+        buf_err = int(aud.get("buffer_errors", -1))
+        check(starved <= 5, results,
+              "audio starved %d <= 5 (no audible gaps)" % starved)
+        check(timeouts <= 5 and buf_err <= 5, results,
+              "audio engine healthy (timeouts=%d, buffer_errors=%d)" %
+              (timeouts, buf_err))
+        fw = int(aud.get("frames_written", 0))
+        ef = int(aud.get("expected_frames", 0))
+        check(ef > 0 and fw >= ef * 0.95, results,
+              "audio frames_written %d >= 95%% of realtime %d" % (fw, ef))
 
     # ---- perf.jsonl ------------------------------------------------------
     log("\n--- perf.jsonl analysis ---")
@@ -208,6 +231,11 @@ def main(argv):
         dpst = [f for f in perf if int(f.get("dpst_change_detected") or 0)]
         check(not dpst, results,
               "no DPST refresh change during the run (%d flags)" % len(dpst))
+        q = [int(f.get("queue_audio_ms") or 0) for f in perf]
+        q_alive = sum(1 for x in q if x > 0)
+        check(q_alive >= len(q) * 0.8, results,
+              "queue_audio_ms alive (>0) in %d/%d perf lines" %
+              (q_alive, len(q)))
         cpu_max_line = max(float(f.get("cpu_process_pct") or 0.0)
                            for f in perf)
         log("  cpu_process_pct: max single second %.1f%%" % cpu_max_line)
@@ -290,7 +318,8 @@ def _write(results, summary, seconds):
         for f in failed:
             log("  FAILED: " + f)
     else:
-        log("T11 VERDICT: G1-VIDEO PASS (%d checks, %s s)" %
+        log("T11 VERDICT: G1 PASS (%d checks, %s s) — stage 1 offline gate "
+            "(video + synthetic audio, no network)" %
             (len(results), seconds if seconds else "?"))
     with open(WYNIK, "w", encoding="utf-8") as f:
         f.write("\n".join(OUT) + "\n")
@@ -299,7 +328,7 @@ def _write(results, summary, seconds):
         if not IS_WINDOWS:
             f.write("VERDICT: SKIPPED (posix)\n")
         else:
-            f.write("VERDICT: %s\n" % ("G1-VIDEO PASS" if not failed else
+            f.write("VERDICT: %s\n" % ("G1 PASS" if not failed else
                                        "FAIL (%d)" % len(failed)))
         f.write("checks: %d total, %d failed\n" % (len(results), len(failed)))
         for ok, label in results:

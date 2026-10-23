@@ -1,9 +1,142 @@
-# INTEGRATION NOTES — Round IX delta, rev 4 (decode flush fix + kn_d3d phase-B probes)
+# INTEGRATION NOTES — Round XV delta, rev 8 (G1 CLOSED + phase-C network probes — registry 12/12)
 
-> **Rev 4 supersedes rev 1-3.** The canonical integration document remains
+> **Rev 8 supersedes rev 1-7.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/NET.md`** (endpoints, schannel flow, verdict
+> table, T10 gating policy, landmines).
+>
+> **G1 PASSED ON THE TARGET (T11 full 25/25, T10 r10 40/40) — STAGE 1 IS
+> CLOSED.** Round XV opens stage 2 with its diagnostic floor:
+> 1. **NEW module `kn_net`** + the four phase-C self-tests (net.dns,
+>    net.tcp443, net.tls, tls.chain) — REAL measurements on the target
+>    against login.nvidia.com + prod.cloudmatchbeta.nvidiagrid.net with
+>    non-NVIDIA baselines; schannel TLS with verification ALWAYS ON;
+>    the §7.9 registry now has **ZERO stubs (12/12 implemented)**.
+> 2. **T10**: 8 suites RUN (round-XIV omission fixed: test_knaudio was
+>    built but never executed), net-probe gating policy (dns/tcp gated,
+>    tls/chain reported), stub-count check replaced by "no stubs left".
+>    Round 11 needs internet at the target and takes ~30 s extra.
+> 3. New PE imports: ws2_32/secur32/crypt32 (OS-built-in).
+>
+> **Rev 7 (still current):** kn_audio WASAPI synthetic PCM + full-G1 T11.
+
+# (older) Round XIV delta, rev 7 (WASAPI synthetic PCM — STAGE 1 CODE-COMPLETE)
+
+> **Rev 7 supersedes rev 1-6.** Canonical state: `PROJECT-STATE.md`.
+> Design record for this delta: **`docs/AUDIO.md`** (WASAPI engine
+> pattern, COBJMACROS/INITGUID/Start-before-thread landmines, stage-2
+> audio TODOs).
+>
+> **Rev 7 headline changes** (after target confirmations: T10 r9 40/40,
+> T11-overlay quick G1-VIDEO 20/20 — "działa idealnie"):
+> 1. **NEW module `kn_audio`** (`streamer/{include/kn,src}/kn_audio.*`):
+>    WASAPI shared-mode event-driven render at the device mix format
+>    (float32/s16/s32), dedicated refill thread, soft 440 Hz tone or
+>    silence, honest counters (events/frames/starved/timeouts/
+>    buffer_errors/queue_ms). Portable half (WAVEFORMATEX byte parser +
+>    phase-continuous generator) host-tested by the **8th suite
+>    `test_knaudio`** (22 checks). Only new PE import: ole32.dll.
+> 2. **`--loopback` grew audio**: opens with the presenter; failure never
+>    kills video (§7.7 amplification + summary `"audio"` block);
+>    `queue_audio_ms` in perf.jsonl is now real; `--no-audio` for debug.
+> 3. **`tests/T11_loopback_g1.py` is now the FULL G1 gate** (+5 audio
+>    checks; verdict renamed "G1 PASS"). G1-VIDEO already passed twice on
+>    the target — the next full T11 is the stage-1 verdict.
+> 4. Build wiring: `kn_audio.c` in kncore (CMake INTERFACE: WIN32
+>    `d3d9 winmm ole32`, POSIX `m`), 8 suites in both shell gates,
+>    test_knaudio cross-links knlog (the engine logs).
+>
+> **Rev 6/6b (still current):** stage-1 video loopback + T11 + D20 FPS
+> overlay (F5); 720p High@5.1 asset (ultrafast-downgrade landmine).
+
+# (older) Round XII delta, rev 6 (stage-1 video loopback + T11 G1-video gate)
+
+> **Rev 6 supersedes rev 1-5.** Canonical state: `PROJECT-STATE.md`.
+> Design record for this delta: **`docs/LOOPBACK.md`** (architecture,
+> measured-facts table, §7.6 conventions, failure policy, T11 criteria,
+> the 720p asset recipe + the x264 ultrafast-downgrade landmine).
+>
+> **Rev 6 headline changes** (after T10 round 7 = ALL PASS 40/40, which
+> closed the whole §7.9 phase-A+B verification chapter):
+> 1. **`knvstd --loopback[=FILE.264] [--loopback-seconds=N]`** — the
+>    stage-1 video path: decode → paced 30 fps → per-row copy into locked
+>    DEFAULT NV12 → StretchRect(LINEAR) → letterboxed window → §7.6 perf
+>    event per second into perf.jsonl → single-line summary JSON on stdout.
+> 2. **NEW `kn_d3d_vp_*` presenter** (grown on the probe code; VEH guard +
+>    D7 degrade latch + pre-fault) and **NEW `kn_perf`** (system counters;
+>    K32/PSAPI_VERSION 2 — no new DLL imports).
+> 3. **NEW asset** `streamer/assets/synthetic720.264` (High@5.1 120f —
+>    NOT embedded; knvstd discovers it, embedded 320×240 fallback reports
+>    budget_valid:false).
+> 4. **NEW gate `tests/T11_loopback_g1.py`** — run AFTER T10:
+>    `python T11_loopback_g1.py --quick` then `python T11_loopback_g1.py`
+>    (600 s, AC power). Writes T11_wynik.txt + T11_skrot.txt.
+> 5. WASAPI synthetic PCM is the NEXT delta (round XIII) — full G1 gates on
+>    it; T11 currently verdicts "G1-VIDEO".
+>
+> **Rev 6b (round XIII, after T11 G1-VIDEO PASS 20/20):** the D20 FPS
+> overlay — 5x7 bitmap font blitted into the locked NV12 surface during
+> the per-frame copy (no D3DX/GDI, ~1.5 k writes/frame, inside the VEH
+> section); **F5 toggles**, default ON in --loopback; text = the perf
+> interval's frames-per-second ("FPS 30.0", +" LATE n"), refreshed once
+> per second. Font+blit are platform-neutral (`kn_d3d_overlay_text_nv12`)
+> with an ASCII-proof harness (`tools/sandbox_overlay_font.c`, PASS).
+> `tests/T11_loopback_g1.py` now WIPES t11logs at start (perf.jsonl
+> accumulated across the quick+full runs: 632 vs 601 lines). Changed:
+> `streamer/{include/kn,src}/kn_d3d.*`, `streamer/src/knvstd_main.c`,
+> `tests/T11_loopback_g1.py`, `docs/LOOPBACK.md`; new:
+> `tools/sandbox_overlay_font.c`.
+>
+> **Rev 5/5b (still current):** kn_gs parse layer + gs.parse self-test
+> (78 KAT vectors, portable) + test_kngs (7th suite); capnote[320] fix.
+
+# (older) Round X delta, rev 5 (kn_gs parse layer + gs.parse self-test)
+
+> **Rev 5 supersedes rev 1-4.** The canonical integration document remains
 > `PROJECT-STATE.md` (repo root). Subsystem docs: `docs/LOGGING.md`,
-> `docs/FEC.md`, `docs/SRTP.md`, **`docs/D3D.md` (new: kn_d3d provenance,
-> VEH crash-guard rationale, probe design)**.
+> `docs/FEC.md`, `docs/SRTP.md`, `docs/D3D.md`, **`docs/GS.md` (new: kn_gs
+> provenance, vector pipeline, stage-2 TODOs)**.
+>
+> **Rev 5 headline changes** (after T10 round 5 = ALL PASS 38/38):
+> 1. **NEW module `kn_gs`** (`streamer/{include/kn,src}/kn_gs.*` +
+>    `streamer/src/kn_gs_kat_vectors.h` generated): the NVST RTP/GS parse
+>    layer — RTP header/CSRC/extension/padding, the 16-byte LE GS body
+>    (pitfalls #1/#2 encoded), Annex-B payload location (≤68-byte search),
+>    keyframe detection, trailing-AUD strip, FEC block layout, stream-index
+>    continuity, kn_ring_dump hexdump line parsing. Pure, zero-allocation.
+> 2. **`gs.parse` self-test IMPLEMENTED** (no longer a stub): 78-vector KAT
+>    battery from the shipped binary, portable (runs on host AND target),
+>    plus optional real capture via `KN_GS_CAPTURE=<path>` or
+>    `./gs_capture.hex`. Stubs remaining: 4 (net.dns, net.tcp443, net.tls,
+>    tls.chain).
+> 3. **NEW generator `tools/gs_reference.py`** (independent Python port of
+>    nvst.rs parse ranges; self-proves with hand goldens + pitfall
+>    discriminators + 700 round-trips before emitting) and **NEW host suite
+>    `streamer/tests/test_kngs.c`** (105 checks: vectors + C-side property
+>    round-trips + error paths). Suite count is now SEVEN (CMake,
+>    build_native_tests.sh, cross_check.sh, T10 all updated).
+> 4. Relevance mapping (§7.7) extended for video failures: adds `gs.parse`
+>    and the keywords nack/reorder/reassemb/pli. **Not** bare "rtp" —
+>    it substring-matches inside "srtp" (caught by the host suite).
+> 5. Round-5 evidence recorded: **pitch 1536 for 1280×720 NV12 DEFAULT**
+>    (per-row copy mandatory in stage 1!), first-touch fill ~28 ms once
+>    (pre-fault before pacing), present mean 0.28-0.43 ms, **SWVP actually
+>    S_OK** (G0.2 §2.1 correction — details in docs/D3D.md "Target
+>    evidence"), clock.resolution stable-degraded (~2.9 ms floor, R30).
+>
+> **Rev 5b (T10 round 6 fix, 39/40 -> expected 40/40):** GCC 16.2 caught
+> one `-Wformat-truncation` in the new `st_gs_parse` capnote assembly that
+> sandbox GCC 12 missed (R28 third incident): `capnote[256]` was too small
+> for the PROVEN worst case (284 B with the modulo-bounded counters and the
+> 128-char path precision) -> now `capnote[320]`, verified clean under the
+> paranoid `-Wformat-truncation=2` on both toolchains. Also: the T10 line
+> "no FFmpeg DLLs next to knvstd.exe" is an EXPECTED confirmation of the
+> D18 static build, not a warning — wording clarified (a static dev tree
+> correctly has no DLLs anywhere: bin/*.exe are CLI tools, lib/*.a are what
+> knvstd links).
+>
+> **Rev 4 (still current):** decode parser-flush fix (60/60 on target),
+> kn_d3d probes (R25 milestone 0 PASSED), knvstd immediate selftest
+> logging, T10 standalone milestone-0 run, static FFmpeg closure.
 >
 > **Rev 4 headline changes** (after T10 round 4 on the target — 31/32 PASS,
 > the only failure was `decode.synthetic` frames=59/60):

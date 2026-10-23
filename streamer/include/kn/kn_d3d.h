@@ -106,7 +106,7 @@ typedef struct kn_d3d_present {
     unsigned backbuffer_fmt;          /* D3DFORMAT actually used */
 } kn_d3d_present;
 
-/* 1 when this build really talks to d3d9.dll (Win32), 0 on POSIX/stub. */
+/* 1 when linked against real d3d9 (Win32), 0 on POSIX/stub. */
 int kn_d3d_available(void);
 
 /* Run the capability probe. Returns 0 when the probe executed (inspect the
@@ -124,6 +124,89 @@ int kn_d3d_probe_present(kn_d3d_present *p);
  * stage 1 must fall through to the GDI rung or refuse to start the video
  * path). Sticky for the process lifetime. */
 int kn_d3d_permanently_degraded(void);
+
+/* ================================================================
+ * Stage-1 presenter — D7 rung 1 (NV12 DEFAULT -> StretchRect(LINEAR)
+ * -> backbuffer), grown on the probe code. Single-threaded by design
+ * (one owner thread creates and uses it; D3DCREATE_MULTITHREADED is set
+ * for driver sanity only). Lifecycle:
+ *
+ *   vp = kn_d3d_vp_open(w, h, title)      fullscreen window + device +
+ *                                         NV12 DEFAULT surface + PRE-FAULT
+ *                                         (one full fill+present: the first
+ *                                         touch of stolen UMA memory costs
+ *                                         ~28 ms once — measured round 5 —
+ *                                         and must not land in the paced
+ *                                         loop)
+ *   per frame: kn_d3d_vp_present_nv12(vp, y, stride_y, uv, stride_uv, ...)
+ *              -> lock, PER-ROW copy (surface pitch may exceed width:
+ *                 1536 for 1280x720 — measured round 5; a whole-buffer
+ *                 memcpy is WRONG), unlock, StretchRect into the
+ *                 letterboxed backbuffer, Present
+ *   kn_d3d_vp_pump(vp)                    window messages; ERR_CLOSED on
+ *                                         WM_CLOSE / ESC (graceful stop)
+ *   kn_d3d_vp_close(vp)
+ *
+ * Crash policy: every CPU-write section runs under the same VEH guard as
+ * the probes (mingw has no __try). A caught exception latches the D7
+ * permanent degrade; the presenter then refuses every further call with
+ * KN_D3D_ERR_FAULT and leaks its D3D objects ON PURPOSE (re-entering a
+ * faulted driver even for Release is not worth the risk; the OS reclaims
+ * at exit). Device-lost (TestCooperativeLevel) returns KN_D3D_ERR_LOST —
+ * stage 1 stops gracefully; the Reset()/rung-fallback ladder is stage 2.
+ * ================================================================= */
+typedef struct kn_d3d_vp kn_d3d_vp;   /* opaque */
+
+enum {
+    KN_D3D_OK          =  0,
+    KN_D3D_ERR_INIT    = -1,   /* d3d/window/device creation failed */
+    KN_D3D_ERR_CONV    = -2,   /* NV12->backbuffer conversion refused (D7) */
+    KN_D3D_ERR_SURFACE = -3,
+    KN_D3D_ERR_LOCK    = -4,
+    KN_D3D_ERR_STRETCH = -5,
+    KN_D3D_ERR_PRESENT = -6,
+    KN_D3D_ERR_LOST    = -7,   /* TestCooperativeLevel failed */
+    KN_D3D_ERR_FAULT   = -8,   /* exception caught; permanent degrade */
+    KN_D3D_ERR_CLOSED  = -9,   /* window closed / ESC — graceful stop */
+    KN_D3D_ERR_ARGS    = -10,
+    KN_D3D_ERR_DIMS    = -11   /* frame dims != the dims vp was opened with */
+};
+
+kn_d3d_vp *kn_d3d_vp_open(unsigned video_w, unsigned video_h,
+                          const char *title);
+int kn_d3d_vp_present_nv12(kn_d3d_vp *vp,
+                           const unsigned char *y, unsigned stride_y,
+                           const unsigned char *uv, unsigned stride_uv,
+                           double *copy_ms, double *stretch_present_ms);
+int kn_d3d_vp_pump(kn_d3d_vp *vp);
+unsigned kn_d3d_vp_refresh_hz(kn_d3d_vp *vp);   /* 0 when unavailable */
+unsigned kn_d3d_vp_pitch(kn_d3d_vp *vp);
+unsigned long kn_d3d_vp_fault_code(kn_d3d_vp *vp);      /* 0 = none */
+unsigned long long kn_d3d_vp_fault_addr(kn_d3d_vp *vp);
+
+/* D20 FPS overlay: F5 toggles it (handled in the presenter's wndproc);
+ * the orchestrator sets the text once per second ("FPS 30.0", plus
+ * " LATE n" when an interval dropped frames). Overlay default is ON in
+ * this debug presenter; the production streamer will open with it OFF and
+ * the same toggle (stage 2). Text is copied (max 63 chars). */
+int kn_d3d_vp_set_overlay(kn_d3d_vp *vp, int on);
+int kn_d3d_vp_set_overlay_text(kn_d3d_vp *vp, const char *text);
+int kn_d3d_vp_overlay(kn_d3d_vp *vp);           /* current on/off */
+
+void kn_d3d_vp_close(kn_d3d_vp *vp);            /* NULL-safe */
+
+/* Neutral (all platforms): draw `text` into an NV12 buffer as a dark box +
+ * white 5x7 bitmap glyphs (D20 FPS overlay). `scale` MUST be even and >= 2
+ * (each font pixel maps to a scale x scale Y block and, at even scale,
+ * exactly (scale/2)^2 UV pairs). x0/y0 are rounded DOWN to even. Everything
+ * is clipped to buf_w x buf_h. Returns the glyph count processed (glyphs
+ * may be clipped), or -1 on bad args. Zero allocation, pure byte writes — safe inside the locked-surface
+ * section of kn_d3d_vp_present_nv12 (under the VEH guard). */
+int kn_d3d_overlay_text_nv12(unsigned char *y_plane, unsigned y_stride,
+                             unsigned char *uv_plane, unsigned uv_stride,
+                             unsigned buf_w, unsigned buf_h,
+                             unsigned x0, unsigned y0,
+                             const char *text, unsigned scale);
 
 #ifdef __cplusplus
 }

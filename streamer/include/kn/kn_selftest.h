@@ -14,7 +14,7 @@
  *                     (separates: our matrix vs a Vandermonde mistake)
  *     srtp.vectors    AES/HMAC/KDF/IV/protect/replay against KAT vectors
  *                     (separates: wrong key material vs wrong IV vs wrong ROC)
- *   B (Win32, no network — IMPLEMENTED except gs.parse):
+ *   B (offline/Win32, no network — ALL IMPLEMENTED):
  *     clock.resolution  timeBeginPeriod effect on Sleep(1) + wall granularity
  *                       (separates: timer granularity for jitter/pacing)
  *     console.host      ConEmu hook detection + ANSI attribute probe
@@ -24,10 +24,16 @@
  *                       StretchRect+Present under a VEH crash guard
  *                       (separates: GPU vs CPU vs clock; D7 degrade latch)
  *     decode.synthetic  decode bundled .264, report fps/CPU (decoder vs transport)
- *   C (network, target machine only — planned):
- *     net.dns / net.tcp443 / net.tls   connectivity vs TLS vs HTTP semantics
- *     tls.chain       cert chain dump for login.nvidia.com (stale Win7 store)
- *     gs.parse        parse captured packets, print 16-byte GS fields
+ *     gs.parse          RTP/GS parse KAT battery (portable) + optional real
+ *                       kn_ring_dump capture (separates: wire-format bugs vs
+ *                       transport bugs; pitfalls #1/#2/#4 vectors)
+ *   C (network, target machine only — IMPLEMENTED, round XV):
+ *     net.dns / net.tcp443   resolution + egress to the real GFN endpoints
+ *                            (+ one non-NVIDIA baseline per layer, so
+ *                            "NVIDIA down" != "no network")
+ *     net.tls       schannel handshake vs the real hostnames — verification
+ *                   ALWAYS ON; a failure is the measurement, never bypassed
+ *     tls.chain     cert chain dump for login.nvidia.com (stale Win7 store)
  *
  * Planned-but-unimplemented names are REGISTERED as stubs reporting
  * status "skipped" with an explicit reason — a missing test must never look
@@ -94,8 +100,9 @@ size_t kn_selftest_render_json(const kn_st_result *results, int n,
  * document. Mapping is by case-insensitive substring of op/code:
  *   srtp|auth|crypt|kdf|roc        -> srtp.vectors
  *   fec|shard|repair               -> fec.vectors
- *   video|decode|garbl|corrupt     -> fec.vectors + decode.synthetic +
- *   |d3d|present|stretch|gpu          d3d.formats + d3d.present
+ *   video|decode|garbl|corrupt|    -> fec.vectors + decode.synthetic +
+ *   d3d|present|stretch|gpu|          d3d.formats + d3d.present + gs.parse
+ *   nack|reorder|reassemb|pli         (NOT bare "rtp": matches in "srtp")
  *   dns|tcp|tls|net|http|wss       -> net.dns, net.tcp443, net.tls, tls.chain
  *   clock|timer|jitter|pacing      -> clock.resolution
  *   console|tui|vt|ansi            -> console.host

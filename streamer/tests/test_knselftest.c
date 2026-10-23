@@ -106,18 +106,29 @@ static void test_srtp_vectors_run(void)
 
 static void test_platform_and_stubs(void)
 {
-    /* decode.synthetic and the d3d probes are IMPLEMENTED (decode skips only
-     * without FFmpeg; d3d skips only off Win32), so they are not stubs */
-    static const char *stubs[] = {
-        "gs.parse", "net.dns", "net.tcp443", "net.tls", "tls.chain"
+    /* Round XV: the registry has NO stubs left — all 12 self-tests are
+     * implemented. The phase-C net probes are Win32-only (winsock/schannel)
+     * and skip honestly on the host. */
+    static const char *net_probes[] = {
+        "net.dns", "net.tcp443", "net.tls", "tls.chain"
     };
     size_t i;
     kn_st_result r;
-    for (i = 0; i < sizeof stubs / sizeof stubs[0]; ++i) {
-        CHECK(kn_selftest_run(stubs[i], &r) == 0, "stub registered");
-        CHECK(r.status == KN_ST_SKIPPED, "stub reports skipped, never ok");
-        CHECK(strstr(r.reason, "not implemented") != NULL, "stub says not implemented");
+    for (i = 0; i < sizeof net_probes / sizeof net_probes[0]; ++i) {
+        CHECK(kn_selftest_run(net_probes[i], &r) == 0, "net probe registered");
+#ifndef _WIN32
+        CHECK(r.status == KN_ST_SKIPPED, "net probe skipped on posix host");
+        CHECK(strstr(r.reason, "target machine") != NULL,
+              "net skip points to target");
+#endif
     }
+    /* gs.parse: portable KAT battery — runs on EVERY platform */
+    CHECK(kn_selftest_run("gs.parse", &r) == 0, "gs.parse runs");
+    CHECK(r.status == KN_ST_OK, "gs.parse OK (KAT battery, no capture)");
+    CHECK(r.checks >= 70, "gs.parse executed the whole vector battery");
+    CHECK(r.failures == 0, "gs.parse zero failures");
+    CHECK(strstr(r.evidence, "gs_reference.py") != NULL,
+          "gs.parse evidence names its generator");
     /* d3d probes: honest platform behaviour in every build */
     CHECK(kn_selftest_run("d3d.formats", &r) == 0, "d3d.formats runs");
 #ifdef _WIN32
@@ -194,24 +205,32 @@ static void test_run_all_and_render(void)
      * the D1 verdict, not a test bug), so only require "executed".
      * d3d.formats/d3d.present REALLY run too (a brief window flash is
      * expected). decode.synthetic skips only when FFmpeg/clip are absent
-     * (5 or 6 skipped total), and must never be a silent stub when linked. */
+     * (4 or 5 skipped total), and must never be a silent stub when linked. */
     for (i = 0; i < n; ++i)
         if (!strcmp(results[i].name, "clock.resolution") ||
             !strcmp(results[i].name, "console.host") ||
             !strcmp(results[i].name, "d3d.formats") ||
             !strcmp(results[i].name, "d3d.present"))
             CHECK(results[i].status != KN_ST_SKIPPED, "win32 test executed");
-    CHECK(ok_count >= 2, "at least the offline vector tests are OK on target");
-    CHECK(skipped_count == 5 || skipped_count == 6,
-          "5 stubs (+decode without ffmpeg/clip) skipped");
+    CHECK(ok_count >= 3, "offline vector tests (fec/srtp/gs) OK on target");
+    CHECK(skipped_count == 0 || skipped_count == 1,
+          "NO stubs left (only decode may skip without ffmpeg/clip)");
+    /* the four phase-C probes really execute on the target (their statuses
+     * are measurements — see T10 for the gating policy) */
+    for (i = 0; i < n; ++i)
+        if (!strncmp(results[i].name, "net.", 4) ||
+            !strcmp(results[i].name, "tls.chain"))
+            CHECK(results[i].status != KN_ST_SKIPPED,
+                  "phase-C probe executed on Win32");
     for (i = 0; i < n; ++i)
         if (!strcmp(results[i].name, "decode.synthetic"))
             CHECK(results[i].status != KN_ST_FAILED || kn_decode_available() == 0
                   || results[i].failures > 0,
                   "decode did not fail silently");
 #else
-    CHECK(ok_count == 2, "exactly the two offline vector tests are OK (host)");
-    CHECK(skipped_count == 10, "the rest honestly report skipped (host)");
+    CHECK(ok_count == 3, "the three offline vector tests are OK (host)");
+    CHECK(skipped_count == 9, "the rest honestly report skipped (host)");
+    /* host skips: clock, console, d3d x2, net x4 (+decode w/o ffmpeg) */
 #endif
 
     n_doc = kn_selftest_render_json(results, n, doc, sizeof doc);
@@ -250,6 +269,8 @@ static void test_render_relevant(void)
           "corrupt video -> decode.synthetic");
     CHECK(strstr(doc, "\"name\":\"d3d.present\"") != NULL,
           "corrupt video -> d3d.present (D7 degrade evidence)");
+    CHECK(strstr(doc, "\"name\":\"gs.parse\"") != NULL,
+          "corrupt video -> gs.parse (wire-format evidence)");
     CHECK(strstr(doc, "\"name\":\"srtp.vectors\"") == NULL, "video failure skips srtp");
 
     /* network failure -> the four net/tls names (skipped stubs today) */

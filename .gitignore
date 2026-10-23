@@ -36,3 +36,9 @@ build/
 /T10_skrot.txt
 tests/T10_wynik.txt
 tests/T10_skrot.txt
+/T11_wynik.txt
+/T11_skrot.txt
+tests/T11_wynik.txt
+tests/T11_skrot.txt
+t11logs/
+t10logs/

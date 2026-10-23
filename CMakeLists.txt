@@ -39,6 +39,10 @@ add_library(kncore STATIC
   streamer/src/kn_selftest.c
   streamer/src/kn_decode.c
   streamer/src/kn_d3d.c
+  streamer/src/kn_gs.c
+  streamer/src/kn_perf.c
+  streamer/src/kn_audio.c
+  streamer/src/kn_net.c
   third_party/tiny-aes-c/aes.c
   third_party/crypto-algorithms-sha1/sha1.c
 )
@@ -49,7 +53,12 @@ target_include_directories(kncore PUBLIC streamer/include)
 #           accepts it (same mechanism as the existing winmsvcrt imports).
 #   winmm — clock.resolution (timeBeginPeriod).
 if(WIN32)
-  target_link_libraries(kncore INTERFACE d3d9 winmm)
+  # ole32: kn_audio WASAPI engine (CoCreateInstance/CoTaskMemFree); IIDs are
+  # instantiated locally via INITGUID in kn_audio.c, so no -luuid is needed.
+  target_link_libraries(kncore INTERFACE d3d9 winmm ole32 ws2_32 secur32
+                        crypt32)
+else()
+  target_link_libraries(kncore INTERFACE m)   # kn_audio_gen: sin()
 endif()
 # kn_aes.c is the ONLY file that includes tiny-AES's aes.h (see its PROVENANCE.md);
 # upstream defaults apply everywhere (AES128, ECB+CBC+CTR) so struct AES_ctx has
@@ -138,7 +147,7 @@ target_compile_definitions(kncore PRIVATE
   KN_DIAG_BUILD_EXTRA="${_kn_ffmpeg}")
 
 enable_testing()
-foreach(t knlog knring knfec knsrtp kndiag knselftest)
+foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio)
   add_executable(test_${t} streamer/tests/test_${t}.c)
   target_link_libraries(test_${t} PRIVATE kncore)
   # tests include the generated KAT vector headers, which live in src/
