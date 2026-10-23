@@ -398,7 +398,8 @@ python tests\T12_network.py
 
 `T12_skrot.txt` podaje verdict i statusy czterech probe'ów; szczegóły,
 ostrzeżenia kompilatora i ścieżkę do bundla zawiera `T12_wynik.txt`. Przy
-mbedTLS wymagane są `net.tls=ok` dla trzech hostów i `tls.chain=ok` z czystym
-łańcuchem. Przy Schannel TLS pozostaje findingiem, a T12 raportuje tylko PASS
-DNS/TCP. POSIX uruchamia T12 wyłącznie jako `DRY-RUN ONLY` i nie daje wyniku
-łączności.
+mbedTLS probe jest przypięty do TLS 1.2 (minimum = maksimum); wymagane są
+`net.tls=ok` dla trzech hostów i `tls.chain=ok` z czystym łańcuchem. TLS 1.3
+jest osobnym, obecnie nierozstrzygniętym testem. Przy Schannel TLS pozostaje
+findingiem, a T12 raportuje tylko PASS DNS/TCP. POSIX uruchamia T12 wyłącznie
+jako `DRY-RUN ONLY` i nie daje wyniku łączności.

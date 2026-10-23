@@ -1,13 +1,12 @@
 # Phase-C network probes (`kn_net`) — implementation notes
 
-Status: **Schannel probe executed on target; optional mbedTLS backend
-implemented but awaiting target compilation and handshake test.** T10 on
-2026-10-23 passed its 62 harness checks after the TLS gate policy was
-implemented. The Schannel baseline and both NVIDIA TLS handshakes failed
-with `0x80090302`; DNS and TCP/443 passed. The mbedTLS-selected POSIX
-configure/build and ctest pass 10/10, but that host compiles only the
-POSIX network stubs. Windows/Winsock code has not yet been compiled in the
-sandbox because MinGW installation is blocked by container permissions.
+Status: **Win7 T12 mbedTLS TLS 1.2 network gate PASS (2026-10-23 22:47).**
+The mbedTLS backend compiled with zero warnings; DNS and TCP/443 passed;
+TLS verified all three hosts; `tls.chain` built a clean depth-3 chain to
+Amazon Root CA 1. Schannel's earlier target probe still fails with
+`0x80090302`. mbedTLS TLS 1.3 remains unresolved at the Finished/PSA step;
+the Win7 probe pins both minimum and maximum to TLS 1.2. One full T10
+integration run with mbedTLS selected remains before Stage 2.
 
 With this delta the §7.9 registry has **NO stubs left: 12/12 self-tests
 implemented.**
@@ -78,10 +77,11 @@ builds the static CMake targets with the active toolchain. The backend
 uses bounded Winsock connections, requires TLS 1.2 or newer, verifies the
 hostname/SNI, and imports roots from Windows stores in read-only mode.
 
-Sandbox tests exercise only the POSIX skip path, not this backend's
-Winsock implementation. The target T10 is the first supported-compiler
-build and real mbedTLS handshake test. Build metadata records
-`tls=mbedtls` so its result cannot be mistaken for a Schannel run.
+The first Win7 T12 has compiled and exercised the backend successfully for
+TLS 1.2. Sandbox tests still exercise only the POSIX skip path, not Winsock.
+Build metadata records `tls=mbedtls` so target results cannot be mistaken
+for a Schannel run. TLS 1.3 is currently excluded from this probe; its
+`psa_mac`/HKDF Finished failure needs separate investigation.
 
 ## Verdict semantics (and T10's gating policy)
 
