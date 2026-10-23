@@ -46,8 +46,8 @@ add_library(kncore STATIC
   third_party/tiny-aes-c/aes.c
   third_party/crypto-algorithms-sha1/sha1.c
 )
-set(KN_TLS_BACKEND "schannel" CACHE STRING "TLS backend: schannel or mbedtls")
-set_property(CACHE KN_TLS_BACKEND PROPERTY STRINGS schannel mbedtls)
+set(KN_TLS_BACKEND "mbedtls" CACHE STRING "TLS backend: mbedtls or schannel")
+set_property(CACHE KN_TLS_BACKEND PROPERTY STRINGS mbedtls schannel)
 if(NOT KN_TLS_BACKEND STREQUAL "schannel" AND
    NOT KN_TLS_BACKEND STREQUAL "mbedtls")
   message(FATAL_ERROR "KN_TLS_BACKEND must be schannel or mbedtls")

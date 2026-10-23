@@ -263,6 +263,205 @@ int kn_gs_index_continuous(uint32_t last, uint32_t idx)
     return ((last + 1u) & KN_GS_INDEX_MASK) == idx ? 1 : 0;
 }
 
+/* ----------------------------------------------------------- AU assembly */
+
+static int gs_au_frame_type_valid(unsigned wire)
+{
+    return wire >= KN_GS_FRAME_P && wire <= KN_GS_FRAME_NON_REF_P;
+}
+
+static void gs_au_reset_frame(kn_gs_au_assembler *assembler)
+{
+    assembler->bytes_len = 0;
+    assembler->current_frame = 0;
+    assembler->first_stream_packet_index = 0;
+    assembler->last_stream_packet_index = 0;
+    assembler->expected_access_unit_length = 0;
+    assembler->frame_type_wire = KN_GS_FRAME_UNKNOWN;
+    assembler->last_packet_payload_length = 0;
+    assembler->active = 0;
+    assembler->frame_type_valid = 0;
+    assembler->has_expected_access_unit_length = 0;
+    assembler->has_last_packet_payload_length = 0;
+}
+
+int kn_gs_au_assembler_init(kn_gs_au_assembler *assembler, int codec,
+                            uint8_t *buffer, size_t buffer_capacity,
+                            size_t max_access_unit)
+{
+    if (!assembler || !buffer ||
+        (codec != KN_GS_CODEC_H264 && codec != KN_GS_CODEC_H265 &&
+         codec != KN_GS_CODEC_AV1))
+        return KN_GS_ERR_ARGS;
+    if (max_access_unit == 0) max_access_unit = KN_GS_DEFAULT_MAX_ACCESS_UNIT;
+    if (max_access_unit > KN_GS_MAX_ACCESS_UNIT ||
+        buffer_capacity < max_access_unit)
+        return KN_GS_ERR_AU_STATE;
+
+    memset(assembler, 0, sizeof *assembler);
+    assembler->codec = codec;
+    assembler->buffer = buffer;
+    assembler->buffer_capacity = buffer_capacity;
+    assembler->max_access_unit = max_access_unit;
+    return 0;
+}
+
+void kn_gs_au_assembler_reset(kn_gs_au_assembler *assembler)
+{
+    if (assembler) gs_au_reset_frame(assembler);
+}
+
+static void gs_au_parse_frame_header(kn_gs_au_assembler *assembler,
+                                     const uint8_t *payload, size_t len,
+                                     size_t header_size)
+{
+    unsigned wire;
+    if (assembler->codec == KN_GS_CODEC_AV1) {
+        if (len < 4u || header_size == 0u ||
+            (payload[0] != 0x01u && payload[0] != 0x81u))
+            return;
+        wire = payload[3];
+    } else {
+        if (len < 4u || header_size < 4u ||
+            payload[0] != 0x47u || payload[1] != 0x53u)
+            return;
+        wire = payload[3] & 0x0Fu;
+    }
+    assembler->frame_type_wire = wire;
+    assembler->frame_type_valid = gs_au_frame_type_valid(wire);
+}
+
+int kn_gs_au_assembler_push(kn_gs_au_assembler *assembler,
+                            const kn_gs_video *video, uint32_t timestamp,
+                            const uint8_t *payload, size_t payload_len,
+                            kn_gs_access_unit *out)
+{
+    size_t picture_offset = 0, frame_header_size = 0, picture_len;
+    const uint8_t *picture = payload;
+    int rc, is_start, is_end;
+
+    if (!assembler || !assembler->buffer || !video || !out ||
+        (!payload && payload_len) || assembler->max_access_unit == 0 ||
+        assembler->max_access_unit > assembler->buffer_capacity)
+        return KN_GS_ERR_ARGS;
+    memset(out, 0, sizeof *out);
+    out->codec = assembler->codec;
+    if (video->is_fec) return KN_GS_ERR_AU_FEC;
+
+    is_start = video->is_start_of_frame != 0;
+    is_end = video->is_end_of_frame != 0;
+    if (is_start) {
+        if (assembler->active && assembler->bytes_len > 0) {
+            out->discarded_incomplete_frame = 1;
+            out->request_keyframe = 1;
+        }
+        gs_au_reset_frame(assembler);
+        rc = kn_gs_picture_payload(assembler->codec, payload, payload_len,
+                                   &picture_offset);
+        if (rc != KN_GS_OK) {
+            out->request_keyframe = 1;
+            return rc;
+        }
+        frame_header_size = picture_offset;
+        picture = payload + picture_offset;
+        assembler->active = 1;
+        assembler->current_frame = video->frame_index;
+        assembler->first_stream_packet_index = video->stream_packet_index;
+        assembler->last_stream_packet_index = video->stream_packet_index;
+        gs_au_parse_frame_header(assembler, payload, payload_len,
+                                 frame_header_size);
+        if (assembler->codec == KN_GS_CODEC_AV1 && payload_len >= 6u &&
+            payload[0] == 0x01u) {
+            assembler->last_packet_payload_length =
+                (uint16_t)((unsigned)payload[4] |
+                           ((unsigned)payload[5] << 8));
+            assembler->has_last_packet_payload_length = 1;
+        } else if (assembler->codec == KN_GS_CODEC_AV1 &&
+                   payload_len >= KN_GS_AV1_GFN_HEADER &&
+                   payload[0] == 0x81u) {
+            assembler->expected_access_unit_length =
+                gs_le32(payload + 16);
+            assembler->has_expected_access_unit_length = 1;
+        }
+        if (assembler->has_expected_access_unit_length &&
+            assembler->expected_access_unit_length >
+                assembler->max_access_unit) {
+            gs_au_reset_frame(assembler);
+            out->request_keyframe = 1;
+            return KN_GS_ERR_AU_TOO_LARGE;
+        }
+    } else {
+        if (!assembler->active ||
+            assembler->current_frame != video->frame_index) {
+            gs_au_reset_frame(assembler);
+            out->request_keyframe = 1;
+            return KN_GS_ERR_AU_AWAITING_SOF;
+        }
+        if (!kn_gs_index_continuous(assembler->last_stream_packet_index,
+                                    video->stream_packet_index)) {
+            gs_au_reset_frame(assembler);
+            out->request_keyframe = 1;
+            return KN_GS_ERR_AU_DISCONTINUITY;
+        }
+        assembler->last_stream_packet_index = video->stream_packet_index;
+    }
+
+    picture_len = payload_len - picture_offset;
+    if (assembler->codec == KN_GS_CODEC_AV1 && is_end &&
+        assembler->has_last_packet_payload_length) {
+        size_t reported = assembler->last_packet_payload_length;
+        if (reported >= frame_header_size) {
+            size_t exact_len = reported - frame_header_size;
+            if (exact_len > 0 && exact_len <= picture_len) {
+                picture_len = exact_len;
+            } else {
+                out->length_hint_ignored = 1;
+            }
+        } else {
+            out->length_hint_ignored = 1;
+        }
+    }
+
+    if (picture_len > assembler->max_access_unit - assembler->bytes_len) {
+        gs_au_reset_frame(assembler);
+        out->request_keyframe = 1;
+        return KN_GS_ERR_AU_TOO_LARGE;
+    }
+    if (picture_len) {
+        memcpy(assembler->buffer + assembler->bytes_len, picture, picture_len);
+        assembler->bytes_len += picture_len;
+    }
+    out->timestamp = timestamp;
+    if (!is_end) return KN_GS_AU_NEED_MORE;
+
+    if (assembler->has_expected_access_unit_length) {
+        size_t expected = assembler->expected_access_unit_length;
+        if (expected == 0u || expected > assembler->bytes_len) {
+            gs_au_reset_frame(assembler);
+            out->request_keyframe = 1;
+            return KN_GS_ERR_AU_LENGTH;
+        }
+        assembler->bytes_len = expected;
+    }
+    assembler->bytes_len = kn_gs_strip_trailing_aud(assembler->codec,
+                                                     assembler->buffer,
+                                                     assembler->bytes_len);
+
+    out->frame_index = video->frame_index;
+    out->first_stream_packet_index = assembler->first_stream_packet_index;
+    out->frame_type_wire = assembler->frame_type_wire;
+    out->frame_type_valid = assembler->frame_type_valid;
+    out->keyframe = kn_gs_is_keyframe(assembler->codec, assembler->buffer,
+            assembler->bytes_len,
+            assembler->codec == KN_GS_CODEC_AV1 && assembler->frame_type_valid &&
+            assembler->frame_type_wire == KN_GS_FRAME_I);
+    out->contiguous = !out->discarded_incomplete_frame;
+    out->bytes = assembler->buffer;
+    out->bytes_len = assembler->bytes_len;
+    gs_au_reset_frame(assembler);
+    return KN_GS_AU_COMPLETE;
+}
+
 /* ------------------------------------------------------ kn_ring_dump lines */
 
 /* Field tokenizer: fields are separated by EXACTLY one space (the writer is

@@ -1,12 +1,10 @@
 /* kn_gs.h — NVST RTP/GS parse layer (Mjolnir video, stage-2 module v1).
  *
- * Scope v1 (analiza/04 §1-2): parse the wire formats — RTP fixed header +
- * CSRC + extension, the GS `0x4753` 16-byte little-endian body, Annex-B
- * payload location, keyframe detection, trailing-AUD strip, FEC block
- * layout, stream-index continuity, and kn_ring_dump hexdump lines.
- * NOT in v1 (stage 2 proper): the access-unit ASSEMBLER
- * (VideoAccessUnitAssembler with GsFrameHeader / expected_access_unit_length,
- * nvst.rs:3270+), the reorder buffer, and PLI/NACK feedback.
+ * Scope v1 parses wire formats: RTP fixed header + CSRC + extension, GS
+ * `0x4753` body, Annex-B payload location, keyframe detection, AUD stripping,
+ * FEC layout, stream continuity, and kn_ring_dump lines. Stage 2 now adds a
+ * caller-buffered AU assembler (GsFrameHeader/expected length, nvst.rs:3270+).
+ * RTP reorder buffering and PLI/NACK feedback remain separate Stage 2 work.
  *
  * Provenance: line-by-line port of nvst.rs @ a49b124 — see docs/GS.md for
  * the full fact/line table. Known-answer vectors (tools/gs_reference.py →
@@ -21,7 +19,8 @@
  *      differs — the fec_word is NOT re-validated on recovered packets
  *      (nvst.rs:4103-4106); consumers must not reject on it.
  *
- * All functions are pure, zero-allocation and side-effect free.
+ * Parsing and AU assembly use caller-owned memory, perform no heap allocation,
+ * and are safe from any thread when each caller owns its assembler state.
  */
 #ifndef KN_GS_H
 #define KN_GS_H
@@ -44,6 +43,7 @@ extern "C" {
 #define KN_GS_FLAG_SOF           0x04
 #define KN_GS_AV1_SHORT_HEADER   8    /* payload[0] == 0x01 */
 #define KN_GS_AV1_GFN_HEADER     20   /* payload[0] == 0x81 */
+#define KN_GS_DEFAULT_MAX_ACCESS_UNIT (2u * 1024u * 1024u)
 #define KN_GS_MAX_ACCESS_UNIT    (16u * 1024u * 1024u)  /* nvst.rs:237 */
 
 /* Return codes (mirror RtpParseError + local additions; precedence of the
@@ -61,7 +61,13 @@ enum {
     KN_GS_ERR_HEX          =  -8,   /* malformed kn_ring_dump line */
     KN_GS_ERR_HEX_CAP      =  -9,   /* record larger than the caller buffer */
     KN_GS_ERR_FEC_LAYOUT   = -10,   /* FecPacketLayout::from_packet -> None */
-    KN_GS_ERR_ARGS         = -11
+    KN_GS_ERR_ARGS         = -11,
+    KN_GS_ERR_AU_STATE     = -12,
+    KN_GS_ERR_AU_AWAITING_SOF = -13,
+    KN_GS_ERR_AU_DISCONTINUITY = -14,
+    KN_GS_ERR_AU_TOO_LARGE = -15,
+    KN_GS_ERR_AU_LENGTH    = -16,
+    KN_GS_ERR_AU_FEC       = -17
 };
 
 typedef enum kn_gs_codec {
@@ -153,6 +159,73 @@ int kn_gs_fec_layout_parse(const uint8_t ext16[KN_GS_EXT_LEN], kn_gs_fec_layout 
 /* stream_packet_index continuity for same-frame continuations
  * (nvst.rs:4813-4824): idx must equal (last + 1) mod 2^24. Returns 1/0. */
 int kn_gs_index_continuous(uint32_t last, uint32_t idx);
+
+/* ----------------------------------------------------- AU assembly (stage 2)
+ *
+ * Caller owns the storage buffer. A completed result aliases that buffer and
+ * must be consumed before the next push. The default cap is 2 MiB; configured
+ * caps may be smaller or larger, up to the 16 MiB protocol maximum.
+ */
+typedef enum kn_gs_frame_type {
+    KN_GS_FRAME_UNKNOWN = 0,
+    KN_GS_FRAME_P = 1,
+    KN_GS_FRAME_I = 2,
+    KN_GS_FRAME_HEADER = 3,
+    KN_GS_FRAME_INTRA_REFRESH = 4,
+    KN_GS_FRAME_REF_PIC_I = 5,
+    KN_GS_FRAME_NON_REF_P = 6
+} kn_gs_frame_type;
+
+typedef struct kn_gs_au_assembler {
+    int codec;
+    uint8_t *buffer;
+    size_t buffer_capacity;
+    size_t max_access_unit;
+    size_t bytes_len;
+    uint32_t current_frame;
+    uint32_t first_stream_packet_index;
+    uint32_t last_stream_packet_index;
+    uint32_t expected_access_unit_length;
+    unsigned frame_type_wire;
+    uint16_t last_packet_payload_length;
+    int active;
+    int frame_type_valid;
+    int has_expected_access_unit_length;
+    int has_last_packet_payload_length;
+} kn_gs_au_assembler;
+
+typedef struct kn_gs_access_unit {
+    int codec;
+    uint32_t timestamp;          /* timestamp of the completing packet */
+    uint32_t frame_index;
+    uint32_t first_stream_packet_index;
+    unsigned frame_type_wire;    /* NvstFrameType wire value; unknown preserved */
+    int frame_type_valid;
+    int keyframe;
+    int contiguous;
+    int discarded_incomplete_frame;
+    int request_keyframe;
+    int length_hint_ignored;
+    const uint8_t *bytes;        /* aliases assembler.buffer */
+    size_t bytes_len;
+} kn_gs_access_unit;
+
+enum {
+    KN_GS_AU_NEED_MORE = 0,
+    KN_GS_AU_COMPLETE = 1
+};
+
+int kn_gs_au_assembler_init(kn_gs_au_assembler *assembler, int codec,
+                            uint8_t *buffer, size_t buffer_capacity,
+                            size_t max_access_unit);
+void kn_gs_au_assembler_reset(kn_gs_au_assembler *assembler);
+/* Feed authenticated, already-reordered packets. A negative return uses
+ * KN_GS_ERR_AU_*; discontinuities set request_keyframe. A new SOF may report
+ * discarded_incomplete_frame while beginning the next access unit. */
+int kn_gs_au_assembler_push(kn_gs_au_assembler *assembler,
+                            const kn_gs_video *video, uint32_t timestamp,
+                            const uint8_t *payload, size_t payload_len,
+                            kn_gs_access_unit *out);
 
 /* One kn_ring_dump text line: "<mono_us> <meta_hex> <flags> <len> <hex...>"
  * (knring.c dump_visit). Strict format: single spaces, meta exactly 8 hex

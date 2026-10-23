@@ -1,17 +1,16 @@
 # NVST RTP/GS parse layer (`kn_gs`) — implementation notes
 
-Status: **IMPLEMENTED, sandbox-verified** (host suite `test_kngs` 105 checks
-PASS; `gs.parse` self-test runs the same 78-vector KAT battery from the
-shipped binary in ~1 ms; cross `-Werror` x64+i686 clean; ctest 9/9; T10
-POSIX dry-run ALL PASS). **Target execution pending — T10 round 6** (the
-parser is portable, so host+target runs are the same code; the target run
-is the gate of record).
+Status: parser **target-verified**; Stage 2 AU assembler implemented and
+sandbox-verified (`test_kngs` 125 checks PASS; full ctest 10/10). The AU
+assembler has not yet received real network packets; a later capture/replay
+test will validate it against target traffic.
 
-Scope v1 = analiza/04 §1-2 (wire formats only). NOT in v1: the access-unit
-ASSEMBLER (`VideoAccessUnitAssembler` with `GsFrameHeader` and
-`expected_access_unit_length`, nvst.rs:3270+), the RTP reorder buffer
-(nvst.rs:3540+), and PLI/NACK feedback — all stage-2 proper, listed at the
-bottom.
+Scope v1 = analiza/04 §1-2 (wire formats). Stage 2 delta now adds
+`kn_gs_au_assembler`: caller-owned AU storage, frame-header wire type,
+AV1 short/extended length handling, 24-bit stream-index continuity, SOF/EOF
+assembly, trailing-AUD stripping, keyframe metadata, 2 MiB default / 16 MiB
+maximum cap, and discontinuity/keyframe-request signals. RTP reorder buffering
+(nvst.rs:3537+), queueing and PLI/NACK feedback remain open.
 
 ## Why this module exists
 
@@ -100,8 +99,9 @@ precedence case), 13 GS bodies, 13 payload-location cases, 8 keyframe,
 7 AUD-strip, 8 FEC-layout, 6 continuity (incl. the 2^24 wrap), 7 hexdump
 lines. `test_kngs.c` adds the C-side property round-trips (a SECOND
 independent encoder in C: 200 GS bodies + 200 packets + 100 hexdump
-render/parse, deterministic xorshift seeds) plus the pitfall
-discriminators and arg/error paths — 105 checks total.
+render/parse, deterministic xorshift seeds) plus pitfall discriminators,
+AU assembly/AV1-length/continuity/cap tests, and arg/error paths — 125 checks
+total.
 
 ## `gs.parse` self-test (§7.9)
 
@@ -121,13 +121,13 @@ discriminators and arg/error paths — 105 checks total.
 
 ## Stage-2 TODOs growing from here
 
-- Access-unit assembler: `GsFrameHeader::parse` (frame-type detection on
-  SOF payloads, nvst.rs:3280+), `expected_access_unit_length` handling
-  (AV1 bytes 16..20), AU size caps (2 MiB default), capacity-2 encoded
-  queue (analiza/04 §2.4).
 - Reorder buffer + `invalidate_picture` semantics: new SOF before EOF ⇒
   previous frame incomplete ⇒ drop + PLI (nvst.rs:4800-4810); same-frame
-  continuity via `kn_gs_index_continuous` (already shipped).
+  continuity is already enforced by the AU assembler and
+  `kn_gs_index_continuous`. Use bounded caller-owned packet storage and test
+  wrap, duplicate, stale, gap timeout, and capacity overflow.
+- Capacity-2 encoded AU queue per analiza/04 §2.4; overflow must invalidate
+  reference continuity and request a keyframe.
 - FEC recovery path: `kn_gs_fec_layout_parse` → knfec reconstruct →
   re-wrap with the RTP envelope template (nvst.rs:4075-4106) — remember
   pitfall #4: do NOT re-validate the fec_word of recovered shards; the

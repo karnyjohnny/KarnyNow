@@ -380,6 +380,170 @@ static void test_property_hexdump(void)
     CHECK(bad == 0, "property: 100 hexdump render/parse round-trips");
 }
 
+static kn_gs_video au_video(uint32_t frame, uint32_t index, unsigned flags)
+{
+    kn_gs_video video;
+    memset(&video, 0, sizeof video);
+    video.frame_index = frame;
+    video.stream_packet_index = index;
+    video.flags = flags;
+    video.is_start_of_frame = (flags & KN_GS_FLAG_SOF) != 0;
+    video.is_end_of_frame = (flags & KN_GS_FLAG_EOF) != 0;
+    video.fec_current_block = 0;
+    video.fec_last_block = 0;
+    return video;
+}
+
+static void test_au_assembler_h264(void)
+{
+    static const unsigned char start[] = {
+        0x47, 0x53, 0x00, KN_GS_FRAME_I, 0x00, 0x00, 0x01, 0x65, 0xaa
+    };
+    static const unsigned char continuation[] = {
+        0x00, 0x00, 0x01, 0x41, 0xbb
+    };
+    static const unsigned char end_aud[] = { 0x00, 0x00, 0x01, 0x09, 0x00 };
+    static const unsigned char expected[] = {
+        0x00, 0x00, 0x01, 0x65, 0xaa,
+        0x00, 0x00, 0x01, 0x41, 0xbb
+    };
+    unsigned char storage[64];
+    kn_gs_au_assembler assembler;
+    kn_gs_access_unit access_unit;
+    kn_gs_video video;
+
+    CHECK(kn_gs_au_assembler_init(&assembler, KN_GS_CODEC_H264,
+                                  storage, sizeof storage, sizeof storage) == 0,
+          "AU init H264");
+    video = au_video(7, 0xFFFFFEu, KN_GS_FLAG_SOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 100, start,
+                                  sizeof start, &access_unit) == KN_GS_AU_NEED_MORE,
+          "AU SOF waits for continuation");
+    video = au_video(7, 0xFFFFFFu, 0);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 100, continuation,
+                                  sizeof continuation, &access_unit) == KN_GS_AU_NEED_MORE,
+          "AU accepts continuous packet");
+    video = au_video(7, 0, KN_GS_FLAG_EOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 101, end_aud,
+                                  sizeof end_aud, &access_unit) == KN_GS_AU_COMPLETE,
+          "AU completes across 24-bit stream-index wrap");
+    CHECK(access_unit.bytes_len == sizeof expected &&
+          memcmp(access_unit.bytes, expected, sizeof expected) == 0,
+          "AU strips trailing H264 AUD");
+    CHECK(access_unit.frame_index == 7 && access_unit.timestamp == 101 &&
+          access_unit.first_stream_packet_index == 0xFFFFFEu,
+          "AU carries frame, timestamp, and first packet metadata");
+    CHECK(access_unit.frame_type_valid &&
+          access_unit.frame_type_wire == KN_GS_FRAME_I &&
+          access_unit.keyframe && access_unit.contiguous,
+          "AU carries I-frame and keyframe metadata");
+}
+
+static void test_au_assembler_discontinuity(void)
+{
+    static const unsigned char start[] = {
+        0x47, 0x53, 0x00, KN_GS_FRAME_P, 0x00, 0x00, 0x01, 0x41, 0xaa
+    };
+    unsigned char storage[64];
+    kn_gs_au_assembler assembler;
+    kn_gs_access_unit access_unit;
+    kn_gs_video video;
+
+    CHECK(kn_gs_au_assembler_init(&assembler, KN_GS_CODEC_H264,
+                                  storage, sizeof storage, sizeof storage) == 0,
+          "AU init discontinuity case");
+    video = au_video(1, 10, 0);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 0, start, sizeof start,
+                                  &access_unit) == KN_GS_ERR_AU_AWAITING_SOF &&
+          access_unit.request_keyframe,
+          "AU continuation without SOF invalidates picture");
+
+    video = au_video(1, 10, KN_GS_FLAG_SOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 1, start, sizeof start,
+                                  &access_unit) == KN_GS_AU_NEED_MORE,
+          "AU begins first incomplete frame");
+    video = au_video(2, 11, KN_GS_FLAG_SOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 2, start, sizeof start,
+                                  &access_unit) == KN_GS_AU_NEED_MORE &&
+          access_unit.discarded_incomplete_frame &&
+          access_unit.request_keyframe,
+          "new SOF reports and invalidates prior incomplete frame");
+
+    video = au_video(2, 13, KN_GS_FLAG_EOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 3, start, sizeof start,
+                                  &access_unit) == KN_GS_ERR_AU_DISCONTINUITY &&
+          access_unit.request_keyframe,
+          "stream packet index gap invalidates picture");
+}
+
+static void test_au_assembler_av1_lengths(void)
+{
+    unsigned char short_payload[12] = {
+        0x01, 0x00, 0x00, KN_GS_FRAME_I, 11, 0, 0, 0,
+        0xaa, 0xbb, 0xcc, 0xdd
+    };
+    unsigned char extended_payload[24] = {
+        0x81, 0x00, 0x00, KN_GS_FRAME_I, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
+        0x11, 0x22, 0x33, 0x44
+    };
+    unsigned char storage[64];
+    kn_gs_au_assembler assembler;
+    kn_gs_access_unit access_unit;
+    kn_gs_video video;
+
+    CHECK(kn_gs_au_assembler_init(&assembler, KN_GS_CODEC_AV1,
+                                  storage, sizeof storage, sizeof storage) == 0,
+          "AU init AV1");
+    video = au_video(3, 1, KN_GS_FLAG_SOF | KN_GS_FLAG_EOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 10, short_payload,
+                                  sizeof short_payload, &access_unit) == KN_GS_AU_COMPLETE &&
+          access_unit.bytes_len == 3 && access_unit.bytes[2] == 0xcc &&
+          access_unit.keyframe,
+          "AV1 short header trims padded final packet and marks I frame");
+
+    video = au_video(4, 2, KN_GS_FLAG_SOF | KN_GS_FLAG_EOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 11, extended_payload,
+                                  sizeof extended_payload, &access_unit) == KN_GS_AU_COMPLETE &&
+          access_unit.bytes_len == 3 && access_unit.bytes[2] == 0x33,
+          "AV1 extended header enforces expected AU length");
+
+    extended_payload[16] = 5;
+    video = au_video(5, 3, KN_GS_FLAG_SOF | KN_GS_FLAG_EOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 12, extended_payload,
+                                  sizeof extended_payload, &access_unit) == KN_GS_ERR_AU_LENGTH &&
+          access_unit.request_keyframe,
+          "AV1 expected AU length beyond received bytes is rejected");
+}
+
+static void test_au_assembler_limits(void)
+{
+    static const unsigned char start[] = {
+        0x47, 0x53, 0x00, KN_GS_FRAME_P, 0x00, 0x00, 0x01, 0x41, 0xaa, 0xbb
+    };
+    static const unsigned char continuation[] = { 0xcc, 0xdd, 0xee };
+    unsigned char storage[8];
+    kn_gs_au_assembler assembler;
+    kn_gs_access_unit access_unit;
+    kn_gs_video video;
+
+    CHECK(kn_gs_au_assembler_init(&assembler, KN_GS_CODEC_H264,
+                                  storage, sizeof storage, sizeof storage) == 0,
+          "AU init cap case");
+    video = au_video(9, 20, KN_GS_FLAG_SOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 1, start, sizeof start,
+                                  &access_unit) == KN_GS_AU_NEED_MORE,
+          "AU starts below configured cap");
+    video = au_video(9, 21, KN_GS_FLAG_EOF);
+    CHECK(kn_gs_au_assembler_push(&assembler, &video, 1, continuation,
+                                  sizeof continuation, &access_unit) == KN_GS_ERR_AU_TOO_LARGE &&
+          access_unit.request_keyframe,
+          "AU cap overflow rejects frame and requests keyframe");
+    CHECK(kn_gs_au_assembler_init(&assembler, KN_GS_CODEC_H264,
+                                  storage, sizeof storage, 0) == KN_GS_ERR_AU_STATE,
+          "AU default cap requires enough caller-owned storage");
+}
+
 /* --------------------------------------------------------- error paths */
 
 static void test_error_paths(void)
@@ -453,6 +617,10 @@ int main(void)
     test_property_video();
     test_property_rtp();
     test_property_hexdump();
+    test_au_assembler_h264();
+    test_au_assembler_discontinuity();
+    test_au_assembler_av1_lengths();
+    test_au_assembler_limits();
     test_error_paths();
     return kn_test_summary("test_kngs");
 }

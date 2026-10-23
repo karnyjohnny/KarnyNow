@@ -68,7 +68,7 @@ def _pick_ffmpeg_prefix():
 
 
 FFMPEG_PREFIX = _pick_ffmpeg_prefix()
-TLS_BACKEND = os.environ.get("KN_TLS_BACKEND", "schannel").strip().lower()
+TLS_BACKEND = os.environ.get("KN_TLS_BACKEND", "mbedtls").strip().lower()
 
 OUT = []
 

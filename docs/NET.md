@@ -15,9 +15,9 @@ implemented.**
 
 §7.9 defines phase C as the network diagnostics that separate *"our
 protocol code is broken"* from *"this machine cannot even talk to the
-endpoints"*. They gate stage-2 debugging. Schannel remains the default
-backend and measures the target's native TLS stack. Optional mbedTLS
-tests an app-embedded TLS path without changing Windows.
+endpoints"*. They gate stage-2 debugging. mbedTLS is the default target
+backend and avoids dependence on Schannel policy. Schannel remains an
+explicit diagnostic fallback for measuring the native Windows TLS stack.
 
 Both backends must verify the certificate chain and target hostname.
 Schannel uses its normal validation; mbedTLS imports roots from the
@@ -68,10 +68,10 @@ scope for the 443/TLS probes.)
   predates TLS 1.1+, so the 1.1/1.2/1.3 client bits are defined locally
   (stable ABI values, decode-only use).
 
-## Optional mbedTLS backend
+## mbedTLS backend (default)
 
-Select with `KN_TLS_BACKEND=mbedtls` (or `set KN_TLS_BACKEND=mbedtls` in
-cmd/ConEmu before running T10). T10 downloads mbedTLS 3.6.0 and its
+The default is `KN_TLS_BACKEND=mbedtls`; select `schannel` explicitly only
+for native-stack diagnostics. T10/T12 download mbedTLS 3.6.0 and its
 framework at fixed revisions, validates both archive SHA-256 values, and
 builds the static CMake targets with the active toolchain. The backend
 uses bounded Winsock connections, requires TLS 1.2 or newer, verifies the

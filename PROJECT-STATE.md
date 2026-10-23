@@ -53,14 +53,17 @@ measurement instead of guessing (§10.7).
 | Stage | State |
 |---|---|
 | **0 — measurements** | **COMPLETE.** G0.1 CPU ✅ · G0.2 D3D9 presentation ✅ **(T4 v4)** · G0.3 toolchain ✅ · G0.4 console ✅ |
-| **1 — C skeleton offline + logging subsystem** | **Self-test registry phase A+B COMPLETE and target-verified (T10 round 7: ALL PASS 40/40 — the verification chapter is CLOSED: 7 unit suites green, 8 real self-tests incl. gs.parse 78 checks in the shipped binary, 4 honest phase-C stubs, d3d.present reproduced milestone 0 a second time: pitch 1536, present mean 0.30 ms). STAGE-1 VIDEO LOOP DELIVERED (round XII, sandbox-verified, awaiting target): `knvstd --loopback[=FILE.264] [--loopback-seconds=N]` — decode → paced 30 fps (absolute QPC deadlines, Sleep+spin per R30) → per-row copy into locked DEFAULT NV12 (pitch 1536 ≠ stride 1280) → StretchRect(LINEAR) → letterboxed window → §7.6 perf event every 1000 ms into perf.jsonl (CPU % of ALL cores per §6.1, per-interval deltas, net fields honest zeros). Presenter `kn_d3d_vp_*`: pre-fault at open (first-touch ~28 ms), VEH guard on every CPU write → D7 permanent-degrade latch, device-lost/ESC → graceful stop. New `kn_perf` (K32 counters via PSAPI_VERSION 2 — no psapi.dll import). New asset `streamer/assets/synthetic720.264` (High@5.1 VERIFIED at the SPS byte; landmine: `-preset ultrafast` silently downgrades to Constrained Baseline). New gate `tests/T11_loopback_g1.py` = G1-VIDEO: 10 evidence-computed criteria (30 fps steady, CPU ≤ 45 % all-cores, RSS drift ≤ +4 MiB, late ≤ 0.2 %, perf lines ≥ 95 %, DPST 0, logs WARN/ERROR-free, bundle contains perf.jsonl). Failure → `kn_log_on_failure` → §7.7 amplification + auto-bundle; relevance mapping catches `loopback`. Design: `docs/LOOPBACK.md`. **ROUND XIV COMPLETED THE STAGE-1 DELIVERABLES: WASAPI synthetic PCM (`kn_audio`, docs/AUDIO.md)** — audio opens with the presenter (open failure never kills video; §7.7 amplification + honest summary), `queue_audio_ms` is real device padding, 8th suite `test_knaudio` (22 checks, portable neutral half), T11 now gates FULL G1 (video+audio). G1-VIDEO already PASSED on target (round XIII: T11 600 s 20/20 — fps 30.000, late 0, CPU 13.0 %; overlay confirmed live in the round-XIII re-run: T10 40/40 + T11 quick 20/20 with F5 overlay working). **G1 CLOSED ON TARGET (round XV evidence): T10 round 10 ALL PASS 40/40 + T11 FULL = **G1 PASS 25/25** — fps_mean 30.000, frames_late 2/18 001, CPU 13.3 % all-cores (max-second 51.6 = clip-restart spikes), RSS 22.5→19.8 MB (peak 26.2, drift +2 607 kB), 601 perf lines (600/601 in [27,33]), DPST 0, logs WARN/ERROR-free, bundle 686 kB with perf.jsonl; AUDIO: opened **44100 Hz 2ch float32** (the machine's real mix format — the parser negotiated it, not us), 59 060 events, frames_written 26 462 842 = 100.006 % of realtime, **starved 0**, timeouts 0, buffer_errors 0, queue_audio_ms alive 601/601. **STAGE 1 IS DONE. STAGE 2 OPENED.** Round-XIV omission found+fixed: T10 built test_knaudio.exe but never RAN it (missing from the suites list) — added (round 11 expects 41 checks incl. test_knaudio -> PASS). **Round XV DELIVERED phase C: `kn_net` (schannel/winsock) + the four net self-tests — the §7.9 registry now has ZERO stubs (12/12 implemented).** net.dns/net.tcp443/net.tls/tls.chain probe login.nvidia.com + prod.cloudmatchbeta.nvidiagrid.net with a non-NVIDIA baseline per layer (DNS: stun.l.google.com; TCP/TLS: www.cloudflare.com) so "NVIDIA unreachable" is separable from "no network". TLS = schannel (the stage-2 client's real future stack), verification ALWAYS ON (dwFlags=0 + SNI; a failed handshake is the measurement, never bypassed), stock protocol defaults (grbitEnabledProtocols=0 — the Win7 TLS-1.2 reality is the question). T10 gating policy: dns+tcp443 gated ok/degraded (FAILED = stage-2 blocker → red on purpose), net.tls+tls.chain REPORTED (a Win7 TLS failure is a finding to analyse, not a client bug). Chain details (depth ≤6, per-element subject/issuer/dates/trust + SSL policy verdict) go to diag.log INFO + evidence summary. NEVER YET EXECUTED — round 11 on the target is the first run and a stage-2 planning input. Design/landmines: docs/NET.md. AU assembler stays queued for round XVI. |
-| 2–5 | not started (stage-2 seeds shipped and target-verified: `kn_gs`, `knsrtp` ph1+2, `knfec`) |
+| **1 — C skeleton, logging, loopback/audio** | **CLOSED.** Stage-1 scope complete; G0 closed and target T11 full G1 passed (see round XV evidence below). |
+| **2 — NVST media/transport** | **IN PROGRESS.** mbedTLS TLS 1.2 accepted by T12; allocation-free GS AU assembler implemented and sandbox-tested (test_kngs 125/125). Reorder buffer/PLI, FEC recovery, sockets/WSS+RTSP remain. |
+| **3–5** | Not started; see BOOTSTRAP stage gates. |
 
-**Latest full target T10 (2026-10-23 21:18):** `ALL PASS`, 62/62 harness checks, zero compiler warnings, all 8 unit suites pass, D3D/decode self-tests pass, DNS and TCP/443 pass. Schannel findings remain (`0x80090302` on all three hosts); that run used Schannel and did NOT test mbedTLS.
+Stage 1 closure: T11 full G1 passed on the target before this continuation; graphics, decode, audio, and logging gates are closed. No GPU retest is needed for the current Stage-2 AU assembler work.
 
-**Latest target T12 (2026-10-23 22:47):** `ALL PASS`, 27/27 checks using `KN_TLS_BACKEND=mbedtls`. Build is warning-free; DNS + TCP/443 pass; TLS verifies `login.nvidia.com`, CloudMatch, and Cloudflare; `tls.chain` is clean, depth 3, root Amazon Root CA 1, trust/policy both zero. Probe is intentionally pinned to TLS 1.2 (min=max); TLS 1.3's Finished/PSA issue remains isolated and is not used on Win7. mbedTLS now passes the network acceptance gate, but one full T10 integration run is still required before Stage 2.
+**Latest full target T10 (user-reported 2026-10-23):** `ALL PASS`, 65/65 checks after mbedTLS integration. The earlier Schannel-only run failed TLS with `0x80090302`; current default is mbedTLS.
 
-The embedded backend uses pinned mbedTLS 3.6.0 static CMake targets, bounded Win32 Winsock, hostname/SNI verification, `MBEDTLS_SSL_VERIFY_REQUIRED`, read-only Windows ROOT-store imports, and PSA initialization before TLS use. Do not disable verification. The default CMake backend remains Schannel until full mbedTLS T10 passes.
+**Latest target T12 (2026-10-23 22:47):** `ALL PASS`, 27/27 checks using `KN_TLS_BACKEND=mbedtls`. Build is warning-free; DNS + TCP/443 pass; TLS verifies `login.nvidia.com`, CloudMatch, and Cloudflare; `tls.chain` is clean, depth 3, root Amazon Root CA 1, trust/policy both zero. Probe is pinned to TLS 1.2 (min=max); TLS 1.3's Finished/PSA issue remains isolated and is not used on Win7. User subsequently reported full T10 `ALL PASS (65 checks)`.
+
+The embedded backend is now the default in CMake and both T10/T12 harnesses. It uses pinned mbedTLS 3.6.0 static CMake targets, bounded Win32 Winsock, hostname/SNI verification, `MBEDTLS_SSL_VERIFY_REQUIRED`, read-only Windows ROOT-store imports, and PSA initialization before TLS use. Schannel remains an explicit diagnostic fallback. Do not disable verification.
 
 Gate G0.2 evidence and the settled presentation chain: `docs/analysis/G0.2-T4v4-RESULTS.md`.
 One-line summary: **NV12 `StretchRect` from a DEFAULT-pool surface into the backbuffer
@@ -105,15 +108,10 @@ session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOO
 
 ## Next steps (ordered)
 
-1. **Run one full integration T10 with mbedTLS selected.** In cmd/ConEmu run `set KN_TLS_BACKEND=mbedtls` then `python tests\T10_build_and_test.py`. This is the one-time regression gate across all 8 suites, graphics, and decoder after the backend switch. Require `ALL PASS` and confirm `build.json` records `tls=mbedtls`; also confirm `net.tls` and `tls.chain` remain `ok`. Do not repeat GPU tests for ordinary network iterations.
-2. If full T10 passes, make mbedTLS the default backend and proceed to Stage 2. Keep Schannel as an explicit diagnostic fallback only. Track TLS 1.3 separately; Win7 client path is TLS 1.2.
-3. If the full T10 fails, use `T10_wynik.txt` and `t10logs/diag-*.zip`; do not disable certificate verification.
-4. **AU assembler + reorder buffer on `kn_gs`** (round XVI, docs/GS.md
-   "Stage-2 TODOs"): VideoAccessUnitAssembler port (GsFrameHeader,
-   expected_access_unit_length, AU caps), reorder + continuity +
-   PLI/NACK hooks, FEC recovery (pitfall #4) — offline, KAT-verified via
-   gs_reference.py simulation.
-5. Stage 2 sockets: Mjolnir UDP receive loop → kn_ring capture →
+1. **Target-verify the AU assembler.** Sync the current `kn_gs.h/.c` and `test_kngs.c`; run `cmake --build build --target test_kngs` then `build\test_kngs.exe`. It must report 125 checks PASS. This target-specific compile/test is enough; do not run T10/T11 or GPU tests.
+2. **RTP reorder buffer + frame invalidation** for `kn_gs` (docs/GS.md Stage-2 TODOs): bounded capacity, 24-bit/wrap-safe sequence handling, duplicate/stale rejection, gap NACK range + timeout/window recovery event; incomplete frame/new SOF marks next AU discontinuous and requests keyframe/PLI.
+3. **FEC recovery path:** `kn_gs_fec_layout_parse` → `knfec` reconstruct → re-wrap RTP envelope (pitfall #4: restore envelope and do not validate recovered fec_word); test with synthetic packet loss.
+4. Stage 2 sockets: Mjolnir UDP receive loop → kn_ring capture →
   `--capture`/`--decode` modes; WSS+RTSP client using the validated TLS
   backend; G2 gate.
 5. Stage 3+ per BOOTSTRAP §12 (R3 spike → TUI → hardening). R22/R23
@@ -882,7 +880,30 @@ The summary's `TLSv1` is truncated by the reason formatter (`%.5s`); the probe
 sets min=max TLS 1.2 and the full result is `TLSv1.2`. TLS 1.3 remains a
 separate issue and is not negotiated by this Win7 backend.
 
-NEXT: one full T10 with `KN_TLS_BACKEND=mbedtls` to catch cross-feature
-integration regressions. If T10 passes, make mbedTLS the default and begin
-Stage 2 AU assembler/reorder work. Do not repeat GPU tests during ordinary
-network iterations; only rerun full T10 after integration-wide changes.
+T10 is now confirmed `ALL PASS (65 checks)` with mbedTLS selected and default.
+Stage 1 is closed; Stage 2 starts with the AU assembler and its target-only
+test, then reorder/FEC/network integration. Do not repeat GPU tests during
+ordinary Stage-2 iterations; run full T10 only after integration-wide changes.
+
+### 2026-10-23 · mbedTLS default + Stage 2 AU assembler
+User reported full T10 `ALL PASS (65 checks)` with mbedTLS, following the
+target T12 TLS 1.2 pass. Promoted mbedTLS to the CMake, T10, and T12 default;
+Schannel remains an explicit fallback. Fresh sandbox default build records
+`tls=mbedtls`; ctest 10/10 passes. Stage 1 is formally closed from prior
+target G1 evidence, and Stage 2 is now in progress.
+
+Implemented `kn_gs_au_assembler` using caller-owned storage (no allocation),
+2 MiB default / 16 MiB maximum cap, SOF/EOF assembly, H.264/H.265 Annex-B
+payload location, AV1 short-header last-packet length and extended-header
+expected-AU length, frame-type/keyframe metadata, trailing AUD removal,
+24-bit stream-index continuity, and explicit incomplete-frame/gap/keyframe
+signals. `test_kngs` now has 125 checks and passes; full default-mbedTLS ctest
+passes 10/10. No real stream packets have gone through the assembler yet.
+
+NEXT: target-only check: `cmake --build build --target test_kngs` followed by
+`build\test_kngs.exe` (125 checks PASS). No T10/T11/GPU run needed. Then
+implement the bounded RTP reorder buffer using extended SRTP packet indexes,
+gap wait/NACK ranges, stale/duplicate rejection, and frame invalidation/PLI.
+→ `CMakeLists.txt`, `tests/T10_build_and_test.py`, `tests/T12_network.py`,
+  `streamer/include/kn/kn_gs.h`, `streamer/src/kn_gs.c`,
+  `streamer/tests/test_kngs.c`, `docs/GS.md`, this file

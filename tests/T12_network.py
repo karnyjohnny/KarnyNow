@@ -22,7 +22,7 @@ BUILD = os.path.join(ROOT, "build-network")
 LOGDIR = "t12logs"
 WYNIK = os.path.join(ROOT, "T12_wynik.txt")
 SKROT = os.path.join(ROOT, "T12_skrot.txt")
-TLS_BACKEND = os.environ.get("KN_TLS_BACKEND", "schannel").strip().lower()
+TLS_BACKEND = os.environ.get("KN_TLS_BACKEND", "mbedtls").strip().lower()
 IS_WINDOWS = sys.platform == "win32"
 OUT = []
 RESULTS = []
