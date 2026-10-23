@@ -42,3 +42,5 @@ tests/T11_wynik.txt
 tests/T11_skrot.txt
 t11logs/
 t10logs/
+build-mbedtls/
+build-sandbox/
