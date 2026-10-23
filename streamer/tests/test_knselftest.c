@@ -181,6 +181,37 @@ static void test_unknown_and_args(void)
     CHECK(kn_selftest_run_all(&r, 1) == 1, "run_all respects max");
 }
 
+    static void test_gating_policy(void)
+    {
+        kn_st_result results[3];
+        char doc[2048];
+
+        CHECK(kn_selftest_is_gated("net.dns"), "DNS failure is gated");
+        CHECK(kn_selftest_is_gated("net.tcp443"), "TCP failure is gated");
+        CHECK(!kn_selftest_is_gated("net.tls"), "TLS failure is reported only");
+        CHECK(!kn_selftest_is_gated("tls.chain"), "chain failure is reported only");
+        CHECK(kn_selftest_is_gated("unknown.test"), "unknown test gates conservatively");
+
+        memset(results, 0, sizeof results);
+        snprintf(results[0].name, sizeof results[0].name, "net.dns");
+        results[0].status = KN_ST_FAILED;
+        snprintf(results[0].evidence, sizeof results[0].evidence, "{}");
+        snprintf(results[1].name, sizeof results[1].name, "net.tls");
+        results[1].status = KN_ST_FAILED;
+        snprintf(results[1].evidence, sizeof results[1].evidence, "{}");
+        snprintf(results[2].name, sizeof results[2].name, "tls.chain");
+        results[2].status = KN_ST_FAILED;
+        snprintf(results[2].evidence, sizeof results[2].evidence, "{}");
+        CHECK(kn_selftest_render_json(results, 3, doc, sizeof doc) > 0,
+            "render gating policy JSON");
+        CHECK(strstr(doc, "\"name\":\"net.dns\",\"status\":\"failed\",\"gated\":true") != NULL,
+            "JSON marks DNS as gated");
+        CHECK(strstr(doc, "\"name\":\"net.tls\",\"status\":\"failed\",\"gated\":false") != NULL,
+            "JSON marks TLS as reported");
+        CHECK(strstr(doc, "\"name\":\"tls.chain\",\"status\":\"failed\",\"gated\":false") != NULL,
+            "JSON marks chain as reported");
+    }
+
 static void test_run_all_and_render(void)
 {
     static kn_st_result results[16];
@@ -342,6 +373,7 @@ int main(void)
     test_srtp_vectors_run();
     test_platform_and_stubs();
     test_unknown_and_args();
+    test_gating_policy();
     test_run_all_and_render();
     test_render_relevant();
     test_diag_provider_integration();

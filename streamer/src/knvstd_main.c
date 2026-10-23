@@ -116,7 +116,8 @@ static int run_selftests(const char *which, const char *log_dir)
                 kn_log_emit(&b);      /* INFO -> soft flush: survives a later AV */
             }
             if (kn_selftest_run(nm, &results[n]) == 0) {
-                if (log_selftest_result(&results[n])) worst = 1;
+                if (log_selftest_result(&results[n]) &&
+                    kn_selftest_is_gated(nm)) worst = 1;
                 n++;
             }
         }

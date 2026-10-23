@@ -1643,6 +1643,12 @@ const char *kn_selftest_status_name(int status)
 
 int kn_selftest_count(void) { return K_REGISTRY_N; }
 
+int kn_selftest_is_gated(const char *name)
+{
+    if (!name) return 1;
+    return strcmp(name, "net.tls") != 0 && strcmp(name, "tls.chain") != 0;
+}
+
 const char *kn_selftest_name(int idx)
 {
     return (idx >= 0 && idx < K_REGISTRY_N) ? k_registry[idx].name : NULL;
@@ -1752,10 +1758,11 @@ size_t kn_selftest_render_json(const kn_st_result *results, int n,
     for (i = 0; i < n; ++i) {
         const kn_st_result *r = &results[i];
         ST_APP(buf, bufsz, o, &trunc,
-               "%s{\"name\":\"%s\",\"status\":\"%s\",\"ms\":%lld,\"checks\":%d,"
+             "%s{\"name\":\"%s\",\"status\":\"%s\",\"gated\":%s,\"ms\":%lld,\"checks\":%d,"
                "\"failures\":%d,\"reason\":\"%s\",\"evidence\":%s}",
-               i ? "," : "", r->name, kn_selftest_status_name(r->status),
-               r->ms, r->checks, r->failures,
+             i ? "," : "", r->name, kn_selftest_status_name(r->status),
+             kn_selftest_is_gated(r->name) ? "true" : "false", r->ms,
+             r->checks, r->failures,
                r->reason[0] ? r->reason : "",
                r->evidence[0] ? r->evidence : "{}");
     }

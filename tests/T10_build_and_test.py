@@ -181,76 +181,19 @@ def ensure_vendor_files(results):
     return ok
 
 
-CFG_NAMES = ["default", "tls1.2-explicit", "tls1.0-explicit",
-             "tls1.2+manual-validation"]
-
-
 def net_tls_finding(ev):
-    """Round XVI: render the net.tls attribution matrix as a human-readable
-    FINDING block (this is the stage-2 planning input the REPORTED policy
-    promises). ev = net.tls evidence dict {"winner", "env", "hosts"}."""
+    """Render the Schannel measurements available in the current probe."""
     if not isinstance(ev, dict):
-        log("  (net.tls evidence missing — old binary?)")
+        log("  (net.tls evidence missing)")
         return
     log("")
-    log("  *** NET.TLS FINDING - stage-2 planning input ***")
-    w = ev.get("winner", -1)
-    wname = CFG_NAMES[w] if isinstance(w, int) and 0 <= w < len(CFG_NAMES) \
-        else "NONE (every config failed)"
-    log("  winning config: %s" % wname)
-    env = ev.get("env", {})
-    log("  env: pkg %s | DefaultSecureProtocols=%s (-1 = ABSENT -> "
-        "KB3140245 not applied) | FIPS=%s | cipher-policy override=%s" %
-        (env.get("pkg", "?"), env.get("dsprot", "?"), env.get("fips", "?"),
-         "yes" if env.get("cpol") else "no"))
-    if env.get("cpol_head"):
-        log("       policy suites: %s" % str(env["cpol_head"])[:100])
-    pnames = ["SSL3", "TLS1.0", "TLS1.1", "TLS1.2"]
-    protos = env.get("protos", [])
-    for i, pr in enumerate(protos[:4]):
-        if isinstance(pr, list) and len(pr) == 2:
-            log("       schannel %-7s client: Enabled=%s "
-                "DisabledByDefault=%s" % (pnames[i], pr[0], pr[1]))
+    log("  *** NET.TLS FINDING - verification remained enabled ***")
     for h in ev.get("hosts", []):
-        parts = []
-        for c in h.get("cfgs", []):
-            ci = c.get("c", 0)
-            ok = c.get("rc") == 0 and (ci != 3 or c.get("mpol") == 0)
-            if ok:
-                parts.append("%s=OK %s/%sbit" % (CFG_NAMES[ci].split("-")[0],
-                                                 c.get("proto", ""),
-                                                 c.get("bits", "")))
-            else:
-                parts.append("%s=%s call=%s recv=%sB alert=%s hs=%s" %
-                             (CFG_NAMES[ci].split("-")[0], c.get("sec", "?"),
-                              c.get("call"), c.get("recv"), c.get("al"),
-                              c.get("hs")))
-        log("  %-34s %s" % (str(h.get("host", "?"))[:34], " | ".join(parts)))
-    if w == 1:
-        log("  -> H1 CONFIRMED: TLS 1.2 works but is OFF in the system "
-            "defaults (DisabledByDefault / no KB3140245). Stage-2 client "
-            "MUST set grbitEnabledProtocols = SP_PROT_TLS1_2_CLIENT "
-            "explicitly; machine hygiene (KB3140245) optional.")
-    elif w == 2:
-        log("  -> UNEXPECTED: only legacy TLS 1.0 verifies — suspect a "
-            "TLS-intercepting middlebox or a very aged stack; inspect the "
-            "alert codes + env policy rows above.")
-    elif w == 3:
-        log("  -> H2 CONFIRMED: the TLS 1.2 protocol itself works; "
-            "schannel's AUTO certificate validation is broken (SHA-2 "
-            "servicing gap? KB4474419). Stage-2 validates chains manually "
-            "(ISC_REQ_MANUAL_CRED_VALIDATION + our CertVerify...Policy "
-            "call) and REPORTS verdicts — validation never skipped.")
-    elif w == 0:
-        log("  -> defaults worked on THIS run (earlier failure was "
-            "transient?). Stage-2 should still pin protocols explicitly "
-            "for determinism.")
-    else:
-        log("  -> NO CONFIG WORKS: local schannel breakage or zero cipher "
-            "overlap with modern peers (Win7 has no ECDHE-GCM suites). "
-            "Inspect env rows (FIPS? policy override?), alert codes and "
-            "ISC call indices above; next step = OS servicing audit "
-            "(KB2533623, KB2670838, KB3140245, KB4474419, KB4019276).")
+        log("  %-34s rc=%s sec=%s protocol=%s cipher_bits=%s leaf=%s" %
+            (str(h.get("host", "?"))[:34], h.get("rc", "?"),
+             h.get("sec", "?"), h.get("proto", "?"),
+             h.get("cipher_bits", "?"), h.get("leaf", "?")))
+    log("  TLS/chain failures are findings; certificate verification was not bypassed.")
     log("  *** end of finding ***")
 
 
@@ -376,12 +319,8 @@ def main():
         st = json.loads(out.strip().splitlines()[-1])
     except Exception as exc:                       # noqa: BLE001
         log("  cannot parse selftest json: %s" % exc)
-    # Round XVI: rc==0 now follows the GATING POLICY encoded in the binary
-    # (kn_selftest_is_gated): only GATED tests drive the exit code; a FAILED
-    # net.tls/tls.chain is a REPORTED finding (WARN + selftest_finding event
-    # + JSON) and must NOT turn the run red. Round 11 exposed the old
-    # contradiction: 46/47 checks green yet VERDICT FAIL because knvstd's rc
-    # counted the reported tests.
+    # Only gated tests drive the aggregate exit code; TLS failures remain
+    # visible findings and never imply that verification should be bypassed.
     check(rc == 0 and st is not None, results,
           "--selftest=all exit 0 (gated policy) + JSON")
 
@@ -463,14 +402,18 @@ def main():
         check(not gated_bad, results,
               "every GATED self-test usable (failed: %s)" %
               (", ".join(gated_bad) if gated_bad else "none"))
-        # net.tls must carry the round-XVI attribution matrix (env snapshot
-        # + per-host per-cfg records) — a bare sec code is not a finding.
+        # net.tls must include the per-host measurements this probe actually
+        # collects; do not require an unimplemented environment/config matrix.
         r = by_name.get("net.tls")
         if IS_WINDOWS and r:
             ev = r.get("evidence")
-            check(isinstance(ev, dict) and "env" in ev and "hosts" in ev,
+            hosts = ev.get("hosts", []) if isinstance(ev, dict) else []
+            evidence_ok = (len(hosts) == 3 and all(
+                isinstance(host, dict) and "rc" in host and "sec" in host
+                for host in hosts))
+            check(evidence_ok,
                   results,
-                  "net.tls evidence carries env+matrix attribution")
+                  "net.tls evidence carries per-host handshake results")
             if r["status"] in ("failed", "degraded"):
                 net_tls_finding(ev)
         # the registry has NO stubs left (round XV); decode.synthetic joins

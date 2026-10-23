@@ -41,7 +41,9 @@
  *
  * Result contract: status is one of ok / degraded / failed / skipped.
  * "skipped" is non-fatal (platform or phase); "degraded" means the test ran
- * and something is off but usable; "failed" is a hard verdict.
+ * and something is off but usable. `gated` separately says whether a failed
+ * result makes `knvstd --selftest=all` fail. TLS/chain failures are findings,
+ * not stage-1 gates; DNS/TCP failures remain gates.
  */
 #ifndef KN_SELFTEST_H
 #define KN_SELFTEST_H
@@ -75,6 +77,10 @@ typedef struct kn_st_result {
 
 /* Status name for JSON ("ok"/"degraded"/"failed"/"skipped"). */
 const char *kn_selftest_status_name(int status);
+
+/* Whether a failed result blocks the aggregate self-test run. Unknown names
+ * conservatively return true. */
+int         kn_selftest_is_gated(const char *name);
 
 /* Registry access. Names are the §7.9 identifiers. */
 int         kn_selftest_count(void);
