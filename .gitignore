@@ -38,6 +38,7 @@ logs/
 /tests/T*_wynik.*
 /tests/T*_skrot.*
 /t10logs/
+/t12logs/
 /t11logs/
 /knvstd_testlogs/
 /testlogs/

@@ -103,8 +103,8 @@ session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOO
 
 ## Next steps (ordered)
 
-1. **Target-validate mbedTLS.** In cmd/ConEmu run `set KN_TLS_BACKEND=mbedtls` then `python tests\T10_build_and_test.py`. T10 bootstraps the pinned archives, builds the targets and records `tls=mbedtls` in `build.json`. Inspect `net.tls` (all three hosts must verify) and `tls.chain` (must handshake and produce depth >= 1) in the summary/full log/bundle. T10 ALL PASS alone does not prove TLS because these findings are intentionally non-gating. Do not advance stage 2 until these TLS results pass.
-2. If the mbedTLS target build or handshake fails, use `T10_wynik.txt` and `t10logs/diag-*.zip`; diagnose this backend only. Do not modify Windows settings or disable certificate verification.
+1. **Target-validate mbedTLS with network-only T12.** In cmd/ConEmu run `set KN_TLS_BACKEND=mbedtls` then `python tests\T12_network.py`. It builds only `knvstd`; no GPU/decoder/unit suites. T12 bootstraps the pinned archives and records `tls=mbedtls` in `build.json`. Require `net.tls=ok` for all three hosts and `tls.chain=ok` with depth >= 1 and zero trust/policy flags. Do not advance stage 2 until these pass.
+2. If the mbedTLS target build or handshake fails, use `T12_wynik.txt` and `t12logs/diag-*.zip`; diagnose this backend only. Do not modify Windows settings or disable certificate verification. Run full T10 after the TLS backend passes or when changes touch non-network build/runtime behavior.
 3. **AU assembler + reorder buffer on `kn_gs`** (round XVI, docs/GS.md
    "Stage-2 TODOs"): VideoAccessUnitAssembler port (GsFrameHeader,
    expected_access_unit_length, AU caps), reorder + continuity +
@@ -796,12 +796,30 @@ pass. Limitation: host GCC builds only POSIX stubs; `apt-get install
 gcc-mingw-w64-x86-64` failed due permission denied. No Windows compilation or
 mbedTLS handshake has occurred yet.
 
-NEXT ACTION: user runs `set KN_TLS_BACKEND=mbedtls` and
-`python tests\T10_build_and_test.py` on Win7. Treat mbedTLS as proven only
-if the Windows build passes, `net.tls` verifies all three hosts, and
-`tls.chain` returns a built chain. Otherwise analyze `T10_wynik.txt` and
-`t10logs/diag-*.zip`; do not advance to WSS/RTSP and never disable verify.
+NEXT ACTION: run `set KN_TLS_BACKEND=mbedtls` and
+`python tests\T12_network.py` on Win7. T12 builds only knvstd and runs just
+DNS/TCP/TLS/chain. Treat mbedTLS as proven only if the Windows build passes,
+`net.tls` verifies all three hosts, and `tls.chain` returns a clean chain.
+The POSIX T12 run is a dry-run only. If target T12 fails, analyze
+`T12_wynik.txt` and `t12logs/diag-*.zip`; do not advance to WSS/RTSP and
+never disable verification. Run full T10 after this gate passes.
 → `CMakeLists.txt`, `streamer/src/kn_net_mbedtls.c` (new),
   `streamer/src/kn_net.c`, `streamer/include/kn/kn_net.h`,
   `streamer/src/kn_selftest.c`, `tests/T10_build_and_test.py`,
   `tools/prepare_mbedtls_sandbox.sh`, `docs/NET.md`, this file
+
+### 2026-10-23 · network-only T12 harness
+Per user request, added `tests/T12_network.py` so network iterations do not
+repeat the graphics, decoder, clock, console, and unit-test portions of T10.
+T12 configures the selected backend, builds only `knvstd`, runs the four
+phase-C probes, validates their JSON and diagnostic bundle, and records
+`T12_wynik.txt` / `T12_skrot.txt` under ignored paths. DNS/TCP are gates;
+Schannel TLS remains a reported finding; mbedTLS TLS/chain are acceptance
+gates. Updated `tests/README.md` and this handoff with the Windows command.
+
+Validation: T12 POSIX dry-run built knvstd only, all four network probes
+reported skipped, bundle/JSONL checks passed, and verdict was explicitly
+`DRY-RUN ONLY`. It is not a network result. Existing Linux GCC warnings in
+knlog are informational for POSIX T12; the Windows target still gates zero
+warnings. Next action remains target T12 with `KN_TLS_BACKEND=mbedtls`.
+→ `tests/T12_network.py` (new), `.gitignore`, `tests/README.md`, this file

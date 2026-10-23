@@ -379,3 +379,26 @@ tools_verify_c.sh         -> zero błędów, zero ostrzeżeń (-Wall -Wextra), b
 tools_check_d3d_calls.py  -> 71/71 wywołań makr IDirect3D* zgodnych z d3d9.h
 tools_test_json_layer.sh  -> PASS (warstwa JSON przetestowana na Linuxie)
 ```
+
+---
+
+## T12 — test sieciowy bez powtarzania testów GPU
+
+T12 buduje tylko `knvstd` i uruchamia `net.dns`, `net.tcp443`, `net.tls` oraz
+`tls.chain`. Nie uruchamia testów jednostkowych, D3D, dekodera, konsoli ani
+zegara. Używaj go do szybkich iteracji backendu sieciowego; pełny T10 nadal
+pozostaje bramką po zmianach obejmujących cały build.
+
+W ConEmu na Win7, dla testu osadzonego TLS:
+
+```bat
+set KN_TLS_BACKEND=mbedtls
+python tests\T12_network.py
+```
+
+`T12_skrot.txt` podaje verdict i statusy czterech probe'ów; szczegóły,
+ostrzeżenia kompilatora i ścieżkę do bundla zawiera `T12_wynik.txt`. Przy
+mbedTLS wymagane są `net.tls=ok` dla trzech hostów i `tls.chain=ok` z czystym
+łańcuchem. Przy Schannel TLS pozostaje findingiem, a T12 raportuje tylko PASS
+DNS/TCP. POSIX uruchamia T12 wyłącznie jako `DRY-RUN ONLY` i nie daje wyniku
+łączności.
