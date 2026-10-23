@@ -40,10 +40,21 @@ SKROT = os.path.join(ROOT, "T10_skrot.txt")
 
 # FFmpeg dev tree (user's own w64devkit build; MUST be --enable-static, the
 # F1/D8 -static link ignores .dll.a — CMake fails with the recipe if missing).
-# Override with the KN_FFMPEG_PREFIX environment variable if it moves.
-FFMPEG_PREFIX = os.environ.get(
-    "KN_FFMPEG_PREFIX",
-    r"C:\Users\KarnyJohnny\Desktop\ffmpeg\ffmpeg-win7-dev")
+# Candidates are probed in order; override with KN_FFMPEG_PREFIX if it moves.
+def _pick_ffmpeg_prefix():
+    env = os.environ.get("KN_FFMPEG_PREFIX")
+    candidates = [p for p in [
+        env,
+        r"C:\Users\KarnyJohnny\Desktop\ffmpeg\ffmpeg-win7-dev",           # current layout
+        r"C:\Users\KarnyJohnny\Desktop\ffmpeg\ffmpeg-win7-dev\usr\local", # older layout
+    ] if p]
+    for c in candidates:
+        if os.path.isfile(os.path.join(c, "include", "libavcodec", "avcodec.h")):
+            return c
+    return candidates[0] if candidates else ""
+
+
+FFMPEG_PREFIX = _pick_ffmpeg_prefix()
 
 OUT = []
 

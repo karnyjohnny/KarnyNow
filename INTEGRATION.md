@@ -4,6 +4,11 @@
 > `PROJECT-STATE.md` (repo root) — see its "Bootstrapping a NEW agent session"
 > and "Next steps" sections. This file remains as the file-by-file delta note.
 >
+> **Rev 3b (T10 round 3 fix):** static FFmpeg needs the FULL closure at link
+> time — `KN_FFMPEG_LIBS` is now `avcodec swscale swresample avutil` (+`bcrypt`
+> on WIN32: avutil's `av_random_seed` uses BCryptGenRandom). T10 probes both
+> prefix layouts (`...\ffmpeg-win7-dev` and legacy `...\usr\local`).
+>
 > **Rev 3 headline changes** (after T10 round 2 on the target):
 > 1. FFmpeg MUST be rebuilt `--enable-static --disable-shared` (D18): the F1
 >    `-static` link ignores `.dll.a` — CMake now fails at configure time with

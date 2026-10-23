@@ -57,7 +57,10 @@ measurement instead of guessing (§10.7).
 | Stage | State |
 |---|---|
 | **0 — measurements** | **COMPLETE.** G0.1 CPU ✅ · G0.2 D3D9 presentation ✅ **(T4 v4)** · G0.3 toolchain ✅ · G0.4 console ✅ |
-| **1 — C skeleton offline + logging subsystem** | **Core subsystems + diagnostics + self-tests IMPLEMENTED and largely target-verified.** knlog/knring/knfec/knsrtp(ph1+2) verified on target (T9 ALL PASS + T10 round 1: 452 host checks, GCC 16.2 binaries reproduce every KAT). `kn_diag` bundle + `kn_selftest` registry + `knvstd` skeleton (`--selftest`, `--diagnostics`, `--version`) delivered; **bundle + fec/srtp vectors + clock.resolution + console.host VERIFIED ON TARGET (T10 round 1: ConEmu hook build 230724 confirmed, Sleep(1) 1.25→1.00 ms)**. `kn_decode` (FFmpeg h264 threads=1 → NV12) + `decode.synthetic` (EMBEDDED 60-frame clip) implemented and compile-verified against the user's exact FFmpeg headers (bf0e831606, avcodec 63) with -Werror on both arches; **link+run blocked on one user action: rebuild FFmpeg with `--enable-static`** (see D18 — the F1 `-static` link ignores `.dll.a`; CMake now fails with the exact recipe). Remaining for G1: d3d.formats/d3d.present (R25 milestone 0), the --loopback video path, WASAPI. |
+| **1 — C skeleton offline + logging subsystem** | **Core subsystems + diagnostics + self-tests IMPLEMENTED and largely target-verified.** knlog/knring/knfec/knsrtp(ph1+2) verified on target (T9 ALL PASS + T10 round 1: 452 host checks, GCC 16.2 binaries reproduce every KAT). `kn_diag` bundle + `kn_selftest` registry + `knvstd` skeleton (`--selftest`, `--diagnostics`, `--version`) delivered; **bundle + fec/srtp vectors + clock.resolution + console.host VERIFIED ON TARGET (T10 round 1: ConEmu hook build 230724 confirmed, Sleep(1) 1.25→1.00 ms)**. `kn_decode` (FFmpeg h264 threads=1 → NV12) + `decode.synthetic` (EMBEDDED 60-frame clip) implemented and compile-verified against the user's exact FFmpeg headers (bf0e831606, avcodec 63) with -Werror on both arches; **link+run was blocked on the FFmpeg static rebuild — user completed it
+(`ffmpeg.exe -version` shows `--enable-static --disable-shared`); T10 round 3
+exposed the missing static closure (`swresample`+`bcrypt`) — fixed, awaiting
+the confirmation run.** Remaining for G1: d3d.formats/d3d.present (R25 milestone 0), the --loopback video path, WASAPI. |
 | 2–5 | not started |
 
 Gate G0.2 evidence and the settled presentation chain: `docs/analysis/G0.2-T4v4-RESULTS.md`.
@@ -99,22 +102,20 @@ session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOO
 
 ## Next steps (ordered)
 
-1. **USER ACTION — rebuild FFmpeg static (D18/R27), then run T10:**
+1. **USER ACTION — re-run T10** (FFmpeg static rebuild is DONE — verified via
+   `ffmpeg.exe -version` showing `--enable-static --disable-shared`; the
+   round-3 link failure was the missing static closure on our side, fixed:
+   `swresample` + `bcrypt`, see impl round VIII below):
    ```bat
-   cd /d C:\Users\KarnyJohnny\Desktop\ffmpeg\ffmpeg-win7-dev
-   make distclean
-   .\configure --arch=x86_64 --target-os=mingw32 --enable-gpl --enable-static --disable-shared --disable-autodetect
-   make -j2
-   make install
    cd /d "%USERPROFILE%\Desktop\NewKarnyNow\tests"
    python T10_build_and_test.py
    ```
-   Expected: `knvstd.exe` links (no DLLs needed anymore), `decode.synthetic`
-   runs the EMBEDDED clip and reports real fps/CPU on the E5500, everything
-   else stays green. Send back `T10_wynik.txt` + `T10_skrot.txt`.
-   (The configure line is identical to the user's proven one except
-   `--enable-static --disable-shared`; CLI ffmpeg.exe/ffprobe.exe stay
-   available for the G2 gate.)
+   T10 now probes BOTH prefix layouts automatically
+   (`...\ffmpeg-win7-dev` = current, `...\ffmpeg-win7-dev\usr\local` = old;
+   override: `KN_FFMPEG_PREFIX`). Expected: knvstd.exe links statically (no
+   DLLs), `decode.synthetic` runs the EMBEDDED 60-frame clip and reports real
+   fps/CPU on the E5500, everything else stays green. Send back
+   `T10_wynik.txt` + `T10_skrot.txt`.
 2. **d3d.formats + d3d.present self-tests** (phase B remainder; R25
    milestone 0). mingw `d3d9.h` is already exercised in the sandbox
    cross-build; verify every signature against it (pitfall: never write
@@ -370,3 +371,28 @@ Awaiting: user FFmpeg static rebuild + T10 round 3.
    `streamer/assets/synthetic.264`, `tools/make_synthetic_clip.py`,
    `CMakeLists.txt` (KN_FFMPEG_PREFIX + static guard + DLL copy),
    `tests/T10_build_and_test.py` rev 3, fixes in kn_diag/kn_selftest/tests
+
+### 2026-10-23 · impl round VIII (T10 round 3 diagnosis — static FFmpeg closure)
+User rebuilt FFmpeg static per D18 (confirmed: `--enable-static
+--disable-shared` in `ffmpeg.exe -version`, same commit N-127939-gbf0e831606)
+and moved the dev prefix to `C:\Users\KarnyJohnny\Desktop\ffmpeg\ffmpeg-win7-dev`
+(bin/include/lib at top level — no `usr\local` anymore). **T10 round 3: cmake
+configure PASS (prefix + `libavcodec.a` guard both worked), ninja build FAILED
+at the knvstd/test_knselftest link**: `undefined reference to swr_*` (DSD/DST/
+Opus/WavPack decoders inside `libavcodec.a` call libswresample) and
+`BCryptGenRandom/BCryptOpen/BCryptClose` (avutil's `av_random_seed` on
+Windows). A shared build hides this (each DLL carries its own deps); a static
+link needs the full closure, single-pass, in dependency order. Fixed in
+CMakeLists: `KN_FFMPEG_LIBS = avcodec swscale swresample avutil` + `bcrypt`
+on WIN32 (bcrypt.dll exists since Vista — Win7-safe). T10 now probes both
+prefix layouts (current top-level, legacy `usr\local`) with `KN_FFMPEG_PREFIX`
+override. Configure-time guards re-verified in the sandbox with a fake prefix
+(bad include path → readable FATAL; missing `.a` → full rebuild recipe).
+Sandbox regression after the fix: native 452 checks PASS, cross `-Werror`
+PASS x64+i686 (incl. kn_decode vs the real FFmpeg 63 headers), ctest 8/8,
+T10 dry-run ALL PASS (29). The 6 unit suites + kncore were never affected
+(only the two FFmpeg-linking executables failed to build, everything else ran).
+Awaiting: T10 round 4 on the target — the first run of `decode.synthetic`
+with real fps/CPU numbers on the E5500.
+→ `CMakeLists.txt` (KN_FFMPEG_LIBS closure), `tests/T10_build_and_test.py`
+  (prefix probing)

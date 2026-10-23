@@ -108,7 +108,15 @@ if(KN_FFMPEG_PREFIX)
   target_compile_definitions(kncore PUBLIC KN_HAVE_FFMPEG=1)
   target_include_directories(kncore PUBLIC "${KN_FFMPEG_PREFIX}/include")
   target_link_directories(kncore PUBLIC "${KN_FFMPEG_PREFIX}/lib")
-  set(KN_FFMPEG_LIBS avcodec swscale avutil)
+  # Static-link closure, dependency order (GNU ld is single-pass):
+  #   avcodec -> swresample (DSD/Opus/WavPack decoders call swr_*)
+  #   swscale -> avutil; avutil -> bcrypt on Windows (av_random_seed uses
+  #   BCryptGenRandom; bcrypt.dll exists since Vista, so Win7 is fine).
+  # T10 round 3 proved this exact set is complete for the target build.
+  set(KN_FFMPEG_LIBS avcodec swscale swresample avutil)
+  if(WIN32)
+    list(APPEND KN_FFMPEG_LIBS bcrypt)
+  endif()
   string(REPLACE "\"" "'" _kn_ffmpeg "ffmpeg=${KN_FFMPEG_PREFIX}")
 else()
   set(_kn_ffmpeg "ffmpeg=disabled")

@@ -1,0 +1,5 @@
+2026-10-23T00:16:27.158Z INFO  [diag] selftest_result name=fec.vectors status=ok ms=0 checks=88 failures=0
+2026-10-23T00:16:27.158Z INFO  [diag] selftest_result name=srtp.vectors status=ok ms=1 checks=52 failures=0
+2026-10-23T00:16:27.158Z WARN  [diag] selftest_result name=clock.resolution status=degraded ms=169 checks=3 failures=0
+2026-10-23T00:16:27.236Z INFO  [diag] selftest_result name=console.host status=ok ms=0 checks=1 failures=0
+2026-10-23T00:16:27.236Z WARN  [diag] selftest_result name=decode.synthetic status=failed ms=19 checks=5 failures=1
