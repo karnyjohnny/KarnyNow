@@ -5,7 +5,8 @@ verification on the TARGET machine (Windows 7, w64devkit toolchain).
 Successor to T9: same build+test gate, extended with the new deliverables
 (BOOTSTRAP §7.8/§7.9):
   1. cmake configure + ninja build (zero warnings expected)
-  2. six unit-test binaries: knlog knring knfec knsrtp kndiag knselftest
+  2. seven unit-test binaries: knlog knring knfec knsrtp kndiag knselftest
+     kngs
   3. knvstd --list-selftests / --selftest=all  (REAL Win32 execution of
      clock.resolution, console.host, d3d.formats, d3d.present and
      decode.synthetic — the sandbox can only compile them). d3d.present
@@ -158,12 +159,18 @@ def main():
         if dlls:
             log("FFmpeg DLLs next to knvstd.exe: %d (shared build)" % len(dlls))
         else:
-            log("no FFmpeg DLLs next to knvstd.exe (static build — expected)")
+            # Informational confirmation, NOT a problem: D18 requires the
+            # static FFmpeg build (--enable-static --disable-shared), so the
+            # dev tree has no DLLs anywhere (bin/*.exe are the CLI tools,
+            # lib/*.a are what knvstd.exe links). Nothing to deploy.
+            log("no FFmpeg DLLs next to knvstd.exe — static build (D18): "
+                "knvstd links lib/*.a directly, there is nothing to deploy "
+                "(EXPECTED, not a warning)")
 
     # ---- 2. unit tests ------------------------------------------------
     log("\n=== unit tests (on target) ===")
     suites = ["test_knlog", "test_knring", "test_knfec", "test_knsrtp",
-              "test_kndiag", "test_knselftest"]
+              "test_kndiag", "test_knselftest", "test_kngs"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out
@@ -220,8 +227,9 @@ def main():
             log("  %-17s %-8s %4dms  checks=%-4d %s" %
                 (r["name"], r["status"], r["ms"], r["checks"],
                  r["reason"][:80]))
-        # offline vectors MUST pass on the target binary too
-        for nm in ("fec.vectors", "srtp.vectors"):
+        # offline vectors MUST pass on the target binary too (gs.parse is
+        # portable: its KAT battery runs everywhere, capture is optional)
+        for nm in ("fec.vectors", "srtp.vectors", "gs.parse"):
             r = by_name.get(nm)
             check(r and r["status"] == "ok" and r["failures"] == 0, results,
                   "%s ok in the target binary" % nm)
@@ -260,11 +268,11 @@ def main():
             if r:
                 check(r["status"] in ("ok", "degraded"), results,
                       "console.host not failed (D1): %s" % r["status"])
-        # phase B/C stubs report skipped honestly (5 permanent stubs left:
-        # gs.parse + the four net/tls names; decode.synthetic joins them
-        # only when the build lacks FFmpeg — its clip is embedded)
+        # phase C stubs report skipped honestly (4 permanent stubs left:
+        # the net/tls names; decode.synthetic joins them only when the build
+        # lacks FFmpeg — its clip is embedded)
         skipped = [nm for nm, r in by_name.items() if r["status"] == "skipped"]
-        min_skipped = 5 if have_ffmpeg else 6
+        min_skipped = 4 if have_ffmpeg else 5
         check(len(skipped) >= min_skipped, results,
               "phase B/C stubs honestly skipped (%d, min %d)" %
               (len(skipped), min_skipped))
