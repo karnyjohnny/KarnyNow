@@ -58,7 +58,7 @@ measurement instead of guessing (§10.7).
 
 **Latest target T10 (2026-10-23 21:18):** `ALL PASS`, 62/62 harness checks, zero compiler warnings, all 8 unit suites pass, D3D/decode self-tests pass, DNS and TCP/443 pass. TLS findings remain: all three Schannel handshakes fail with `0x80090302` (`SEC_E_UNSUPPORTED_FUNCTION`); `tls.chain` cannot handshake. This run used the default Schannel backend; it does NOT test mbedTLS.
 
-**TLS backend work:** added `KN_TLS_BACKEND=mbedtls` as an optional static CMake subproject (mbedTLS 3.6.0), with bounded Win32 Winsock, TLS 1.2 minimum, SNI/hostname verification, `MBEDTLS_SSL_VERIFY_REQUIRED`, and read-only Windows ROOT-store imports. GCC 16 warning and source integration errors are fixed. The latest target trace localized TLS failure to TLS 1.3 ECDH: `psa_generate_key()` returned `-0x6c00` because PSA Crypto was not initialized before SSL use. Added `psa_crypto_init()` before CTR-DRBG/handshake and explicit logging if init fails. Sandbox mbedTLS build + ctest pass 10/10. This PSA fix is not yet target-tested; do not mark mbedTLS usable until fresh T12 verifies TLS/chain.
+**TLS backend work:** added `KN_TLS_BACKEND=mbedtls` as an optional static CMake subproject (mbedTLS 3.6.0), with bounded Win32 Winsock, SNI/hostname verification, `MBEDTLS_SSL_VERIFY_REQUIRED`, and read-only Windows ROOT-store imports. GCC 16 warning and source integration errors are fixed. PSA is initialized before RNG/handshake. The latest trace advanced past TLS 1.3 ECDH and failed while calculating/verifying the server Finished message (`psa_mac`/HKDF path, mapped to `-0x6c00`). The diagnostic probe is now capped to TLS 1.2 (min=max) to test a secure Win7-compatible path independently of the failing TLS 1.3 PSA path. Sandbox mbedTLS build + ctest pass 10/10. This cap is not yet target-tested; do not mark mbedTLS usable until fresh T12 verifies TLS/chain.
 
 Gate G0.2 evidence and the settled presentation chain: `docs/analysis/G0.2-T4v4-RESULTS.md`.
 One-line summary: **NV12 `StretchRect` from a DEFAULT-pool surface into the backbuffer
@@ -96,14 +96,14 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | **R28 (new)** | Sandbox GCC 12.2 vs target GCC 16.2 warning drift: T10 round 1 failed on two `-Wformat-truncation` GCC 16 flags that GCC 12 accepted (timestamp formatters). Mitigation: all `snprintf` with time/foreign-string inputs use **explicitly bounded arguments** (modulo/precision), verified at `-O0..-O3`; T10 fails the build on ANY warning so drift can never ship silently. Round IX re-confirmed the discipline (cross `-Werror` caught a 64-bit format promotion in the new d3d code on the first pass). **Round XI third incident:** GCC 16 flagged the new `st_gs_parse` capnote (worst case 284 B > 256 B buffer, sandbox GCC 12 default level silent) — fix verified under `-Wformat-truncation=2` (paranoid level) on BOTH toolchains; that flag level is now the pre-check for any new snprintf aggregation before handover. |
 | **R30 (round X: stable pattern, informational)** | `clock.resolution` variance is NOT transient load: rounds 4+5 both measured Sleep(1) 15.6→**2.75/2.88** ms (verdict `degraded`, threshold 2.6 from round 1's 1.25→1.00) with wall tick pinned at 15600 us **even after timeBeginPeriod(1)** (round 1 saw 1250 us ticks — the machine state changed between rounds, probably a reboot cleared whatever had raised the timer). Consequences: (a) treat **~2.9 ms as the realistic Sleep(1) floor** on this machine — enough for 33.3 ms frame pacing at 30 fps, NOT enough for precise 1 ms spins; (b) wall-clock granularity stays 15.6 ms — timestamps below that resolution are quantised; (c) D9 stands stronger than ever: pacing measures real Present intervals, never assumes. Thresholds unchanged (honest `degraded` beats a fudged `ok`). |
 | **R15 (impl round II)** | **Mostly closed.** T8 on the target resolved all 14 Python packages rc=0 (pip honours Requires-Python, so every pin declares 3.8 support): textual 6.2.1, rich 14.3.4, httpx 0.28.1, httpcore 1.0.9, h11 0.16.0, anyio 4.5.2, + 8 more — `python/requirements.txt` updated, wheels cached on target in `tests\t8_wheels\`. Remaining: offline install + runtime smoke at stage 4 (httpx 0.28 removed `proxies=`; textual 6.x API churn vs old docs). |
-| **R31 (updated)** | Sandbox has host GCC 13.3 but no MinGW/Windows SDK headers (apt install denied). Target T12 confirms the mbedTLS Win32 source compiles/links with zero warnings, DNS/TCP work, and localized TLS 1.3 ECDH failure to missing PSA initialization. `psa_crypto_init()` is now called before TLS; target T12 must verify handshake and certificate validation before acceptance. |
+| **R31 (updated)** | Sandbox has host GCC 13.3 but no MinGW/Windows SDK headers (apt install denied). Target T12 confirms Win32 compile/link with zero warnings and DNS/TCP success. PSA init fixed the TLS 1.3 ECDH failure, but TLS 1.3 Finished verification still returns `-0x6c00`; T12 now caps the probe to TLS 1.2 for acceptance. Certificate verification remains required; no downgrade below TLS 1.2. |
 
 Everything else (R3 usrsctp/DTLS spike, R7 first real `POST v2/session`, R22 31-field
 session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOOTSTRAP §9.
 
 ## Next steps (ordered)
 
-1. **Verify PSA init and mbedTLS handshake.** Sync the latest `kn_net_mbedtls.c` patch to the laptop and rerun `set KN_TLS_BACKEND=mbedtls` + `python tests\T12_network.py`. The previous trace showed PSA uninitialized during TLS 1.3 ECDH; `psa_crypto_init()` is now called before use. DNS/TCP already pass and the Win32 source builds cleanly. Require all three `net.tls` hosts to verify and `tls.chain` to be clean before stage 2.
+1. **Test TLS 1.2 with mbedTLS.** Sync the latest `kn_net_mbedtls.c` patch to the laptop and rerun `set KN_TLS_BACKEND=mbedtls` + `python tests\T12_network.py`. The previous trace showed TLS 1.3 Finished verification failing after ECDH; the probe now caps both minimum and maximum to TLS 1.2. DNS/TCP already pass and the Win32 source builds cleanly. Require all three `net.tls` hosts to verify at TLS 1.2 and `tls.chain` to be clean before stage 2. If it passes, accept TLS 1.2 for the Win7 backend and track TLS 1.3 separately.
 2. If the mbedTLS target build or handshake fails, use `T12_wynik.txt` and `t12logs/diag-*.zip`; diagnose this backend only. Do not modify Windows settings or disable certificate verification. Run full T10 after the TLS backend passes or when changes touch non-network build/runtime behavior.
 3. **AU assembler + reorder buffer on `kn_gs`** (round XVI, docs/GS.md
    "Stage-2 TODOs"): VideoAccessUnitAssembler port (GsFrameHeader,
@@ -862,3 +862,12 @@ CTR-DRBG seeding and explicit WARN logging if init itself fails. Sandbox
 mbedTLS build + ctest remain 10/10 PASS. NEXT: sync this change and rerun
 only T12 on Win7; verify the handshake now advances and all cert chains
 validate. No full T10/GPU run is needed.
+
+User's next T12 after PSA init confirmed ECDH now succeeds, but TLS 1.3
+fails later in `mbedtls_ssl_tls13_calculate_verify_data()` while processing
+the server Finished message (`psa_mac`/HKDF path, `-0x6c00`). Set the probe's
+maximum TLS version to TLS 1.2 while keeping `VERIFY_REQUIRED` and the
+minimum at TLS 1.2. This is a protocol-isolation/Win7-compatible acceptance
+test, not a verification bypass. Sandbox mbedTLS build + ctest 10/10 PASS.
+NEXT: run network-only T12 again; if TLS 1.2 passes all three hosts and the
+chain, accept that backend for Win7 and investigate TLS 1.3 separately.

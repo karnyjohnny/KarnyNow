@@ -352,6 +352,7 @@ static int kn_tls_session(const char *host, kn_net_tls *tls,
         mbedtls_ssl_conf_dbg(&config, kn_mbed_debug, NULL);
         mbedtls_debug_set_threshold(KN_MBEDTLS_DEBUG_LEVEL);
         mbedtls_ssl_conf_min_tls_version(&config, MBEDTLS_SSL_VERSION_TLS1_2);
+        mbedtls_ssl_conf_max_tls_version(&config, MBEDTLS_SSL_VERSION_TLS1_2);
         ret = mbedtls_ssl_setup(&ssl, &config);
     }
     if (ret == 0) ret = mbedtls_ssl_set_hostname(&ssl, host);
