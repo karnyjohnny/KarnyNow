@@ -22,6 +22,7 @@
 #include "kn/kn_selftest.h"
 
 #include "kn/kn_aes.h"
+#include "kn/kn_d3d.h"
 #include "kn/kn_decode.h"
 #include "kn/kn_sha1.h"
 #include "kn/knfec.h"
@@ -858,10 +859,225 @@ static int st_planned(const char *phase, const char *what, kn_st_result *r)
     snprintf(r->evidence, sizeof r->evidence, "{\"phase\":\"%s\"}", phase);
     return 0;
 }
+
+/* ============================================================= d3d probes */
+
+/* The real work lives in kn_d3d.c (all D3D9 types stay there — this file
+ * remains platform-neutral). Evidence base: G0.2-T4v4-RESULTS.md; the
+ * expectations encoded below are the MEASURED target facts (§2.1-§2.5), so
+ * a driver update that changes the D7 rungs shows up here first. */
+
+static const char *st_d3dfmt_name(unsigned fmt, char *buf, size_t bufsz)
+{
+    switch (fmt) {
+    case 21u: return "A8R8G8B8";       /* D3DFMT enum values (verified) */
+    case 22u: return "X8R8G8B8";
+    case 23u: return "R5G6B5";
+    default:
+        snprintf(buf, bufsz, "0x%08x", fmt);   /* unsigned: bounded by type */
+        return buf;
+    }
+}
+
+static void st_d3d_skip_posix(kn_st_result *r)
+{
+    r->status = KN_ST_SKIPPED;
+    snprintf(r->reason, sizeof r->reason,
+             "win32-only (D3D9); run on the target machine");
+    snprintf(r->evidence, sizeof r->evidence, "{\"platform\":\"posix-host\"}");
+}
+
 static int st_d3d_formats(kn_st_result *r)
-{ return st_planned("phase B", "CheckDeviceFormat/FormatConversion matrix", r); }
+{
+    kn_d3d_formats f;
+    st_tally t;
+    char extra[768], fbuf[16];
+    const char *bbname;
+    int rung1, rung2, rung3, linear, dev_ok;
+
+    if (!kn_d3d_available()) { st_d3d_skip_posix(r); return 0; }
+    memset(&t, 0, sizeof t);
+    (void)kn_d3d_probe_formats(&f);
+
+    STV(t, f.d3d_created, "Direct3DCreate9");
+    STV(t, f.adapter_count >= 1, "adapter count >= 1");
+    STV(t, f.mode_w > 0 && f.mode_h > 0 && f.mode_hz > 0, "display mode read");
+    STV(t, f.modes_60hz_at_res >= 1, "60 Hz mode at current resolution (R9)");
+    STV(t, f.d3d_created && f.hr_dev_hwvp >= 0,
+        "HAL + HARDWARE_VERTEXPROCESSING device");
+    STV(t, f.fmt_nv12 == 1, "NV12 surface format (D7 rung 1)");
+    STV(t, f.conv_nv12_to_mode == 1, "NV12 -> backbuffer conversion");
+    STV(t, f.srf_min_linear && f.srf_mag_linear, "LINEAR stretch filter caps");
+    STV(t, f.conv_yuy2_to_mode == 1, "YUY2 -> backbuffer conversion (rung 2)");
+    STV(t, f.conv_x8_to_mode == 1, "X8R8G8B8 -> backbuffer (rung 3)");
+
+    dev_ok = (f.hr_dev_hwvp >= 0);
+    rung1 = (f.fmt_nv12 == 1 && f.conv_nv12_to_mode == 1);
+    rung2 = (f.fmt_yuy2 == 1 && f.conv_yuy2_to_mode == 1);
+    rung3 = (f.fmt_x8r8g8b8 == 1 && f.conv_x8_to_mode == 1);
+    linear = (f.srf_min_linear && f.srf_mag_linear);
+    bbname = st_d3dfmt_name(f.mode_fmt, fbuf, sizeof fbuf);
+
+    if (!f.d3d_created || !dev_ok || f.mode_w == 0 ||
+        (!rung1 && !rung2 && !rung3))
+        r->status = KN_ST_FAILED;
+    else if (!rung1 || !linear || f.modes_60hz_at_res < 1)
+        r->status = KN_ST_DEGRADED;
+    else
+        r->status = KN_ST_OK;
+
+    if (r->status == KN_ST_OK)
+        snprintf(r->reason, sizeof r->reason,
+                 "D7 rung 1 available: NV12->%s conversion ok, LINEAR caps, "
+                 "HAL+HWVP device ok; %ux%u@%u Hz; PCI %04x:%04x",
+                 bbname, f.mode_w % 100000u, f.mode_h % 100000u,
+                 f.mode_hz % 10000u, f.vendor_id % 0x10000u,
+                 f.device_id % 0x10000u);
+    else if (r->status == KN_ST_DEGRADED)
+        snprintf(r->reason, sizeof r->reason,
+                 "USABLE but off-nominal: rung1 NV12 %s, LINEAR %s, 60Hz %s "
+                 "(%d/%d checks failed, first: %.64s)",
+                 rung1 ? "ok" : "MISSING", linear ? "ok" : "MISSING",
+                 f.modes_60hz_at_res >= 1 ? "ok" : "MISSING",
+                 t.failures, t.checks, t.first_fail);
+    else
+        snprintf(r->reason, sizeof r->reason,
+                 "D3D9 unusable: d3d=%d hwvp=0x%08lx mode=%ux%u "
+                 "(%d/%d checks failed, first: %.64s)",
+                 f.d3d_created, (unsigned long)f.hr_dev_hwvp,
+                 f.mode_w % 100000u, f.mode_h % 100000u,
+                 t.failures, t.checks, t.first_fail);
+
+    snprintf(extra, sizeof extra,
+             "\"adapter\":\"%04x:%04x\",\"driver\":\"0x%016llx\","
+             "\"desc\":\"%.40s\",\"mode\":\"%ux%u@%u\",\"bb\":\"%s\","
+             "\"modes\":%d,\"hz60_at_res\":%d,\"hwvp\":\"0x%08lx\","
+             "\"swvp\":\"0x%08lx\",\"fmt\":{\"nv12\":%d,\"yuy2\":%d,"
+             "\"uyvy\":%d,\"x8\":%d,\"a8\":%d,\"r5g6\":%d,\"x1r5\":%d},"
+             "\"conv\":{\"nv12\":%d,\"yuy2\":%d,\"x8\":%d,\"to_nv12\":%d},"
+             "\"srf_caps\":\"0x%08llx\",\"linear\":%d,\"point\":%d,"
+             "\"imm\":%d,\"one\":%d",
+             f.vendor_id % 0x10000u, f.device_id % 0x10000u,
+             f.driver_version, f.description,
+             f.mode_w % 100000u, f.mode_h % 100000u, f.mode_hz % 10000u,
+             bbname, f.mode_count, f.modes_60hz_at_res,
+             (unsigned long)f.hr_dev_hwvp, (unsigned long)f.hr_dev_swvp,
+             f.fmt_nv12, f.fmt_yuy2, f.fmt_uyvy, f.fmt_x8r8g8b8,
+             f.fmt_a8r8g8b8, f.fmt_r5g6b5, f.fmt_x1r5g5b5,
+             f.conv_nv12_to_mode, f.conv_yuy2_to_mode, f.conv_x8_to_mode,
+             f.conv_mode_to_nv12,
+             f.srf_caps, f.srf_mag_linear || f.srf_min_linear,
+             f.srf_mag_point || f.srf_min_point,
+             f.interval_immediate, f.interval_one);
+    r->checks = t.checks;
+    r->failures = t.failures;
+    snprintf(r->evidence, sizeof r->evidence,
+             "{\"checks\":%d,\"failures\":%d,\"first_failure\":\"%.96s\",%s}",
+             t.checks, t.failures, t.first_fail, extra);
+    return 0;
+}
+
 static int st_d3d_present(kn_st_result *r)
-{ return st_planned("phase B", "timed StretchRect+Present", r); }
+{
+    kn_d3d_present p;
+    st_tally t;
+    char extra[768];
+    int prc;
+
+    if (!kn_d3d_available()) { st_d3d_skip_posix(r); return 0; }
+    memset(&t, 0, sizeof t);
+    prc = kn_d3d_probe_present(&p);
+
+    /* R25 milestone 0: the fill of a locked DEFAULT NV12 surface is the one
+     * operation G0.2 never exercised (SYSTEMMEM fill AVs the driver — the
+     * VEH guard here catches the same shape on DEFAULT and latches a
+     * permanent degrade per D7). */
+    STV(t, p.seh_code == 0, "no exception writing locked DEFAULT NV12 (R25)");
+    STV(t, p.window_created, "fullscreen probe window");
+    if (p.window_created) {
+        STV(t, p.hr_device >= 0, "HAL+HWVP device");
+        if (p.hr_device >= 0) {
+            STV(t, p.hr_conv >= 0, "NV12->backbuffer conversion check");
+            STV(t, p.hr_surface >= 0, "NV12 DEFAULT surface created");
+            if (p.hr_surface >= 0) {
+                STV(t, p.hr_lock >= 0 && p.pitch >= (int)p.video_w,
+                    "LockRect pitch honoured");
+                STV(t, p.fill_mismatches == 0, "fill read-back verified");
+                STV(t, p.hr_stretch >= 0, "StretchRect(LINEAR) -> backbuffer");
+                STV(t, p.hr_present >= 0, "Present S_OK");
+                STV(t, p.iterations_done == p.iterations,
+                    "every iteration completed");
+                if (p.iterations_done == p.iterations)
+                    STV(t, p.hr_tcl_after >= 0, "cooperative level after loop");
+            }
+        }
+    }
+
+    if (p.seh_code != 0 || p.permanently_degraded)
+        r->status = KN_ST_FAILED;
+    else if (t.failures == 0 && p.ok && prc == 0)
+        r->status = (p.present_mean_ms > 16.7) ? KN_ST_DEGRADED : KN_ST_OK;
+    else
+        r->status = KN_ST_FAILED;
+
+    if (p.seh_code != 0)
+        snprintf(r->reason, sizeof r->reason,
+                 "EXCEPTION 0x%08lx writing locked DEFAULT NV12 at 0x%016llx "
+                 "after %d/%d iters — R25 confirmed; D7 permanent degrade, "
+                 "video path must use the GDI rung",
+                 p.seh_code, p.seh_write_addr,
+                 p.iterations_done, p.iterations);
+    else if (r->status == KN_ST_OK)
+        snprintf(r->reason, sizeof r->reason,
+                 "R25 milestone 0 OK: %ux%u NV12 DEFAULT fill verified, "
+                 "StretchRect+Present x%d, present mean %.2f ms max %.2f ms, "
+                 "fill mean %.2f ms, pitch %d",
+                 p.video_w % 100000u, p.video_h % 100000u,
+                 p.iterations_done, p.present_mean_ms, p.present_max_ms,
+                 p.fill_mean_ms, p.pitch);
+    else if (r->status == KN_ST_DEGRADED)
+        snprintf(r->reason, sizeof r->reason,
+                 "milestone 0 works but present mean %.2f ms exceeds the "
+                 "16.7 ms/60Hz budget — G1 pacing must account for it",
+                 p.present_mean_ms);
+    else
+        snprintf(r->reason, sizeof r->reason,
+                 "milestone 0 incomplete: %d/%d iters (%d/%d checks failed, "
+                 "first: %.64s)",
+                 p.iterations_done, p.iterations,
+                 t.failures, t.checks, t.first_fail);
+
+    snprintf(extra, sizeof extra,
+             "\"ok\":%s,\"iters\":\"%d/%d\",\"pitch\":%d,"
+             "\"video\":\"%ux%u\",\"screen\":\"%ux%u\","
+             "\"dest\":\"%d,%d,%d,%d\",\"fill_ms_mean\":%.2f,"
+             "\"fill_ms_max\":%.2f,\"present_ms_mean\":%.2f,"
+             "\"present_ms_max\":%.2f,\"filter\":\"linear\","
+             "\"mismatches\":%d,\"bytes_per_fill\":%llu,"
+             "\"hrs\":{\"dev\":\"0x%08lx\",\"conv\":\"0x%08lx\","
+             "\"surf\":\"0x%08lx\",\"lock\":\"0x%08lx\","
+             "\"stretch\":\"0x%08lx\",\"present\":\"0x%08lx\","
+             "\"tcl\":\"0x%08lx\"},\"seh\":\"0x%08lx\","
+             "\"seh_addr\":\"0x%016llx\",\"degraded_latch\":%s",
+             p.ok ? "true" : "false", p.iterations_done, p.iterations,
+             p.pitch, p.video_w % 100000u, p.video_h % 100000u,
+             p.screen_w % 100000u, p.screen_h % 100000u,
+             p.dest_x0, p.dest_y0, p.dest_x1, p.dest_y1,
+             p.fill_mean_ms, p.fill_max_ms, p.present_mean_ms,
+             p.present_max_ms, p.fill_mismatches, p.fill_bytes_per_iter,
+             (unsigned long)p.hr_device, (unsigned long)p.hr_conv,
+             (unsigned long)p.hr_surface, (unsigned long)p.hr_lock,
+             (unsigned long)p.hr_stretch, (unsigned long)p.hr_present,
+             (unsigned long)p.hr_tcl_after, p.seh_code, p.seh_write_addr,
+             p.permanently_degraded ? "true" : "false");
+    r->checks = t.checks;
+    r->failures = t.failures;
+    snprintf(r->evidence, sizeof r->evidence,
+             "{\"checks\":%d,\"failures\":%d,\"first_failure\":\"%.96s\",%s}",
+             t.checks, t.failures, t.first_fail, extra);
+    return 0;
+}
+
 static int st_gs_parse(kn_st_result *r)
 { return st_planned("phase B", "parse captured packets, GS 16B fields", r); }
 static int st_net_dns(kn_st_result *r)
@@ -1049,6 +1265,7 @@ size_t kn_selftest_render_relevant(const char *op, const char *code,
     kn_st_result results[K_REGISTRY_N];
     int n = 0, ran = 0;
     int want_fec = 0, want_srtp = 0, want_net = 0, want_clock = 0, want_console = 0;
+    int want_video = 0;
 
     /* lowercase concat of op+code (bounded) */
     for (i = 0; op && op[i] && hn + 1 < sizeof hay; ++i)
@@ -1065,6 +1282,10 @@ size_t kn_selftest_render_relevant(const char *op, const char *code,
         hay_has(hay, "video") || hay_has(hay, "decode") || hay_has(hay, "garbl") ||
         hay_has(hay, "corrupt"))
         want_fec = 1;
+    if (hay_has(hay, "video") || hay_has(hay, "decode") || hay_has(hay, "garbl") ||
+        hay_has(hay, "corrupt") || hay_has(hay, "d3d") || hay_has(hay, "present") ||
+        hay_has(hay, "stretch") || hay_has(hay, "gpu"))
+        want_video = 1;
     if (hay_has(hay, "dns") || hay_has(hay, "tcp") || hay_has(hay, "tls") ||
         hay_has(hay, "net") || hay_has(hay, "http") || hay_has(hay, "wss"))
         want_net = 1;
@@ -1074,7 +1295,8 @@ size_t kn_selftest_render_relevant(const char *op, const char *code,
     if (hay_has(hay, "console") || hay_has(hay, "tui") || hay_has(hay, "vt") ||
         hay_has(hay, "ansi"))
         want_console = 1;
-    if (!want_fec && !want_srtp && !want_net && !want_clock && !want_console) {
+    if (!want_fec && !want_srtp && !want_net && !want_clock && !want_console &&
+        !want_video) {
         want_fec = 1;             /* default: the two cheap offline proofs */
         want_srtp = 1;
     }
@@ -1084,6 +1306,10 @@ size_t kn_selftest_render_relevant(const char *op, const char *code,
         int take = 0;
         if (want_fec && strcmp(nm, "fec.vectors") == 0) take = 1;
         if (want_srtp && strcmp(nm, "srtp.vectors") == 0) take = 1;
+        if (want_video && (strcmp(nm, "decode.synthetic") == 0 ||
+                           strcmp(nm, "d3d.formats") == 0 ||
+                           strcmp(nm, "d3d.present") == 0))
+            take = 1;
         if (want_net && (strncmp(nm, "net.", 4) == 0 || strcmp(nm, "tls.chain") == 0))
             take = 1;
         if (want_clock && strcmp(nm, "clock.resolution") == 0) take = 1;

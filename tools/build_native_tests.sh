@@ -15,7 +15,7 @@ echo "== native compile (-Wall -Wextra -Wpedantic) =="
 KNCORE="streamer/src/knlog.c streamer/src/knring.c streamer/src/knfec.c \
     streamer/src/kn_aes.c streamer/src/kn_sha1.c streamer/src/knsrtp.c \
     streamer/src/kn_diag.c streamer/src/kn_selftest.c \
-    streamer/src/kn_decode.c \
+    streamer/src/kn_decode.c streamer/src/kn_d3d.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
 $CC $CFLAGS $KNCORE streamer/tests/test_knlog.c -o build/test_knlog -pthread
 $CC $CFLAGS $KNCORE streamer/tests/test_knring.c -o build/test_knring -pthread

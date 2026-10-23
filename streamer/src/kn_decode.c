@@ -192,6 +192,44 @@ done:
     return rc;
 }
 
+/* Send one packet (pkt == NULL enters decoder draining mode) and deliver
+ * every frame the decoder hands back. Returns non-zero when the callback
+ * asked to abort (k->abort is then already set), 0 otherwise. Shared by
+ * the parse loop and BOTH flushes (parser tail + decoder drain) so all
+ * three paths keep identical accounting. */
+static int kd_send_drain(AVCodecContext *ctx, AVPacket *pkt, AVFrame *frame,
+                         kd_ctx *k, int to_nv12, kn_decode_stats *stats,
+                         long long *worst)
+{
+    int ret = avcodec_send_packet(ctx, pkt);
+    if (ret == AVERROR(EAGAIN)) {
+        /* receiver full: drain one frame, retry the same packet */
+        if (avcodec_receive_frame(ctx, frame) == 0) {
+            long long t_in = kd_mono_ms();
+            stats->frames_decoded++;
+            if (kd_deliver(k, frame, to_nv12, stats, worst, t_in)) {
+                av_frame_unref(frame);
+                return 1;
+            }
+            av_frame_unref(frame);
+        }
+        ret = avcodec_send_packet(ctx, pkt);
+    }
+    if (ret < 0 && ret != AVERROR_EOF) stats->frames_failed++;
+    while (!k->abort && (ret = avcodec_receive_frame(ctx, frame)) == 0) {
+        long long t_in = kd_mono_ms();
+        stats->frames_decoded++;
+        if (kd_deliver(k, frame, to_nv12, stats, worst, t_in)) {
+            av_frame_unref(frame);
+            return 1;
+        }
+        av_frame_unref(frame);
+    }
+    if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+        stats->frames_failed++;
+    return k->abort;
+}
+
 /* Core decode loop over a padded Annex-B buffer. `data` must have
  * AV_INPUT_BUFFER_PADDING_SIZE zeroed bytes after `fsz` (bitstream readers
  * may over-read within the padding — documented FFmpeg requirement);
@@ -208,7 +246,7 @@ static int kd_run(const uint8_t *data, size_t fsz, int to_nv12,
     kd_ctx k;
     long long t0, cpu0, worst = 0;
     size_t off = 0;
-    int rc = 0, ret;
+    int rc = 0;
 
     if (!data || fsz == 0 || !stats) return -1;
     memset(stats, 0, sizeof *stats);
@@ -243,52 +281,36 @@ static int kd_run(const uint8_t *data, size_t fsz, int to_nv12,
         off += (size_t)(used > 0 ? used : 0);
         if (used <= 0 && pkt_size <= 0) break;         /* no progress: corrupt tail */
         if (pkt_size > 0) {
-            long long t_in;
             pkt->data = pkt_data;
             pkt->size = pkt_size;
-            ret = avcodec_send_packet(ctx, pkt);
-            if (ret == AVERROR(EAGAIN)) {
-                /* receiver full: drain one frame, retry the same packet */
-                if (avcodec_receive_frame(ctx, frame) == 0) {
-                    stats->frames_decoded++;
-                    t_in = kd_mono_ms();
-                    if (kd_deliver(&k, frame, to_nv12, stats, &worst, t_in)) {
-                        av_frame_unref(frame);
-                        break;
-                    }
-                    av_frame_unref(frame);
-                }
-                ret = avcodec_send_packet(ctx, pkt);
-            }
-            if (ret < 0 && ret != AVERROR_EOF) stats->frames_failed++;
-            while (!k.abort && (ret = avcodec_receive_frame(ctx, frame)) == 0) {
-                stats->frames_decoded++;
-                t_in = kd_mono_ms();
-                if (kd_deliver(&k, frame, to_nv12, stats, &worst, t_in)) {
-                    av_frame_unref(frame);
-                    break;
-                }
-                av_frame_unref(frame);
-            }
-            if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
-                stats->frames_failed++;
+            if (kd_send_drain(ctx, pkt, frame, &k, to_nv12, stats, &worst))
+                break;
         }
     }
 
-    /* flush the decoder (trailing frames without a following start code) */
+    /* Flush the PARSER: av_parser_parse2 withholds an access unit until it
+     * sees the NEXT start code — which never arrives at end-of-input, so
+     * the final AU stays buffered unless we parse once more with NULL/0.
+     * Skipping this silently loses exactly one frame at EOF with rc=0 and
+     * frames_failed=0 (T10 round 4 on target AND sandbox repro on FFmpeg
+     * 5.1/63 alike: 59 of 60 decoded). */
     if (!k.abort) {
-        avcodec_send_packet(ctx, NULL);
-        while ((ret = avcodec_receive_frame(ctx, frame)) == 0) {
-            long long t_in;
-            stats->frames_decoded++;
-            t_in = kd_mono_ms();
-            if (kd_deliver(&k, frame, to_nv12, stats, &worst, t_in)) {
-                av_frame_unref(frame);
-                break;
-            }
-            av_frame_unref(frame);
+        uint8_t *pkt_data = NULL;
+        int pkt_size = 0;
+        av_parser_parse2(parser, ctx, &pkt_data, &pkt_size, NULL, 0,
+                         AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+        if (pkt_size > 0) {
+            pkt->data = pkt_data;
+            pkt->size = pkt_size;
+            (void)kd_send_drain(ctx, pkt, frame, &k, to_nv12, stats, &worst);
         }
     }
+
+    /* Flush the DECODER (draining mode): releases frames still held for
+     * reorder/delay reasons after the last packet. Must come AFTER the
+     * parser flush or the tail AU never reaches the decoder. */
+    if (!k.abort)
+        (void)kd_send_drain(ctx, NULL, frame, &k, to_nv12, stats, &worst);
 
     stats->wall_ms = kd_mono_ms() - t0;
     stats->cpu_ms = kd_cpu_ms() - cpu0;

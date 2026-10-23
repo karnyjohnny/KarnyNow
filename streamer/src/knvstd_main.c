@@ -50,6 +50,23 @@ static int print_registry(void)
     return 0;
 }
 
+static int log_selftest_result(const kn_st_result *r)
+{
+    kn_lctx c;
+    kn_lctx_init(&c, KN_CH_DIAG,
+                 r->status == KN_ST_OK ? KN_INFO :
+                 r->status == KN_ST_SKIPPED ? KN_DEBUG : KN_WARN,
+                 "selftest_result");
+    kn_lctx_str(&c, "name", r->name);
+    kn_lctx_str(&c, "status", kn_selftest_status_name(r->status));
+    kn_lctx_i64(&c, "ms", r->ms);
+    kn_lctx_i64(&c, "checks", r->checks);
+    kn_lctx_i64(&c, "failures", r->failures);
+    kn_lctx_str(&c, "reason", r->reason);
+    kn_log_emit(&c);
+    return r->status == KN_ST_FAILED ? 1 : 0;
+}
+
 static int run_selftests(const char *which, const char *log_dir)
 {
     static kn_st_result results[32];
@@ -65,7 +82,26 @@ static int run_selftests(const char *which, const char *log_dir)
     kn_diag_set_selftest_provider(kn_selftest_render_relevant);
 
     if (strcmp(which, "all") == 0) {
-        n = kn_selftest_run_all(results, 32);
+        /* Run one-by-one (same order as kn_selftest_run_all) and log EVERY
+         * result + a begin marker IMMEDIATELY: INFO records are soft-flushed
+         * (§7.12), so if a later test kills the process (an uncaught driver
+         * fault), diag.log still names the exact test that was running —
+         * the T4/R2b "evidence survives the crash" rule applied here. */
+        int total = kn_selftest_count();
+        for (i = 0; i < total && n < (int)(sizeof results / sizeof results[0]);
+             ++i) {
+            const char *nm = kn_selftest_name(i);
+            {
+                kn_lctx b;
+                kn_lctx_init(&b, KN_CH_DIAG, KN_INFO, "selftest_begin");
+                kn_lctx_str(&b, "name", nm);
+                kn_log_emit(&b);      /* INFO -> soft flush: survives a later AV */
+            }
+            if (kn_selftest_run(nm, &results[n]) == 0) {
+                if (log_selftest_result(&results[n])) worst = 1;
+                n++;
+            }
+        }
     } else {
         if (kn_selftest_run(which, &results[0]) != 0) {
             printf("{\"error\":\"unknown_selftest\",\"name\":\"%s\"}\n", which);
@@ -73,26 +109,13 @@ static int run_selftests(const char *which, const char *log_dir)
             return 2;
         }
         n = 1;
+        if (log_selftest_result(&results[0])) worst = 1;
     }
 
     n_doc = kn_selftest_render_json(results, n, doc, sizeof doc);
     if (n_doc) fwrite(doc, 1, n_doc, stdout);
     fputc('\n', stdout);
 
-    for (i = 0; i < n; ++i) {
-        kn_lctx c;
-        kn_lctx_init(&c, KN_CH_DIAG,
-                     results[i].status == KN_ST_OK ? KN_INFO :
-                     results[i].status == KN_ST_SKIPPED ? KN_DEBUG : KN_WARN,
-                     "selftest_result");
-        kn_lctx_str(&c, "name", results[i].name);
-        kn_lctx_str(&c, "status", kn_selftest_status_name(results[i].status));
-        kn_lctx_i64(&c, "ms", results[i].ms);
-        kn_lctx_i64(&c, "checks", results[i].checks);
-        kn_lctx_i64(&c, "failures", results[i].failures);
-        kn_log_emit(&c);
-        if (results[i].status == KN_ST_FAILED) worst = 1;
-    }
     fflush(stdout);
     kn_log_shutdown();
     return worst ? 1 : 0;

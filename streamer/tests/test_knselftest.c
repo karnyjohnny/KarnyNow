@@ -106,11 +106,10 @@ static void test_srtp_vectors_run(void)
 
 static void test_platform_and_stubs(void)
 {
-    /* decode.synthetic is IMPLEMENTED (skips only when the build lacks
-     * FFmpeg or the clip is missing), so it is not in the stub list */
+    /* decode.synthetic and the d3d probes are IMPLEMENTED (decode skips only
+     * without FFmpeg; d3d skips only off Win32), so they are not stubs */
     static const char *stubs[] = {
-        "d3d.formats", "d3d.present", "gs.parse",
-        "net.dns", "net.tcp443", "net.tls", "tls.chain"
+        "gs.parse", "net.dns", "net.tcp443", "net.tls", "tls.chain"
     };
     size_t i;
     kn_st_result r;
@@ -119,6 +118,27 @@ static void test_platform_and_stubs(void)
         CHECK(r.status == KN_ST_SKIPPED, "stub reports skipped, never ok");
         CHECK(strstr(r.reason, "not implemented") != NULL, "stub says not implemented");
     }
+    /* d3d probes: honest platform behaviour in every build */
+    CHECK(kn_selftest_run("d3d.formats", &r) == 0, "d3d.formats runs");
+#ifdef _WIN32
+    CHECK(r.status != KN_ST_SKIPPED, "d3d.formats executed on Win32");
+    CHECK(strstr(r.evidence, "\"adapter\":") != NULL ||
+          strstr(r.evidence, "\"fmt\":") != NULL,
+          "d3d.formats evidence carries the probe matrix");
+#else
+    CHECK(r.status == KN_ST_SKIPPED, "d3d.formats skipped on posix host");
+    CHECK(strstr(r.reason, "target machine") != NULL, "d3d skip points to target");
+#endif
+    CHECK(kn_selftest_run("d3d.present", &r) == 0, "d3d.present runs");
+#ifdef _WIN32
+    CHECK(r.status != KN_ST_SKIPPED, "d3d.present executed on Win32");
+    /* failure is legitimate ONLY with evidence (R25 verdict, exception code,
+     * or a named failing HRESULT) — never a silent stub */
+    CHECK(strstr(r.evidence, "\"iters\":") != NULL,
+          "d3d.present evidence carries the milestone-0 numbers");
+#else
+    CHECK(r.status == KN_ST_SKIPPED, "d3d.present skipped on posix host");
+#endif
     /* decode.synthetic: honest status in every build mode */
     CHECK(kn_selftest_run("decode.synthetic", &r) == 0, "decode.synthetic runs");
     if (!kn_decode_available()) {
@@ -172,15 +192,18 @@ static void test_run_all_and_render(void)
     /* on the target, clock.resolution and console.host REALLY run.
      * console.host may legitimately report failed WITHOUT ConEmu (that is
      * the D1 verdict, not a test bug), so only require "executed".
-     * decode.synthetic skips only when FFmpeg/clip are absent (7 or 8
-     * skipped total), and must never be a silent stub when linked. */
+     * d3d.formats/d3d.present REALLY run too (a brief window flash is
+     * expected). decode.synthetic skips only when FFmpeg/clip are absent
+     * (5 or 6 skipped total), and must never be a silent stub when linked. */
     for (i = 0; i < n; ++i)
         if (!strcmp(results[i].name, "clock.resolution") ||
-            !strcmp(results[i].name, "console.host"))
+            !strcmp(results[i].name, "console.host") ||
+            !strcmp(results[i].name, "d3d.formats") ||
+            !strcmp(results[i].name, "d3d.present"))
             CHECK(results[i].status != KN_ST_SKIPPED, "win32 test executed");
     CHECK(ok_count >= 2, "at least the offline vector tests are OK on target");
-    CHECK(skipped_count == 7 || skipped_count == 8,
-          "7 stubs (+decode without ffmpeg/clip) skipped");
+    CHECK(skipped_count == 5 || skipped_count == 6,
+          "5 stubs (+decode without ffmpeg/clip) skipped");
     for (i = 0; i < n; ++i)
         if (!strcmp(results[i].name, "decode.synthetic"))
             CHECK(results[i].status != KN_ST_FAILED || kn_decode_available() == 0
@@ -217,11 +240,16 @@ static void test_render_relevant(void)
                                       doc, sizeof doc) > 0, "relevant render ok");
     CHECK(strstr(doc, "\"name\":\"srtp.vectors\"") != NULL, "auth failure -> srtp.vectors");
     CHECK(strstr(doc, "\"name\":\"fec.vectors\"") == NULL, "auth failure skips fec");
+    CHECK(strstr(doc, "\"name\":\"d3d.present\"") == NULL, "auth failure skips d3d");
 
-    /* FEC/video failure -> fec.vectors */
+    /* FEC/video failure -> fec.vectors + the video path (decode + d3d) */
     CHECK(kn_selftest_render_relevant("media", "E_VIDEO_CORRUPT", doc, sizeof doc) > 0,
           "video render ok");
     CHECK(strstr(doc, "\"name\":\"fec.vectors\"") != NULL, "corrupt video -> fec.vectors");
+    CHECK(strstr(doc, "\"name\":\"decode.synthetic\"") != NULL,
+          "corrupt video -> decode.synthetic");
+    CHECK(strstr(doc, "\"name\":\"d3d.present\"") != NULL,
+          "corrupt video -> d3d.present (D7 degrade evidence)");
     CHECK(strstr(doc, "\"name\":\"srtp.vectors\"") == NULL, "video failure skips srtp");
 
     /* network failure -> the four net/tls names (skipped stubs today) */

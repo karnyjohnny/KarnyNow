@@ -14,13 +14,15 @@
  *                     (separates: our matrix vs a Vandermonde mistake)
  *     srtp.vectors    AES/HMAC/KDF/IV/protect/replay against KAT vectors
  *                     (separates: wrong key material vs wrong IV vs wrong ROC)
- *   B (Win32, no network — clock/console IMPLEMENTED, d3d/decode planned):
+ *   B (Win32, no network — IMPLEMENTED except gs.parse):
  *     clock.resolution  timeBeginPeriod effect on Sleep(1) + wall granularity
  *                       (separates: timer granularity for jitter/pacing)
  *     console.host      ConEmu hook detection + ANSI attribute probe
  *                       (separates: D1 verification, garbage output)
  *     d3d.formats       CheckDeviceFormat/FormatConversion matrix (D7 rungs)
- *     d3d.present       timed StretchRect+Present (GPU vs CPU vs clock)
+ *     d3d.present       R25 milestone 0: fill locked DEFAULT NV12 + timed
+ *                       StretchRect+Present under a VEH crash guard
+ *                       (separates: GPU vs CPU vs clock; D7 degrade latch)
  *     decode.synthetic  decode bundled .264, report fps/CPU (decoder vs transport)
  *   C (network, target machine only — planned):
  *     net.dns / net.tcp443 / net.tls   connectivity vs TLS vs HTTP semantics
@@ -92,7 +94,8 @@ size_t kn_selftest_render_json(const kn_st_result *results, int n,
  * document. Mapping is by case-insensitive substring of op/code:
  *   srtp|auth|crypt|kdf|roc        -> srtp.vectors
  *   fec|shard|repair               -> fec.vectors
- *   video|decode|garbl|corrupt     -> fec.vectors (+decode.synthetic later)
+ *   video|decode|garbl|corrupt     -> fec.vectors + decode.synthetic +
+ *   |d3d|present|stretch|gpu          d3d.formats + d3d.present
  *   dns|tcp|tls|net|http|wss       -> net.dns, net.tcp443, net.tls, tls.chain
  *   clock|timer|jitter|pacing      -> clock.resolution
  *   console|tui|vt|ansi            -> console.host

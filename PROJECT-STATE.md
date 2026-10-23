@@ -52,21 +52,19 @@ sh tools/cross_check.sh            # mingw x64+i686, -Wall -Wextra -Werror, F1 f
 `T10_skrot.txt`. The user runs it quickly and willingly — ask for a
 measurement instead of guessing (§10.7).
 
-## Current status (updated 2026-10-22)
+## Current status (updated 2026-10-23, impl round IX)
 
 | Stage | State |
 |---|---|
 | **0 — measurements** | **COMPLETE.** G0.1 CPU ✅ · G0.2 D3D9 presentation ✅ **(T4 v4)** · G0.3 toolchain ✅ · G0.4 console ✅ |
-| **1 — C skeleton offline + logging subsystem** | **Core subsystems + diagnostics + self-tests IMPLEMENTED and largely target-verified.** knlog/knring/knfec/knsrtp(ph1+2) verified on target (T9 ALL PASS + T10 round 1: 452 host checks, GCC 16.2 binaries reproduce every KAT). `kn_diag` bundle + `kn_selftest` registry + `knvstd` skeleton (`--selftest`, `--diagnostics`, `--version`) delivered; **bundle + fec/srtp vectors + clock.resolution + console.host VERIFIED ON TARGET (T10 round 1: ConEmu hook build 230724 confirmed, Sleep(1) 1.25→1.00 ms)**. `kn_decode` (FFmpeg h264 threads=1 → NV12) + `decode.synthetic` (EMBEDDED 60-frame clip) implemented and compile-verified against the user's exact FFmpeg headers (bf0e831606, avcodec 63) with -Werror on both arches; **link+run was blocked on the FFmpeg static rebuild — user completed it
-(`ffmpeg.exe -version` shows `--enable-static --disable-shared`); T10 round 3
-exposed the missing static closure (`swresample`+`bcrypt`) — fixed, awaiting
-the confirmation run.** Remaining for G1: d3d.formats/d3d.present (R25 milestone 0), the --loopback video path, WASAPI. |
+| **1 — C skeleton offline + logging subsystem** | **Core subsystems + diagnostics + self-tests IMPLEMENTED; phase-B video probes delivered.** knlog/knring/knfec/knsrtp(ph1+2) verified on target (T9 ALL PASS + T10 rounds 1/4). `kn_diag` bundle + `kn_selftest` registry + `knvstd` skeleton target-verified. **T10 round 4: 31/32 PASS** — static FFmpeg link (D18 closure) CONFIRMED working, all 6 unit suites green on GCC 16.2 (incl. srtp ph2 77 checks), bundle 5060 B validated, PE 6.01. The single failure was `decode.synthetic` frames=59/60: **root-caused (missing PARSER flush at EOF — the last access unit never leaves `av_parser_parse2`), reproduced 1:1 in the sandbox on two FFmpeg majors, fixed + measured 60/60** (abort/truncation contracts re-proven). NEW: `kn_d3d` module — `d3d.formats` (D7 session-start matrix incl. 60 Hz-at-res R9 evidence) + `d3d.present` (**R25 milestone 0**: fill every byte of a locked DEFAULT NV12, read-back verified, timed StretchRect(LINEAR)+Present ×30, VEH crash guard + D7 permanent-degrade latch) — sandbox compile+link verified (mingw x64/i686 -Werror, d3d9 import in PE), **never yet executed anywhere: round 5 is the first run**. knvstd now logs `selftest_begin` + every result immediately (INFO soft-flush) so an uncatchable fault still names the running test in diag.log. Remaining for G1: `--loopback` video path (decode → locked DEFAULT NV12 → StretchRect → letterboxed window, perf snapshots §7.6), WASAPI. |
 | 2–5 | not started |
 
 Gate G0.2 evidence and the settled presentation chain: `docs/analysis/G0.2-T4v4-RESULTS.md`.
 One-line summary: **NV12 `StretchRect` from a DEFAULT-pool surface into the backbuffer
 works (S_OK, 3.0 ms incl. Present); SYSTEMMEM NV12 fill crashes the driver (0xC0000005,
 both arches, exact call isolated) and is permanently excluded.**
+`kn_d3d` design + provenance + crash-guard rationale: `docs/D3D.md`.
 
 ## Decision register — additions this session
 
@@ -90,10 +88,12 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | R2b | **CLOSED** (v4 writer preserved all data through a crashing run — pattern proven; the same rules ship in the client per §7.12) |
 | R9 | **Mitigated** (60 Hz available and active; user keeps 60 Hz on battery; D9 stands) |
 | R17 | **CLOSED** (GPU does CSC + scale; CPU never touches pixels) |
-| **R25 (new)** | Writing into a **locked DEFAULT NV12** surface is the only video-path operation not yet exercised (lock itself verified OK, pitch = width). P=low, S=high. Mitigation: stage-1 milestone 0 = `knvstd --selftest=d3d.present` fills + presents once in an isolated process **before** the 10-minute G1 run. |
+| **R25 (impl round IX: MITIGATION BUILT, awaiting execution)** | Writing into a **locked DEFAULT NV12** surface is the only video-path operation not yet exercised (lock itself verified OK, pitch = width). P=low, S=high. Mitigation now shipped as code: `knvstd --selftest=d3d.present` (isolated process — T10 runs it STANDALONE first) fills + read-back-verifies every byte + presents ×30 under a VEH crash guard; on AV the D7 latch degrades permanently and the fault address is recorded next to the intended extent. **Closes when round 5 reports d3d.present ok/degraded on the target.** |
+| **R29 (new, round IX)** | mingw GCC provides NO `__try/__except` (verified both arches) — the crash marker is `AddVectoredExceptionHandler` + `longjmp`. Sound for the expected fault shape (our own store instruction into the locked buffer — the exact G0.2 §3 shape, driver not on the stack, no locks held by us), but it has **never executed on the target** and cannot be exercised in the sandbox (no D3D9 runtime). If the AV instead happens INSIDE driver code on later calls, longjmp could leave driver state dirty — mitigated by the permanent-degrade latch (no D3D call ever again in-process) and by the standalone-process run order in T10. Watch round 5. |
 | **R26 (REVISED, impl round VI/VII)** | The agent sandbox **DOES have a working toolchain** (the round-II "apt fails" era is over): `apt-get update && apt-get install -y gcc cmake ninja-build libc6-dev gcc-mingw-w64-x86-64 gcc-mingw-w64-i686` (~2-4 min). **Packages do NOT persist between chat messages** — reinstall at the start of every session (see Bootstrapping). If apt lists hang, fall back to direct .deb downloads from `deb.debian.org/debian/pool/` + `dpkg -i` (proven: libc6-dev must match installed libc6 `2.36-9+deb12u14`; ninja must be bookworm `1.11.1`, NOT trixie `1.13.2` which needs GLIBC_2.38). Sandbox GCC is 12.2 — the TARGET's GCC 16.2 remains the authority (it catches `-Wformat-truncation` classes GCC 12 misses; see R28). Every C delta still ships through `build_native_tests.sh` + `cross_check.sh` + a target T10 run. |
 | **R27 (new, CLOSED by D18)** | `-static` (F1/D8) vs shared FFmpeg: ld ignores `.dll.a`, error text is misleading ("have you installed the static version?"). Reproduced 1:1 in the sandbox. Mitigation shipped: CMake configure-time FATAL_ERROR with the rebuild recipe when `lib/libavcodec.a` is missing; FFmpeg rebuilt static per D18. |
-| **R28 (new)** | Sandbox GCC 12.2 vs target GCC 16.2 warning drift: T10 round 1 failed on two `-Wformat-truncation` GCC 16 flags that GCC 12 accepted (timestamp formatters). Mitigation: all `snprintf` with time/foreign-string inputs use **explicitly bounded arguments** (modulo/precision), verified at `-O0..-O3`; T10 fails the build on ANY warning so drift can never ship silently. |
+| **R28 (new)** | Sandbox GCC 12.2 vs target GCC 16.2 warning drift: T10 round 1 failed on two `-Wformat-truncation` GCC 16 flags that GCC 12 accepted (timestamp formatters). Mitigation: all `snprintf` with time/foreign-string inputs use **explicitly bounded arguments** (modulo/precision), verified at `-O0..-O3`; T10 fails the build on ANY warning so drift can never ship silently. Round IX re-confirmed the discipline (cross `-Werror` caught a 64-bit format promotion in the new d3d code on the first pass). |
+| **R30 (new, round IX, informational)** | `clock.resolution` variance between runs: round 1 measured Sleep(1) 1.25→1.00 ms (wall tick 1250 us — something had already raised the system timer); round 4 measured 15.50→**2.75** ms (wall tick 15600 us before AND after timeBeginPeriod) — verdict `degraded`, harness tolerates it. One loaded sample (02:16 run) is not a recalibration basis. Consequence for stage 1: pacing must measure real intervals (D9 already mandates it); do NOT design on "Sleep(1) == 1 ms" on this machine. |
 | **R15 (impl round II)** | **Mostly closed.** T8 on the target resolved all 14 Python packages rc=0 (pip honours Requires-Python, so every pin declares 3.8 support): textual 6.2.1, rich 14.3.4, httpx 0.28.1, httpcore 1.0.9, h11 0.16.0, anyio 4.5.2, + 8 more — `python/requirements.txt` updated, wheels cached on target in `tests\t8_wheels\`. Remaining: offline install + runtime smoke at stage 4 (httpx 0.28 removed `proxies=`; textual 6.x API churn vs old docs). |
 | **R26 (new)** | **Sandbox has no compiler and must not install one** (apt installs fail with infrastructure errors; packages do not persist across turns anyway). The compile gate is the TARGET machine: `tests/T9_build_and_test.py` (w64devkit GCC 16.2 + cmake + ninja — the authoritative toolchain; it caught a `-Wstring-compare` that sandbox GCC 12 missed). Consequence: C leaving this workspace is compiled by the user, so review it line-by-line before handing over and keep changes per round small. |
 
@@ -102,39 +102,34 @@ session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOO
 
 ## Next steps (ordered)
 
-1. **USER ACTION — re-run T10** (FFmpeg static rebuild is DONE — verified via
-   `ffmpeg.exe -version` showing `--enable-static --disable-shared`; the
-   round-3 link failure was the missing static closure on our side, fixed:
-   `swresample` + `bcrypt`, see impl round VIII below):
+1. **USER ACTION — re-run T10 (round 5)**. Everything from round 4 is fixed
+   or newly delivered (see impl round IX below):
    ```bat
    cd /d "%USERPROFILE%\Desktop\NewKarnyNow\tests"
    python T10_build_and_test.py
    ```
-   T10 now probes BOTH prefix layouts automatically
-   (`...\ffmpeg-win7-dev` = current, `...\ffmpeg-win7-dev\usr\local` = old;
-   override: `KN_FFMPEG_PREFIX`). Expected: knvstd.exe links statically (no
-   DLLs), `decode.synthetic` runs the EMBEDDED 60-frame clip and reports real
-   fps/CPU on the E5500, everything else stays green. Send back
+   Expected: **`decode.synthetic` ok with 60/60 frames** (parser-flush fix);
+   **`d3d.formats` + `d3d.present` execute for the first time** (brief
+   fullscreen window flashes are normal — d3d.present runs standalone as the
+   R25 milestone-0 process AND inside --selftest=all AND inside
+   test_knselftest.exe); verdict ALL PASS with ~38 checks. If `d3d.present`
+   reports `failed` with an exception code, that is the R25 verdict — send
+   the files back unchanged, stage 1 then goes to the D7 GDI rung. Send back
    `T10_wynik.txt` + `T10_skrot.txt`.
-2. **d3d.formats + d3d.present self-tests** (phase B remainder; R25
-   milestone 0). mingw `d3d9.h` is already exercised in the sandbox
-   cross-build; verify every signature against it (pitfall: never write
-   D3D9 from memory). d3d.present = fill locked DEFAULT NV12 + StretchRect +
-   Present, timed; standalone-process isolation comes free with
-   `knvstd --selftest=`. On AV: degrade permanently, report in evidence
-   (D7 machinery).
-3. **gs.parse self-test** + the RTP/GS parser itself (`kn_gs.c`, analiza/04
+2. **gs.parse self-test** + the RTP/GS parser itself (`kn_gs.c`, analiza/04
    §1-2): parse kn_ring_dump hexdumps and synthetic KAT packets (little-endian
    body, `ext[11]` block indices, ≤68 B start-code search — pitfalls 1/2/4).
-   This is also the first stage-2 module.
-4. **Stage 1 `--loopback`**: knvstd grows the video path — decode file →
-   NV12 → locked DEFAULT surface → StretchRect → 1280×800 letterboxed window
-   (D6/D7/D9), perf snapshots (§7.6), WASAPI synthetic PCM. Gate G1: 30 fps
-   × 10 min, CPU ≤ ~45%, RSS flat, bundle complete, no network.
-5. Phase C self-tests (net.dns/tcp443/tls, tls.chain) via **schannel**
+   This is also the first stage-2 module. Reference: OpenNOW `nvst.rs`
+   (clone per Bootstrapping; verified baseline a49b124).
+3. **Stage 1 `--loopback`**: knvstd grows the video path on `kn_d3d` —
+   decode file → NV12 → locked DEFAULT surface → StretchRect → 1280×800
+   letterboxed window (D6/D7/D9), perf snapshots (§7.6), WASAPI synthetic
+   PCM. Gate G1: 30 fps × 10 min, CPU ≤ ~45%, RSS flat, bundle complete, no
+   network. (R25 milestone 0 = green `d3d.present` from step 1 gates this.)
+4. Phase C self-tests (net.dns/tcp443/tls, tls.chain) via **schannel**
    (Win7-native, zero deps, diagnoses exactly what the C client will use);
    they gate stage 2 debugging, not stage 1.
-6. Stage 2+ per BOOTSTRAP §12 (protocol without DTLS/SCTP → R3 spike →
+5. Stage 2+ per BOOTSTRAP §12 (protocol without DTLS/SCTP → R3 spike →
    TUI → hardening). R22 (31-field session_info 1:1) and R23 (RESUME +
    orphan cleanup) remain mandatory at their stages.
 
@@ -149,11 +144,12 @@ karnynow/
 │   ├── LOGGING.md              ← knlog/knring conformance + API guide
 │   ├── FEC.md                  ← knfec provenance (nvst.rs line refs) + semantics
 │   ├── SRTP.md                 ← knsrtp provenance + phase-2 checklist
+│   ├── D3D.md                  ← kn_d3d provenance (G0.2/T4 refs) + VEH guard
 │   ├── analysis/               ← measurement analyses (G0.2 closed here)
 │   └── research/               ← BOOTSTRAP.md + research HANDOFF (copies)
 ├── streamer/                   ← knvstd (C11)
 │   ├── include/kn/             ← knlog knring knfec knsrtp kn_aes kn_sha1
-│   │                              kn_diag kn_selftest kn_decode
+│   │                              kn_diag kn_selftest kn_decode kn_d3d
 │   ├── src/                    ← implementations + GENERATED: knfec_tables.h,
 │   │   │                          knfec_kat_vectors.h, knsrtp_kat_vectors.h,
 │   │   └                          kn_synthetic_clip.h (embedded decode clip)
@@ -396,3 +392,67 @@ Awaiting: T10 round 4 on the target — the first run of `decode.synthetic`
 with real fps/CPU numbers on the E5500.
 → `CMakeLists.txt` (KN_FFMPEG_LIBS closure), `tests/T10_build_and_test.py`
   (prefix probing)
+
+### 2026-10-23 · impl round IX (T10 round 4: 31/32 — decode flush fix + kn_d3d phase-B probes)
+**T10 round 4 on the target: 31/32 PASS.** The D18 static closure worked
+end-to-end: configure found the top-level prefix, `libavcodec.a` guard
+silent, link OK, zero warnings under GCC 16.2, no DLLs, all six unit suites
+green on the target for the first time with SRTP phase 2 included (knsrtp
+77 checks), bundle 5060 B fully validated, PE 6.01, build.json extras
+record the FFmpeg prefix. `decode.synthetic` EXECUTED (first ever real run
+of kn_decode): rc=0, failed=0, fps≈3687, cpu 93.8% of one core over the
+16 ms run, decode_ms_max=1 — but **frames=59 of 60** → the one FAIL
+(cascading into `--selftest=all` rc=1).
+**Root cause (measured, not guessed):** the clip itself is clean (ffprobe
+`nb_read_frames=60`); the sandbox reproduced 59/60 EXACTLY against bookworm
+FFmpeg 5.1 (same as the target's 63 — version-independent): `kd_run`
+flushed the DECODER at EOF but never the PARSER, and `av_parser_parse2`
+withholds the last access unit until the NEXT start code — which never
+comes at end-of-input. Fix: NULL-input parser flush before the decoder
+drain, both routed through a new shared `kd_send_drain` helper (identical
+accounting on all three paths). Post-fix sandbox evidence: **60/60**, and
+the contracts still hold — abort at frame 10 → rc=-4 with exactly 10
+delivered, truncated 30 000 B input → rc=0, 40 frames, 0 failed, no crash.
+**Phase B remainder delivered — `kn_d3d` module** (docs/D3D.md): the D7
+session-start capability probe (`d3d.formats`: PCI id, driver version,
+current mode + 60 Hz-at-res count (R9 evidence in every bundle), the 7-
+format CheckDeviceFormat row, 4-pair conversion matrix, corrected
+filter-caps masks, HWVP/SWVP CreateDevice behaviour) and **R25
+milestone 0** (`d3d.present`: production-shaped 1280×720 NV12 DEFAULT →
+lock → fill EVERY byte (pitch honoured) → full read-back verify →
+StretchRect(LINEAR, letterbox (0,40,1280,760) computed) → Present ×30,
+QPC-timed fill vs stretch+present separately, TCL after). Every call
+pattern copied from T4 v4 — and the pitfall rule immediately earned its
+keep: from-memory `CheckDeviceFormat` missed the AdapterFormat parameter
+(macro-arity error under -Werror) and the D3DFMT enum values were checked
+against d3d9types.h instead of recalled. **Crash guard: VEH + longjmp +
+D7 permanent-degrade latch** — mingw GCC has NO `__try/__except` (verified
+on both arches); the handler catches AV/IN_PAGE_ERROR only while armed,
+records code + fault write-address, and the latch makes every later
+in-process D3D call impossible (Release included). Registered landmines:
+R29 (guard never executed on real D3D9 — round 5 is the first run) and
+R30 (clock.resolution round-4 variance 15.50→2.75 ms degraded vs round 1's
+1.25→1.00 — one loaded sample, thresholds stand, D9 pacing unaffected).
+**knvstd hardening:** `--selftest=all` now runs test-by-test, logging
+`selftest_begin` + each result IMMEDIATELY (INFO soft-flush §7.12) — an
+uncatchable fault mid-run leaves the exact test name in diag.log (T4/R2b
+rule applied to the runner). Relevance mapping extended:
+video/d3d-flavoured failures re-run decode + both d3d probes into the
+bundle (latch-safe: a tripped probe returns -3 instantly, no crash loop).
+**T10 rev 4:** standalone `--selftest=d3d.present` FIRST (milestone-0
+process isolation; a hard crash there cannot eat the rest of the
+evidence), d3d verdict checks (`failed` fails T10 BY DESIGN — stage 1 must
+not start on a broken video path), `decode.synthetic` must be **ok**
+(60/60), stub count 5. Sandbox gates after all edits: native suites PASS
+(test_knselftest 94 checks), cross `-Werror` PASS x64+i686 (kn_d3d +
+kn_decode vs real FFmpeg 63 headers; PE imports d3d9/kernel32/msvcrt/
+user32/winmm — all Win7-built-in), ctest 8/8, T10 POSIX dry-run ALL PASS
+(31). Awaiting: T10 round 5 — first-ever execution of the d3d probes.
+→ `streamer/{include/kn,src}/kn_d3d.*` (new), `docs/D3D.md` (new),
+   `streamer/src/kn_decode.c` (parser flush), `streamer/src/kn_selftest.c`
+   (d3d tests + relevance), `streamer/src/knvstd_main.c` (immediate
+   logging), `streamer/tests/test_knselftest.c`, `CMakeLists.txt` +
+   `tools/*.sh` (kn_d3d wiring), `tests/T10_build_and_test.py` rev 4,
+   INTEGRATION.md rev 4, `tools/sandbox_decode_{check,edge}.c` (the
+   sandbox repro/contract harnesses — Linux + distro FFmpeg only, not part
+   of any gate), `artifacts/T10-round4/` (raw round-4 evidence, gitignored)

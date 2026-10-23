@@ -7,7 +7,9 @@ Successor to T9: same build+test gate, extended with the new deliverables
   1. cmake configure + ninja build (zero warnings expected)
   2. six unit-test binaries: knlog knring knfec knsrtp kndiag knselftest
   3. knvstd --list-selftests / --selftest=all  (REAL Win32 execution of
-     clock.resolution and console.host — the sandbox can only compile them)
+     clock.resolution, console.host, d3d.formats, d3d.present and
+     decode.synthetic — the sandbox can only compile them). d3d.present
+     ALSO runs standalone first: R25 milestone 0 in its own process.
   4. knvstd --diagnostics -> bundle validated with python's zipfile
      (independent reader): summary.json first, CRCs, required entries,
      build.json shows the effective _WIN32_WINNT
@@ -178,6 +180,29 @@ def main():
     check(rc == 0 and len(names) == 12, results,
           "registry lists 12 self-tests")
 
+    # R25 milestone 0: d3d.present runs STANDALONE first — its own process,
+    # so even a hard driver fault cannot take the rest of the run's evidence
+    # with it (G0.2 §4). The binary guards the fill with a VEH + permanent
+    # D7 degrade latch, so a caught AV arrives here as status=failed, not as
+    # a dead process; rc != 0 without JSON means something harder happened.
+    milestone = None
+    if IS_WINDOWS:
+        rc, out, _ = run([exe("knvstd"), "--selftest=d3d.present",
+                          "--log-dir=" + LOGDIR])
+        try:
+            milestone = json.loads(out.strip().splitlines()[-1])["results"][0]
+        except Exception as exc:                   # noqa: BLE001
+            log("  cannot parse milestone-0 json: %s" % exc)
+        if milestone is None:
+            log("  milestone-0 produced no result; rc=%d (unsigned 0x%08x)" %
+                (rc, rc & 0xFFFFFFFF))
+        else:
+            log("  milestone-0 reason: %s" % milestone["reason"])
+        check(rc == 0 and milestone is not None and
+              milestone["status"] in ("ok", "degraded"), results,
+              "R25 milestone 0: d3d.present standalone (%s)" %
+              (milestone["status"] if milestone else "no result, rc=%d" % rc))
+
     rc, out, _ = run([exe("knvstd"), "--selftest=all", "--log-dir=" + LOGDIR])
     st = None
     try:
@@ -211,6 +236,23 @@ def main():
             else:
                 check(r and r["status"] == "skipped", results,
                       "%s skipped on posix host dry-run" % nm)
+        # d3d probes (phase B): executed + usable verdict on Win32. "failed"
+        # here is a REAL finding (R25/D7), not a harness problem — it fails
+        # T10 on purpose so stage 1 cannot start on a broken video path.
+        for nm in ("d3d.formats", "d3d.present"):
+            r = by_name.get(nm)
+            if IS_WINDOWS:
+                check(r and r["status"] != "skipped", results,
+                      "%s executed on Win32 (status=%s)" %
+                      (nm, r["status"] if r else "absent"))
+                check(r and r["status"] in ("ok", "degraded"), results,
+                      "%s verdict usable (D7): %s" %
+                      (nm, r["status"] if r else "absent"))
+                if r:
+                    log("  %s reason: %s" % (nm, r["reason"]))
+            else:
+                check(r and r["status"] == "skipped", results,
+                      "%s skipped on posix host dry-run" % nm)
         # console.host is the D1 gate: it must not fail under ConEmu.
         # (If run outside ConEmu this FAILS by design — that is the point.)
         if IS_WINDOWS:
@@ -218,19 +260,24 @@ def main():
             if r:
                 check(r["status"] in ("ok", "degraded"), results,
                       "console.host not failed (D1): %s" % r["status"])
-        # phase B/C stubs report skipped honestly (7 permanent stubs;
-        # decode.synthetic joins them only when the build lacks FFmpeg —
-        # its clip is embedded, so with FFmpeg it always runs)
+        # phase B/C stubs report skipped honestly (5 permanent stubs left:
+        # gs.parse + the four net/tls names; decode.synthetic joins them
+        # only when the build lacks FFmpeg — its clip is embedded)
         skipped = [nm for nm, r in by_name.items() if r["status"] == "skipped"]
-        min_skipped = 7 if have_ffmpeg else 8
+        min_skipped = 5 if have_ffmpeg else 6
         check(len(skipped) >= min_skipped, results,
               "phase B/C stubs honestly skipped (%d, min %d)" %
               (len(skipped), min_skipped))
-        # decode.synthetic must REALLY run when we built with FFmpeg
+        # decode.synthetic must REALLY run when we built with FFmpeg — and
+        # since the parser-flush fix (T10 round 4: 59/60) it must be OK:
+        # 60/60 frames from the embedded clip.
         r = by_name.get("decode.synthetic")
         if have_ffmpeg:
             check(r and r["status"] != "skipped", results,
                   "decode.synthetic executed (status=%s)" %
+                  (r["status"] if r else "absent"))
+            check(r and r["status"] == "ok", results,
+                  "decode.synthetic ok — 60/60 embedded frames (status=%s)" %
                   (r["status"] if r else "absent"))
             if r:
                 log("  decode.synthetic reason: %s" % r["reason"])

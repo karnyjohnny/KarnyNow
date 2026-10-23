@@ -31,6 +31,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS -c streamer/src/kn_diag.c -o build/cross/kn_diag_$arch.o
     $CC $CFLAGS -c streamer/src/kn_selftest.c -o build/cross/kn_selftest_$arch.o
     $CC $CFLAGS -c streamer/src/kn_decode.c -o build/cross/kn_decode_$arch.o
+    $CC $CFLAGS -c streamer/src/kn_d3d.c   -o build/cross/kn_d3d_$arch.o
     $CC $CFLAGS -c third_party/tiny-aes-c/aes.c -o build/cross/tinyaes_$arch.o
     $CC $CFLAGS -c third_party/crypto-algorithms-sha1/sha1.c -o build/cross/sha1_$arch.o
     $CC $CFLAGS streamer/src/knlog.c streamer/src/knring.c streamer/tests/test_knlog.c \
@@ -42,18 +43,19 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS streamer/src/kn_aes.c streamer/src/kn_sha1.c streamer/src/knsrtp.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c \
         streamer/tests/test_knsrtp.c $LDFLAGS -o build/cross/test_knsrtp_$arch.exe
-    # kndiag/knselftest/knvstd pull the full core; winmm for timeBeginPeriod
+    # kndiag/knselftest/knvstd pull the full core; winmm for timeBeginPeriod,
+    # d3d9 for kn_d3d (both are import archives — F1 -static accepts them)
     KCORE="streamer/src/knlog.c streamer/src/knring.c streamer/src/knfec.c \
         streamer/src/kn_aes.c streamer/src/kn_sha1.c streamer/src/knsrtp.c \
         streamer/src/kn_diag.c streamer/src/kn_selftest.c \
-        streamer/src/kn_decode.c \
+        streamer/src/kn_decode.c streamer/src/kn_d3d.c \
         third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
     $CC $CFLAGS $KCORE streamer/tests/test_kndiag.c \
-        $LDFLAGS -o build/cross/test_kndiag_$arch.exe -lwinmm
+        $LDFLAGS -o build/cross/test_kndiag_$arch.exe -lwinmm -ld3d9
     $CC $CFLAGS $KCORE streamer/tests/test_knselftest.c \
-        $LDFLAGS -o build/cross/test_knselftest_$arch.exe -lwinmm
+        $LDFLAGS -o build/cross/test_knselftest_$arch.exe -lwinmm -ld3d9
     $CC $CFLAGS $KCORE streamer/src/knvstd_main.c \
-        $LDFLAGS -o build/cross/knvstd_$arch.exe -lwinmm
+        $LDFLAGS -o build/cross/knvstd_$arch.exe -lwinmm -ld3d9
     ls -la build/cross/*_$arch.exe | awk '{print $5, $9}'
 
     # kn_decode/kn_selftest against the REAL FFmpeg headers (the user's exact

@@ -38,10 +38,19 @@ add_library(kncore STATIC
   streamer/src/kn_diag.c
   streamer/src/kn_selftest.c
   streamer/src/kn_decode.c
+  streamer/src/kn_d3d.c
   third_party/tiny-aes-c/aes.c
   third_party/crypto-algorithms-sha1/sha1.c
 )
 target_include_directories(kncore PUBLIC streamer/include)
+# System libraries every consumer of the self-test core needs on Windows:
+#   d3d9  — kn_d3d (D7 probes, R25 milestone 0); d3d9.dll is OS-built-in on
+#           Win7, and libd3d9.a is an import archive, so the F1 -static link
+#           accepts it (same mechanism as the existing winmsvcrt imports).
+#   winmm — clock.resolution (timeBeginPeriod).
+if(WIN32)
+  target_link_libraries(kncore INTERFACE d3d9 winmm)
+endif()
 # kn_aes.c is the ONLY file that includes tiny-AES's aes.h (see its PROVENANCE.md);
 # upstream defaults apply everywhere (AES128, ECB+CBC+CTR) so struct AES_ctx has
 # one consistent layout across translation units.
