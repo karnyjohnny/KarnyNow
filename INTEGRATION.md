@@ -1,3 +1,99 @@
+# INTEGRATION NOTES — Round XVI delta, rev 9 (STAGE 2 CORE: kn_rx pipeline + SRTP phase 3 + replay-capture)
+
+> **Rev 9 supersedes rev 1-8.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/RX.md`** (full provenance table, §Parity
+> construction contract, deviations D-a..D-e, landmines 1-8), plus
+> `docs/SRTP.md` §Phase 3 and `docs/GS.md` §Round-XVI corrections.
+>
+> **Round XVI headline: the stage-2 media/transport core is implemented,
+> KAT-verified against an independent Python port, and proven end-to-end
+> on a REAL H.264 clip through injected loss — offline.** Nothing here has
+> seen a real GFN packet yet; sockets/WSS/RTSP remain.
+>
+> ## New files
+> 1. `streamer/include/kn/kn_rx.h` + `streamer/src/kn_rx.c` — the receive
+>    pipeline: bounded packet pool, RtpReorderBuffer, FecBlock/
+>    FecReorderBuffer (knfec reconstruct + envelope re-wrap, pitfall #4),
+>    FrameInvalidation (RFI) + queue, NACK tracker, ServerControl encoders
+>    (NACK-v2 0x0317, IDR 0x0302, RFI 0x0301, frame-ack, pacing, QoS),
+>    RTCP NACK/PLI, SRTP session (4 profiles) + unprotect, and the
+>    NvstVideoReceiver pipeline (process_datagram/process_packet/poll/
+>    lifecycle, watchdog, timeouts, counters). Zero allocation, injected
+>    ms clock, frames by callback.
+> 2. `streamer/src/kn_rx_kat_runner.h` — the shared KAT battery runner
+>    (used by BOTH test_knrx and the rx.vectors self-test; verbose flag
+>    keeps knvstd's stdout JSON-clean).
+> 3. `streamer/src/kn_rx_kat_vectors.h` — GENERATED (tools/
+>    rx_reference.py): 31 scenarios + op scripts + SRTP vectors +
+>    encoder goldens (~94 KB).
+> 4. `tools/rx_reference.py` — independent Python reference port
+>    (self-proves 363 checks before emitting; includes a pure-Python
+>    AES-256/GCM/KDF256 oracle cross-checked against FIPS-197/GCM-spec
+>    constants).
+> 5. `streamer/tests/test_knrx.c` — the 9th suite: battery + reorder
+>    units + 5 property families + error paths. 184 checks bare / 209
+>    with mbedTLS. FAULT-TOLERANT per the user's instruction: sections
+>    never abort the run.
+> 6. `tools/make_rx_capture.py` — synthetic capture generator (real clip →
+>    canonical GS/RTP wire + FEC + loss/reorder injection + optional SRTP
+>    protection → kn_ring_dump hex) with `--verify` (compares a replay's
+>    JSONL against the Python reference receiver's verdict).
+>
+> ## Changed files
+> - `streamer/{include/kn,src}/kn_gs.*` — SPLIT parse for SRTP
+>   (`kn_gs_rtp_parse_hdr` structure-only + `kn_gs_rtp_payload`
+>   plaintext-bounds; `kn_gs_rtp_parse` unchanged behaviour); assembler
+>   faithfulness fixes: codec-independent GsFrameHeader arms +
+>   `frame_type_parsed`/`frame_type_known` (Some(Unknown) != None).
+>   test_kngs 125 checks unaffected.
+> - `streamer/{include/kn,src}/knsrtp.*` — phase 3: `kn_srtp_kdf256`,
+>   `kn_srtp_aes256_cm_keystream_xor`, `kn_srtp_gcm_auth_{encrypt,
+>   decrypt}`, `kn_srtp_backend_{256,gcm}` (mbedTLS-guarded; honest
+>   NO_BACKEND stubs otherwise).
+> - `streamer/src/kn_selftest.c` + `include/kn/kn_selftest.h` — 13th
+>   registry entry `rx.vectors` (gated, portable, ~1 ms, 126/153 checks);
+>   relevance mapping learned `replay|capture|mjolnir` and video-flavoured
+>   failures now also re-run rx.vectors.
+> - `streamer/tests/test_knselftest.c` — registry 13, offline-vector
+>   expectations include rx.vectors.
+> - `streamer/src/knvstd_main.c` — NEW portable mode
+>   `--replay-capture=FILE.hex [--replay-au-dir=DIR]
+>   [--replay-srtp=PROFILE:TAG:KEYHEX:SALTHEX] [--replay-vps=N]`:
+>   two-pass hex replay on the capture timeline, per-AU JSONL (fi/len/
+>   sha1/keyframe/contiguous), AU .264 dump for ffprobe (target-side G2),
+>   tag-aware vps derivation, summary with counters + drop map, §7.7
+>   failure amplification (`session.replay`).
+> - `CMakeLists.txt`, `tools/build_native_tests.sh`,
+>   `tools/cross_check.sh` — kn_rx.c in kncore/KNCORE; test_knrx is the
+>   9th suite everywhere.
+> - `tests/T10_build_and_test.py` — suites +test_knrx; registry count 13;
+>   rx.vectors joins the must-pass offline vectors.
+>
+> ## Verification this round (sandbox)
+> - native bare: 9 suites, 889 checks, 0 failures.
+> - cross mingw x64+i686 `-Wall -Wextra -Werror` (+`-Wformat-truncation=2`
+>   on the touched files): CLEAN; paranoid-level warning count on
+>   kn_selftest unchanged (9 pre-existing, 0 new — R28 discipline).
+> - CMake+mbedTLS: ctest 11/11; rx.vectors from the shipped binary: ok,
+>   153 checks, 31/31 scenarios, srtp256/gcm VERIFIED (Python-oracle
+>   cross-check of KDF256 + GCM + CM256).
+> - ASan+UBSan+LSan: test_knrx and every replay-matrix run clean (the
+>   sanitizer leg caught two real bugs: the caller-memory reorder-map
+>   initialization and the arena 8-byte alignment — both fixed, both
+>   documented in RX.md landmines).
+> - Capture matrix (C vs the Python reference, byte-for-byte): lossless /
+>   FEC25+loss6+reorder30% / fatal-loss (38/60 frames incl. RFI withhold
+>   semantics — identical verdicts) / FEC50+loss8+reorder20% /
+>   SRTP-CM128 / SRTP-GCM256 — 6/6 VERIFY PASS.
+> - T10 POSIX dry-run: ALL PASS (57 checks).
+>
+> ## Target actions (see PROJECT-STATE §Next steps)
+> 1. `python tests\T10_build_and_test.py` — the full gate with the 9th
+>    suite + rx.vectors (expect ~66 checks).
+> 2. Optional 2-minute demo: generate a capture ON the target, replay it,
+>    ffprobe one dumped AU (the G2 offline half).
+> No GPU/T11 rerun needed (no graphics code touched).
+
 # INTEGRATION NOTES — Round XV delta, rev 8 (G1 CLOSED + phase-C network probes — registry 12/12)
 
 > **Rev 8 supersedes rev 1-7.** Canonical state: `PROJECT-STATE.md`.

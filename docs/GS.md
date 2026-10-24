@@ -121,21 +121,42 @@ total.
 
 ## Stage-2 TODOs growing from here
 
-- Reorder buffer + `invalidate_picture` semantics: new SOF before EOF ⇒
-  previous frame incomplete ⇒ drop + PLI (nvst.rs:4800-4810); same-frame
-  continuity is already enforced by the AU assembler and
-  `kn_gs_index_continuous`. Use bounded caller-owned packet storage and test
-  wrap, duplicate, stale, gap timeout, and capacity overflow.
-- Capacity-2 encoded AU queue per analiza/04 §2.4; overflow must invalidate
-  reference continuity and request a keyframe.
-- FEC recovery path: `kn_gs_fec_layout_parse` → knfec reconstruct →
-  re-wrap with the RTP envelope template (nvst.rs:4075-4106) — remember
-  pitfall #4: do NOT re-validate the fec_word of recovered shards; the
-  flags check at 4089 IS enforced there (`flags_valid` field is shipped
-  for exactly this).
-- SRTP ordering: `knsrtp unprotect` → `kn_gs_rtp_parse` → `kn_gs_video_parse`
-  → `kn_gs_picture_payload` → assembler (parse AFTER authentication —
-  the GS extension is inside the encrypted payload's RTP packet).
-- Real captures: stage-2 receive loop writes `kn_ring_dump` files; drop
-  them next to knvstd as `gs_capture.hex` and `gs.parse` turns into a
-  real-traffic regression test.
+- ~~Reorder buffer + `invalidate_picture` semantics~~ — **DONE (round
+  XVI)**: lives in `kn_rx` (docs/RX.md), not here: the reorder buffer, the
+  SOF-before-EOF rule, the SPI-continuity drop, gap NACK/timeout/window
+  recovery and the RFI invalidation are all ports of the receiver
+  (nvst.rs:3537-3660, 4741-4874), KAT-verified against
+  `tools/rx_reference.py`. `kn_gs_index_continuous` and the assembler's
+  internal continuity check remain the standalone safety nets.
+- ~~FEC recovery path~~ — **DONE (round XVI)** in `kn_rx` (docs/RX.md
+  §Parity construction): layout → knfec reconstruct → envelope re-wrap
+  with pitfall #4 encoded exactly (fec_word never re-validated;
+  `origin=RecoveredData` forces `is_fec=0`; flags check at 4089 enforced).
+- ~~SRTP ordering~~ — **DONE (round XVI)**: `kn_rx_srtp_unprotect`
+  implements the reference order (parse → guess → cipher → check →
+  **padding validation on the plaintext** → commit). This round SPLIT
+  `kn_gs_rtp_parse` accordingly: `kn_gs_rtp_parse_hdr` (structure only —
+  the padding byte is ciphertext on the wire) + `kn_gs_rtp_payload`
+  (bounds+padding against the decrypted length). The combined call keeps
+  its exact old behaviour for plaintext callers; all 78 vectors unchanged.
+- Capacity-2 encoded AU queue per analiza/04 §2.4 (the DECODER-side
+  queue between kn_rx's frame callback and kn_decode) — stage-2 sockets
+  integration; overflow must invalidate reference continuity and request
+  a keyframe (the kn_rx side already emits `contiguous` per the RFI
+  admit() logic — the queue consumes it).
+- Real captures: `knvstd --replay-capture` (docs/RX.md) already consumes
+  kn_ring_dump hex files end-to-end; the stage-2 receive loop will WRITE
+  them (`--capture`), and `gs.parse` picks them up as `gs_capture.hex`.
+
+### Round-XVI assembler corrections (kn_gs)
+
+Two faithfulness fixes to the round-XV AU assembler, both caught while
+porting the receiver (test_kngs 125 checks unaffected):
+1. `GsFrameHeader::parse` is **codec-independent** in the reference (two
+   ordered pattern arms, nvst.rs:3279-3289) — the C port had gated the
+   arms on the codec. Fixed.
+2. `Option<NvstFrameType>` distinguishes `Some(Unknown(x))` from `None`,
+   and the RFI `admit()` logic keys off `is_some()` ("frame types known on
+   this stream"). Added `frame_type_parsed` (assembler) /
+   `frame_type_known` (AU out) alongside the existing `frame_type_valid`
+   (wire value in 1..=6).

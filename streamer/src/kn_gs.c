@@ -28,10 +28,10 @@ static uint32_t gs_le32(const uint8_t *p)
 /* ------------------------------------------------------ RTP header+payload */
 
 /* nvst.rs:2456-2510 (parse) + 2512-2525 (payload, padding strip). */
-int kn_gs_rtp_parse(const uint8_t *pkt, size_t len, kn_gs_rtp *out)
+int kn_gs_rtp_parse_hdr(const uint8_t *pkt, size_t len, kn_gs_rtp *out)
 {
     unsigned first, cc, profile, words;
-    size_t payload_off, end;
+    size_t payload_off;
 
     if (!pkt || !out) return KN_GS_ERR_ARGS;
     memset(out, 0, sizeof *out);
@@ -71,16 +71,47 @@ int kn_gs_rtp_parse(const uint8_t *pkt, size_t len, kn_gs_rtp *out)
     out->timestamp = gs_be32(pkt + 4);
     out->ssrc = gs_be32(pkt + 8);
     out->has_padding = (first & 0x20u) ? 1 : 0;
+    out->payload_off = (unsigned)payload_off;
+    /* payload_len stays 0 until kn_gs_rtp_payload() validates padding —
+     * RtpHeader::parse (nvst.rs:2456-2510) does NOT touch the padding byte;
+     * payload() (2512-2525) does, and for SRTP that must run on the
+     * DECRYPTED plaintext (the padding byte is encrypted on the wire). */
+    return KN_GS_OK;
+}
 
-    end = len;
-    if (out->has_padding) {
-        unsigned padding = pkt[len - 1];
-        if (padding == 0u || (size_t)padding > end - payload_off)
+int kn_gs_rtp_payload(const kn_gs_rtp *rtp, const uint8_t *pkt,
+                      size_t total_len, size_t *off, size_t *len)
+{
+    size_t end;
+    if (!rtp || !off || !len) return KN_GS_ERR_ARGS;
+    if (total_len < (size_t)rtp->payload_off) return KN_GS_ERR_TOO_SHORT;
+    end = total_len;
+    if (rtp->has_padding) {
+        /* payload() reads packet.last() (nvst.rs:2519) — the caller passes
+         * the buffer whose length is total_len (the DECRYPTED plaintext for
+         * SRTP packets). */
+        unsigned padding;
+        if (!pkt || total_len == 0u) return KN_GS_ERR_PADDING;
+        padding = pkt[total_len - 1];
+        if (padding == 0u ||
+            (size_t)padding > end - (size_t)rtp->payload_off)
             return KN_GS_ERR_PADDING;
         end -= padding;
     }
-    out->payload_off = (unsigned)payload_off;
-    out->payload_len = (unsigned)(end - payload_off);
+    *off = (size_t)rtp->payload_off;
+    *len = end - (size_t)rtp->payload_off;
+    return KN_GS_OK;
+}
+
+int kn_gs_rtp_parse(const uint8_t *pkt, size_t len, kn_gs_rtp *out)
+{
+    size_t off, plen;
+    int rc = kn_gs_rtp_parse_hdr(pkt, len, out);
+    if (rc != KN_GS_OK) return rc;
+    rc = kn_gs_rtp_payload(out, pkt, len, &off, &plen);
+    if (rc != KN_GS_OK) return rc;
+    out->payload_off = (unsigned)off;
+    out->payload_len = (unsigned)plen;
     return KN_GS_OK;
 }
 
@@ -281,6 +312,7 @@ static void gs_au_reset_frame(kn_gs_au_assembler *assembler)
     assembler->last_packet_payload_length = 0;
     assembler->active = 0;
     assembler->frame_type_valid = 0;
+    assembler->frame_type_parsed = 0;
     assembler->has_expected_access_unit_length = 0;
     assembler->has_last_packet_payload_length = 0;
 }
@@ -316,18 +348,23 @@ static void gs_au_parse_frame_header(kn_gs_au_assembler *assembler,
                                      size_t header_size)
 {
     unsigned wire;
-    if (assembler->codec == KN_GS_CODEC_AV1) {
-        if (len < 4u || header_size == 0u ||
-            (payload[0] != 0x01u && payload[0] != 0x81u))
-            return;
-        wire = payload[3];
+    /* GsFrameHeader::parse (nvst.rs:3279-3289) is CODEC-INDEPENDENT: two
+     * ordered pattern arms — `47 53` needs header_size >= 4 and masks the
+     * value to 4 bits; `01`/`81` needs header_size > 0 and keeps the raw
+     * byte. Anything else leaves frame_type = None (frame_type_parsed=0 —
+     * distinct from Some(Unknown(x)), which the RFI admit() logic uses as
+     * "frame types known on this stream", nvst_invalidation.rs:178). */
+    if (len >= 4u && payload[0] == 0x47u && payload[1] == 0x53u &&
+        header_size >= 4u) {
+        wire = (unsigned)payload[3] & 0x0Fu;
+    } else if (len >= 4u && (payload[0] == 0x01u || payload[0] == 0x81u) &&
+               header_size > 0u) {
+        wire = (unsigned)payload[3];
     } else {
-        if (len < 4u || header_size < 4u ||
-            payload[0] != 0x47u || payload[1] != 0x53u)
-            return;
-        wire = payload[3] & 0x0Fu;
+        return;
     }
     assembler->frame_type_wire = wire;
+    assembler->frame_type_parsed = 1;
     assembler->frame_type_valid = gs_au_frame_type_valid(wire);
 }
 
@@ -451,6 +488,7 @@ int kn_gs_au_assembler_push(kn_gs_au_assembler *assembler,
     out->first_stream_packet_index = assembler->first_stream_packet_index;
     out->frame_type_wire = assembler->frame_type_wire;
     out->frame_type_valid = assembler->frame_type_valid;
+    out->frame_type_known = assembler->frame_type_parsed;
     out->keyframe = kn_gs_is_keyframe(assembler->codec, assembler->buffer,
             assembler->bytes_len,
             assembler->codec == KN_GS_CODEC_AV1 && assembler->frame_type_valid &&

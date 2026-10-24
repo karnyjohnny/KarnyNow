@@ -54,7 +54,7 @@ measurement instead of guessing (§10.7).
 |---|---|
 | **0 — measurements** | **COMPLETE.** G0.1 CPU ✅ · G0.2 D3D9 presentation ✅ **(T4 v4)** · G0.3 toolchain ✅ · G0.4 console ✅ |
 | **1 — C skeleton, logging, loopback/audio** | **CLOSED.** Stage-1 scope complete; G0 closed and target T11 full G1 passed (see round XV evidence below). |
-| **2 — NVST media/transport** | **IN PROGRESS.** mbedTLS TLS 1.2 accepted by T12; allocation-free GS AU assembler implemented and sandbox-tested (test_kngs 125/125). Reorder buffer/PLI, FEC recovery, sockets/WSS+RTSP remain. |
+| **2 — NVST media/transport** | **IN PROGRESS — MEDIA CORE DONE (round XVI, sandbox-verified; awaiting target T10 r12).** `kn_rx` ports the full pure receive pipeline (reorder, FEC repair + re-wrap, RFI invalidation, NACK tracker + NACK-v2/RTCP/ServerControl encoders, watchdog, timeouts, SRTP session incl. GCM/CM256 via mbedTLS) — 31 KAT scenarios + 5 property families + the 6-case `--replay-capture` matrix (real H.264 clip, injected loss, SRTP-protected) all byte-identical vs an independent Python reference. Remaining: target verification, sockets/UDP capture loop, WSS+RTSP client, G2. |
 | **3–5** | Not started; see BOOTSTRAP stage gates. |
 
 Stage 1 closure: T11 full G1 passed on the target before this continuation; graphics, decode, audio, and logging gates are closed. No GPU retest is needed for the current Stage-2 AU assembler work.
@@ -102,18 +102,39 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | **R30 (round X: stable pattern, informational)** | `clock.resolution` variance is NOT transient load: rounds 4+5 both measured Sleep(1) 15.6→**2.75/2.88** ms (verdict `degraded`, threshold 2.6 from round 1's 1.25→1.00) with wall tick pinned at 15600 us **even after timeBeginPeriod(1)** (round 1 saw 1250 us ticks — the machine state changed between rounds, probably a reboot cleared whatever had raised the timer). Consequences: (a) treat **~2.9 ms as the realistic Sleep(1) floor** on this machine — enough for 33.3 ms frame pacing at 30 fps, NOT enough for precise 1 ms spins; (b) wall-clock granularity stays 15.6 ms — timestamps below that resolution are quantised; (c) D9 stands stronger than ever: pacing measures real Present intervals, never assumes. Thresholds unchanged (honest `degraded` beats a fudged `ok`). |
 | **R15 (impl round II)** | **Mostly closed.** T8 on the target resolved all 14 Python packages rc=0 (pip honours Requires-Python, so every pin declares 3.8 support): textual 6.2.1, rich 14.3.4, httpx 0.28.1, httpcore 1.0.9, h11 0.16.0, anyio 4.5.2, + 8 more — `python/requirements.txt` updated, wheels cached on target in `tests\t8_wheels\`. Remaining: offline install + runtime smoke at stage 4 (httpx 0.28 removed `proxies=`; textual 6.x API churn vs old docs). |
 | **R31 (updated)** | Sandbox has host GCC 13.3 but no MinGW/Windows SDK headers (apt install denied). Target T12 now confirms the mbedTLS Win32 compile/link, zero warnings, TLS 1.2 verification on all three hosts, and a clean depth-3 chain. TLS 1.3 Finished/PSA still fails; the Win7 backend is capped at TLS 1.2. |
+| **R32 (new, round XVI)** | **kn_rx has never seen a real GFN packet.** The pipeline is verified against an independent Python port of nvst.rs + injected-loss captures of a real H.264 clip — but the canonical parity construction, the SPI-vs-seq relationship and the GCM256-tag8 profile are DERIVED from the reference and its tests, not from captured cloud traffic. First real Mjolnir traffic (stage-2 sockets + a live session) is the true test; `--capture` dumps + `--replay-capture` + `gs.parse`'s capture hook exist precisely so that first session becomes a permanent regression vector. Until then every deviation is documented (RX.md D-a..D-e) and the replay matrix exercises the loss/reorder/RFI paths offline. |
+| **R33 (round XVI: CLOSED)** | Arena-memory class of bugs: two real defects (reorder-map `used` garbage from malloc; 8-byte arena misalignment) slipped past static-context unit tests and were caught by the malloc'd-arena scenario battery + UBSan BEFORE handover. Rule adopted: vector runners allocate through malloc (never statics), every arena carve rounds to 8, and ASan+UBSan+LSan is part of the pre-handover gate for any kn_rx-family change. |
 
 Everything else (R3 usrsctp/DTLS spike, R7 first real `POST v2/session`, R22 31-field
 session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOOTSTRAP §9.
 
 ## Next steps (ordered)
 
-1. **Target-verify the AU assembler.** Sync the current `kn_gs.h/.c` and `test_kngs.c`; run `cmake --build build --target test_kngs` then `build\test_kngs.exe`. It must report 125 checks PASS. This target-specific compile/test is enough; do not run T10/T11 or GPU tests.
-2. **RTP reorder buffer + frame invalidation** for `kn_gs` (docs/GS.md Stage-2 TODOs): bounded capacity, 24-bit/wrap-safe sequence handling, duplicate/stale rejection, gap NACK range + timeout/window recovery event; incomplete frame/new SOF marks next AU discontinuous and requests keyframe/PLI.
-3. **FEC recovery path:** `kn_gs_fec_layout_parse` → `knfec` reconstruct → re-wrap RTP envelope (pitfall #4: restore envelope and do not validate recovered fec_word); test with synthetic packet loss.
-4. Stage 2 sockets: Mjolnir UDP receive loop → kn_ring capture →
-  `--capture`/`--decode` modes; WSS+RTSP client using the validated TLS
-  backend; G2 gate.
+1. **Target-verify round XVI (one T10 run).** Sync the repo, then under
+   ConEmu: `python tests\T10_build_and_test.py`. Expect ALL PASS with
+   ~66 checks: 9 unit suites (the new `test_knrx` reports 209 checks in
+   the mbedTLS-default build), registry lists **13** self-tests,
+   `rx.vectors ok` (~153 checks, srtp256/gcm VERIFIED — mbedTLS is the
+   default backend). No GPU/T11 rerun needed (no graphics code touched).
+   Optional 2-minute G2-offline demo (tests/README.md header): generate a
+   capture with tools/make_rx_capture.py, replay it with
+   `knvstd --replay-capture=... --replay-au-dir=aus`, verify against the
+   manifest, and ffprobe one dumped AU.
+2. **Stage-2 sockets**: the Mjolnir UDP receive loop (winsock, 8 MiB
+   SO_RCVBUF, nvst.rs:222) → `kn_rx_video_process_datagram` + paced
+   `kn_rx_video_poll` on a QPC clock → kn_ring capture of raw datagrams
+   (`--capture` writing `gs_capture.hex`-format dumps) → `--decode` mode
+   feeding `kn_decode` from the frame callback (capacity-2 AU queue per
+   analiza/04 §2.4, overflow → invalidate + keyframe request). The frame
+   callback contract is proven; this is platform glue + a real clock.
+3. **WSS + RTSP client** on the validated mbedTLS TLS-1.2 backend
+   (`OPTIONS→DESCRIBE→SETUP→ANNOUNCE→PLAY`), the 31-field session context
+   (R22) → `kn_rx_video_config` + SRTP material; first real `POST
+   v2/session` (R7). G2 gate: RTSP 200 + ffprobe-verified AUs from a REAL
+   stream + reorder/NACK-v2 surviving real loss.
+4. Control senders wiring (stage 3 with SCTP): the NACK-v2/IDR/RFI
+   encoders are DONE and KAT'd — they await the transport. SRTCP-GCM RR
+   when !rtcp_on_sctp.
 5. Stage 3+ per BOOTSTRAP §12 (R3 spike → TUI → hardening). R22/R23
    mandatory at their stages.
 
@@ -131,6 +152,9 @@ karnynow/
 │   ├── D3D.md                  ← kn_d3d provenance (G0.2/T4 refs) + VEH guard
 │   │                              + TARGET EVIDENCE (round 5: pitch 1536!)
 │   ├── GS.md                   ← kn_gs provenance + vector pipeline + stage-2 TODOs
+│   ├── RX.md                   ← kn_rx receive pipeline: provenance table,
+│   │                              §Parity construction, deviations, landmines,
+│   │                              replay-capture usage (ROUND XVI)
 │   ├── AUDIO.md                ← kn_audio (WASAPI) provenance + landmines
 │   ├── NET.md                  ← kn_net phase-C probes (schannel) + verdict table
 │   ├── LOOPBACK.md             ← stage-1 video path design + G1 gates
@@ -139,24 +163,27 @@ karnynow/
 ├── streamer/                   ← knvstd (C11)
 │   ├── include/kn/             ← knlog knring knfec knsrtp kn_aes kn_sha1
 │   │                              kn_diag kn_selftest kn_decode kn_d3d kn_gs
-│   │                              kn_perf kn_audio kn_net
+│   │                              kn_perf kn_audio kn_net kn_rx
 │   ├── src/                    ← implementations + GENERATED: knfec_tables.h,
 │   │   │                          knfec_kat_vectors.h, knsrtp_kat_vectors.h,
-│   │   └                          kn_gs_kat_vectors.h, kn_synthetic_clip.h
+│   │   │                          kn_gs_kat_vectors.h, kn_rx_kat_vectors.h,
+│   │   └                          kn_synthetic_clip.h + kn_rx_kat_runner.h
+│   │                              (shared battery: test + rx.vectors)
 │   ├── assets/synthetic.264    ← decode.synthetic KAT clip (embedded via tools/)
 │   ├── assets/synthetic720.264 ← loopback/G1 source: 720p High@5.1, NOT embedded
 │   └── tests/                  ← portable unit tests (run on Linux AND Win7):
 │                                  knlog knring knfec knsrtp kndiag knselftest
-│                                  kngs knaudio
+│                                  kngs knaudio knrx
 ├── python/                     ← TUI (stage 4); requirements.txt RESOLVED via T8
-├── tests/                      ← target-machine harnesses T1-T11
+├── tests/                      ← target-machine harnesses T1-T12
 │                                 (T9 = old build gate; T10 = build+selftests;
-│                                  T11 = the G1-video loopback gate)
+│                                  T11 = the G1-video loopback gate;
+│                                  T12 = network-only gate)
 ├── tools/                      ← build/verify scripts + KAT generators
 │   (build_native_tests.sh, cross_check.sh, check_jsonl.py, check_zip.py,
-│    fec_reference.py, srtp_reference.py, gs_reference.py,
-│    make_synthetic_clip.py, sandbox_decode_{check,edge}.c,
-│    sandbox_loopback_source.c)
+│    fec_reference.py, srtp_reference.py, gs_reference.py, rx_reference.py,
+│    make_synthetic_clip.py, make_rx_capture.py, prepare_mbedtls_sandbox.sh,
+│    sandbox_decode_{check,edge}.c, sandbox_loopback_source.c)
 ├── third_party/                ← GITIGNORED: tiny-aes-c, crypto-algorithms-sha1
 │                                  (+ ffmpeg-headers in the agent sandbox only)
 └── CMakeLists.txt              ← Windows build (w64devkit: cmake + ninja);
@@ -907,3 +934,103 @@ gap wait/NACK ranges, stale/duplicate rejection, and frame invalidation/PLI.
 → `CMakeLists.txt`, `tests/T10_build_and_test.py`, `tests/T12_network.py`,
   `streamer/include/kn/kn_gs.h`, `streamer/src/kn_gs.c`,
   `streamer/tests/test_kngs.c`, `docs/GS.md`, this file
+
+### 2026-10-24 · impl round XVI (stage-2 media core: kn_rx + SRTP phase 3 + replay-capture — ALL sandbox gates green, awaiting target T10 r12)
+**Context:** fresh agent session bootstrapped from THIS file + the repo
+(clone) + OpenNOW @ a49b124 (re-cloned; nvst.rs 14 695 lines confirmed).
+Baseline reproduced first: vendor files hash-verified, native 8 suites
+703 checks PASS, cross-check PASS — the round-XV (Copilot) AU assembler
+delta verified green in the sandbox (test_kngs 125/125) BEFORE building on
+it. User instruction this round: *"continue stage 2, write+test as much as
+possible before laptop testing; build tests so they run to completion even
+when parts fail"* — the whole battery is section-isolated with per-check
+accounting and never aborts (the fault-tolerant contract is now the suite
+design rule).
+**Review of the inherited AU assembler found two faithfulness gaps**
+(fixed, vectors unaffected): `GsFrameHeader::parse` is codec-INDEPENDENT in
+the reference (nvst.rs:3279-3289 — two ordered pattern arms), and
+`Option<NvstFrameType>` distinguishes `Some(Unknown(x))` from `None` — the
+RFI admit() logic keys off `is_some()`. Added `frame_type_parsed` /
+`frame_type_known`; `kn_gs_rtp_parse` split into `parse_hdr` +
+`kn_gs_rtp_payload` because SRTP padding bytes are CIPHERTEXT on the wire
+(the reference validates padding only in payload() AFTER decryption,
+nvst.rs:2695-2697).
+**Round-XVI delta — `kn_rx` (docs/RX.md): the full pure NvstVideoReceiver
+media path**, zero-allocation, injected-ms-clock, caller-owned pools:
+RtpReorderBuffer (3537-3660 — 52 ms dequeue deadline, genuinely-absent
+NACK ranges, empty-buffer jump resync, recovery ready.clear() quirk),
+FecBlock+FecReorderBuffer (3925-4310 — knfec reconstruct, template
+envelope re-wrap with pitfall #4 encoded, repair_failed single-retry,
+completed_through silent-ignore, silent single-block wait), consume path
+(4741-4862 — SOF-before-EOF, SPI continuity skip-push, RecoveredData
+is_fec force, RFI admit/withhold), FrameInvalidation + queue
+(nvst_invalidation.rs — RFI ranges, 100 ms retry, 250 ms one-shot IDR
+backstop), NACK tracker (4 ms/52 ms/3-attempt/RTT policy, 64-batch cap,
+overflow→keyframe), watchdog + timeouts + lifecycle + reset_media_state
+(next_frame_contiguous=FALSE quirk), and the feedback ENCODERS: NACK-v2
+0x0317 (base+bitmap records, wrap grouping), IDR 0x0302, RFI-range 0x0301,
+frame-ack 0x0204 (f64 bits + 0xBF800000 constants), pacing 0x0203, QoS
+0x0207 (command() field map ported as-is), RTCP generic NACK + PLI.
+**SRTP phase 3 (docs/SRTP.md):** KDF256 + AES-256-CM + AES-GCM(128/256,
+tags 4-16) under KN_TLS_BACKEND_MBEDTLS with honest NO_BACKEND stubs in
+bare builds; `kn_rx_srtp_session` implements the four NvstSrtpMaterial
+profiles and the reference unprotect order. GCM256-tag8 (the legacy
+nvstVideo default = the production expectation) fully wired.
+**Verification (the two-independent-implementations rule):**
+`tools/rx_reference.py` — a from-scratch Python port of every table above —
+SELF-PROVES (363 checks) against goldens transcribed from the reference's
+own Rust tests (the 52 ms deadline scenario, NACK exclusion, parity-only
+1+2 repair, 0xa5-poisoned fec_word 3+1 repair with byte-exactness at
+[..28]/[32..], retain-following-blocks incl. allocation identity,
+gaps_require_recovery contiguous=false, nack_v2/RTCP hex goldens, the
+round-trip grid) + a pure-Python AES-256/GHASH/GCM oracle proved against
+FIPS-197 C.3 and the GCM spec vectors → emits 31 scenarios + op scripts +
+6-profile SRTP vectors. `test_knrx` (9th suite): battery + reorder units +
+5 property families + error paths = **184 checks bare / 209 mbedTLS, 0
+failures**; `rx.vectors` self-test runs the same battery from the shipped
+binary (~1 ms, 126/153 checks). Gates: native 9 suites 889 checks PASS;
+cross mingw x64+i686 -Werror (+truncation=2 on touched files) CLEAN;
+ASan+UBSan+LSan clean; CMake+mbedTLS ctest 11/11; T10 POSIX dry-run ALL
+PASS (57); kn_selftest paranoid-level warning count UNCHANGED (9
+pre-existing, 0 new).
+**Bugs the battery caught (all fixed, RX.md landmines):** (1) the reorder
+map is caller memory — init MUST clear `used` flags (malloc'd-arena
+scenarios caught what static-context unit tests could not); (2) arena
+regions need 8-byte alignment (UBSan); (3) `--replay-capture` vps
+derivation must subtract the SRTP tag from the largest WIRE record or
+every FEC-repaired AU grows tag_len trailing bytes (E/F matrix caught it:
++10 CM128 / +8 GCM on exactly the repaired frames); (4) the capture
+generator's parity base-seq off-by-one produced a duplicate wire seq — the
+pipeline's replay window correctly rejected it (independent
+implementations disagreeing loudly = the system working).
+**NEW tool `--replay-capture` + `tools/make_rx_capture.py` (the offline G2
+mechanism):** packetizes the real synthetic.264 clip into canonical
+GS/RTP+FEC records (SPI = data-only counter — parity consumes RTP indices
+but not SPIs), injects loss/reorder, optionally SRTP-protects, and records
+the Python reference receiver's verdict in the manifest; knvstd replays on
+the capture timeline (52 ms deadlines live) emitting per-AU JSONL
+(fi/len/sha1/kf/contiguous) + optional .264 dumps for ffprobe. Matrix 6/6
+VERIFY PASS: lossless; FEC25+loss6+reorder30%; FATAL loss (RFI
+withhold-until-IDR: 38/60 frames — identical verdicts both sides);
+FEC50+loss8+reorder20%; SRTP-CM128; SRTP-GCM256 (mbedTLS build).
+**Key design insight recorded (RX.md §Parity):** canonical parity packets
+carry the algebraic FOLD at ext[0..4] (spi) and ext[8..11] (flags) but
+their OWN envelope/ext[4..8]/ext[11]/fec_word — which is exactly why a
+recovered shard reconstructs spi+flags perfectly (continuity + the 4089
+validation pass), why the re-wrap patches only envelope/frame_index/
+ext11, and why the recovered fec_word is garbage by design (pitfall #4).
+Recovered packets are shard_len-sized → repaired AUs carry trailing zero
+stuffing (reference-sanctioned for AVC; the verifier models it exactly).
+Awaiting: **target T10 round 12** (first target run of test_knrx +
+rx.vectors incl. the GCM/CM256 legs), then stage-2 sockets (Next steps 2).
+→ `streamer/{include/kn,src}/kn_rx.*`, `streamer/src/kn_rx_kat_runner.h`,
+  `streamer/src/kn_rx_kat_vectors.h` (generated), `tools/rx_reference.py`,
+  `tools/make_rx_capture.py`, `streamer/tests/test_knrx.c`,
+  `streamer/{include/kn,src}/knsrtp.*` (phase 3),
+  `streamer/{include/kn,src}/kn_gs.*` (split parse + assembler fixes),
+  `streamer/src/kn_selftest.c` (rx.vectors + relevance),
+  `streamer/include/kn/kn_selftest.h`, `streamer/tests/test_knselftest.c`,
+  `streamer/src/knvstd_main.c` (--replay-capture), `CMakeLists.txt`,
+  `tools/{build_native_tests,cross_check}.sh`,
+  `tests/T10_build_and_test.py`, `docs/{RX,SRTP,GS}.md`,
+  `INTEGRATION.md` rev 9, `tests/README.md`, this file

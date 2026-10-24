@@ -63,7 +63,7 @@ static void test_registry(void)
 {
     int n = kn_selftest_count();
     int i, saw_fec = 0, saw_srtp = 0, saw_clock = 0, saw_console = 0;
-    CHECK(n == 12, "registry holds all 12 names from §7.9");
+    CHECK(n == 13, "registry holds the 12 §7.9 names + rx.vectors");
     for (i = 0; i < n; ++i) {
         const char *nm = kn_selftest_name(i);
         CHECK(nm && nm[0], "registry name non-empty");
@@ -220,15 +220,17 @@ static void test_run_all_and_render(void)
     int n = kn_selftest_run_all(results, 16);
     int i, ok_count = 0, skipped_count = 0;
 
-    CHECK(n == 12, "run_all executes the whole registry");
+    CHECK(n == 13, "run_all executes the whole registry");
     for (i = 0; i < n; ++i) {
         if (results[i].status == KN_ST_OK) ok_count++;
         if (results[i].status == KN_ST_SKIPPED) skipped_count++;
     }
-    /* fec/srtp vectors must never FAIL on a healthy build (any platform) */
+    /* fec/srtp/rx vectors must never FAIL on a healthy build (any
+     * platform — all three batteries are portable) */
     for (i = 0; i < n; ++i)
         if (!strcmp(results[i].name, "fec.vectors") ||
-            !strcmp(results[i].name, "srtp.vectors"))
+            !strcmp(results[i].name, "srtp.vectors") ||
+            !strcmp(results[i].name, "rx.vectors"))
             CHECK(results[i].status == KN_ST_OK, "offline vector test OK");
 #ifdef _WIN32
     /* on the target, clock.resolution and console.host REALLY run.
@@ -243,7 +245,7 @@ static void test_run_all_and_render(void)
             !strcmp(results[i].name, "d3d.formats") ||
             !strcmp(results[i].name, "d3d.present"))
             CHECK(results[i].status != KN_ST_SKIPPED, "win32 test executed");
-    CHECK(ok_count >= 3, "offline vector tests (fec/srtp/gs) OK on target");
+    CHECK(ok_count >= 4, "offline vector tests (fec/srtp/gs/rx) OK on target");
     CHECK(skipped_count == 0 || skipped_count == 1,
           "NO stubs left (only decode may skip without ffmpeg/clip)");
     /* the four phase-C probes really execute on the target (their statuses
@@ -259,9 +261,10 @@ static void test_run_all_and_render(void)
                   || results[i].failures > 0,
                   "decode did not fail silently");
 #else
-    CHECK(ok_count == 3, "the three offline vector tests are OK (host)");
+    CHECK(ok_count == 4, "the four offline vector tests are OK (host)");
     CHECK(skipped_count == 9, "the rest honestly report skipped (host)");
-    /* host skips: clock, console, d3d x2, net x4 (+decode w/o ffmpeg) */
+    /* host skips: clock, console, d3d x2, net x4 (+decode w/o ffmpeg);
+     * host oks: fec, srtp, gs.parse, rx.vectors */
 #endif
 
     n_doc = kn_selftest_render_json(results, n, doc, sizeof doc);

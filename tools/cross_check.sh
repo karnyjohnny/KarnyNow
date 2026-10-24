@@ -33,6 +33,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS -c streamer/src/kn_decode.c -o build/cross/kn_decode_$arch.o
     $CC $CFLAGS -c streamer/src/kn_d3d.c   -o build/cross/kn_d3d_$arch.o
     $CC $CFLAGS -c streamer/src/kn_gs.c    -o build/cross/kn_gs_$arch.o
+    $CC $CFLAGS -c streamer/src/kn_rx.c    -o build/cross/kn_rx_$arch.o
     $CC $CFLAGS -c streamer/src/kn_perf.c  -o build/cross/kn_perf_$arch.o
     $CC $CFLAGS -c streamer/src/kn_audio.c -o build/cross/kn_audio_$arch.o
     $CC $CFLAGS -c streamer/src/kn_net.c   -o build/cross/kn_net_$arch.o
@@ -46,6 +47,11 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         $LDFLAGS -o build/cross/test_knfec_$arch.exe
     $CC $CFLAGS streamer/src/kn_gs.c streamer/tests/test_kngs.c \
         $LDFLAGS -o build/cross/test_kngs_$arch.exe
+    $CC $CFLAGS streamer/src/kn_rx.c streamer/src/kn_gs.c streamer/src/knfec.c \
+        streamer/src/knsrtp.c streamer/src/kn_aes.c streamer/src/kn_sha1.c \
+        third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c \
+        streamer/tests/test_knrx.c \
+        $LDFLAGS -o build/cross/test_knrx_$arch.exe
     $CC $CFLAGS streamer/src/kn_audio.c streamer/src/knlog.c \
         streamer/src/knring.c streamer/tests/test_knaudio.c \
         $LDFLAGS -o build/cross/test_knaudio_$arch.exe -lole32
@@ -59,7 +65,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_diag.c streamer/src/kn_selftest.c \
         streamer/src/kn_decode.c streamer/src/kn_d3d.c streamer/src/kn_gs.c \
         streamer/src/kn_perf.c streamer/src/kn_audio.c \
-        streamer/src/kn_net.c \
+        streamer/src/kn_net.c streamer/src/kn_rx.c \
         third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
     $CC $CFLAGS $KCORE streamer/tests/test_kndiag.c \
         $LDFLAGS -o build/cross/test_kndiag_$arch.exe -lwinmm -ld3d9 -lole32 \

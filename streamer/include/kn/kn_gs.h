@@ -95,6 +95,19 @@ typedef struct kn_gs_rtp {
 
 int kn_gs_rtp_parse(const uint8_t *pkt, size_t len, kn_gs_rtp *out);
 
+/* Split parsing for the SRTP receive path (kn_rx): RtpHeader::parse alone
+ * (nvst.rs:2456-2510) — structure, CSRC, extension, flags, but NO padding
+ * validation and payload_len left 0. For encrypted datagrams the padding
+ * byte is ciphertext; the reference validates it only in payload() AFTER
+ * decryption (nvst.rs:2695-2697). */
+int kn_gs_rtp_parse_hdr(const uint8_t *pkt, size_t len, kn_gs_rtp *out);
+
+/* payload() port (nvst.rs:2512-2525): bounds + padding validation against
+ * the buffer pkt[0..total_len) (the DECRYPTED plaintext for SRTP). Returns
+ * KN_GS_OK + payload bounds, KN_GS_ERR_TOO_SHORT or KN_GS_ERR_PADDING. */
+int kn_gs_rtp_payload(const kn_gs_rtp *rtp, const uint8_t *pkt,
+                      size_t total_len, size_t *off, size_t *len);
+
 /* Parsed GS body — NvVideoPacket (nvst.rs:3212-3257). flags_valid reflects
  * the recovered-packet validation of nvst.rs:4089 (informational on the
  * normal path; the reference only enforces it on FEC-recovered packets). */
@@ -189,7 +202,11 @@ typedef struct kn_gs_au_assembler {
     unsigned frame_type_wire;
     uint16_t last_packet_payload_length;
     int active;
-    int frame_type_valid;
+    int frame_type_valid;      /* wire value in 1..=6 (a known NvstFrameType) */
+    int frame_type_parsed;     /* GsFrameHeader matched at all — the
+                                  Option::is_some() of the reference
+                                  (Some(Unknown(x)) != None; RFI admit()
+                                  needs exactly this distinction) */
     int has_expected_access_unit_length;
     int has_last_packet_payload_length;
 } kn_gs_au_assembler;
@@ -200,7 +217,8 @@ typedef struct kn_gs_access_unit {
     uint32_t frame_index;
     uint32_t first_stream_packet_index;
     unsigned frame_type_wire;    /* NvstFrameType wire value; unknown preserved */
-    int frame_type_valid;
+    int frame_type_valid;        /* wire value in 1..=6 */
+    int frame_type_known;        /* frame header parsed (Some vs None) */
     int keyframe;
     int contiguous;
     int discarded_incomplete_frame;

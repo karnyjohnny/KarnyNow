@@ -189,6 +189,62 @@ int kn_srtp_replay_check(const kn_srtp_replay *w, uint64_t index);
  * defensively rather than crashing — the reference .expect()s here). */
 void kn_srtp_replay_commit(kn_srtp_replay *w, uint64_t index);
 
+/* ============================ phase 3 ====================================
+ * 256-bit profiles + AES-GCM — the ACTIVE Mjolnir policy is AEAD GCM with
+ * an 8-byte tag (nvst.rs:2709-2710 comment; legacy nvstVideo defaults to
+ * AEAD_AES_256_GCM, nvst.rs:1348-1350). Backend: mbedTLS, compiled when
+ * KN_TLS_BACKEND_MBEDTLS is defined (the target default build); bare builds
+ * report NO_BACKEND honestly — never fake crypto.
+ * Provenance:
+ *   - KDF256: identical construction to kdf128 with the AES-256-CM PRF
+ *     (nvst.rs:2873-2886 derive_aes_cm_key; Aes256Ctr = Ctr128BE, so the
+ *     full-128-bit counter carry of be128_add_u64 is correct here too).
+ *   - GCM unprotect: AAD = packet[0..payload_offset), ciphertext = payload
+ *     region, tag = trailing tag_len bytes (8 or 16), IV = the RFC 7714
+ *     builder kn_srtp_gcm_iv; auth failure = AuthenticationFailed BEFORE
+ *     the plaintext is consumed (nvst.rs:2711-2740). The one-call mbedTLS
+ *     API decrypts in place and then verifies; on failure the caller must
+ *     treat the buffer as garbage (kn_rx scrubs it) — noted deviation.
+ *   - CM256 keystream: same AES-CM as phase 1 with a 32-byte key
+ *     (nvst.rs:2618-2627 material; 2820-2861 cipher).
+ * ======================================================================== */
+
+#define KN_SRTP_ERR_NO_BACKEND (-2)
+
+/* 1 when this build provides AES-256 / AES-GCM primitives, else 0. */
+int kn_srtp_backend_256(void);
+int kn_srtp_backend_gcm(void);
+
+/* RFC 3711 KDF with the AES-256-CM PRF (labels as phase 1). master_salt is
+ * 12..14 bytes. Returns 0, -1 invalid args, KN_SRTP_ERR_NO_BACKEND. */
+int kn_srtp_kdf256(const uint8_t master_key[32],
+                   const uint8_t *master_salt, size_t salt_len,
+                   uint8_t label, uint8_t *out, size_t out_len);
+
+/* AES-256-CM keystream XOR (same semantics as the 128-bit variant).
+ * No-op when the backend is unavailable (callers check kn_srtp_backend_256
+ * first — the session layer refuses these profiles without it). */
+void kn_srtp_aes256_cm_keystream_xor(const uint8_t key[32],
+                                     const uint8_t iv[16],
+                                     uint64_t start_block,
+                                     uint8_t *data, size_t len);
+
+/* One-shot AES-GCM (key_bits 128 or 256; tag_len 8..16). auth_decrypt:
+ * ct_pt holds the ciphertext in and receives the plaintext in place.
+ * auth_encrypt: plaintext in place -> ciphertext, full tag into tag_out
+ * (first tag_len bytes used). Returns 0 ok, 1 tag mismatch (decrypt only),
+ * -1 invalid args, KN_SRTP_ERR_NO_BACKEND without mbedTLS. */
+int kn_srtp_gcm_auth_decrypt(const uint8_t *key, unsigned key_bits,
+                             const uint8_t iv[12],
+                             const uint8_t *aad, size_t aad_len,
+                             const uint8_t *tag, size_t tag_len,
+                             uint8_t *ct_pt, size_t ct_len);
+int kn_srtp_gcm_auth_encrypt(const uint8_t *key, unsigned key_bits,
+                             const uint8_t iv[12],
+                             const uint8_t *aad, size_t aad_len,
+                             uint8_t tag_out[16], size_t tag_len,
+                             uint8_t *pt_ct, size_t pt_len);
+
 #ifdef __cplusplus
 }
 #endif

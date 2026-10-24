@@ -25,13 +25,21 @@
 #include "kn/kn_d3d.h"
 #include "kn/kn_decode.h"
 #include "kn/kn_diag.h"
+#include "kn/knfec.h"
 #include "kn/kn_perf.h"
+#include "kn/kn_rx.h"
 #include "kn/kn_selftest.h"
+#include "kn/kn_sha1.h"
 #include "kn/knlog.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#  include <direct.h>     /* _mkdir */
+#else
+#  include <sys/stat.h>   /* mkdir */
+#endif
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -49,6 +57,8 @@ static void usage(void)
            "usage:\n"
            "  knvstd --selftest=<name|all> [--log-dir=DIR]\n"
            "  knvstd --loopback[=FILE.264] [--loopback-seconds=N] [--no-audio]\n"
+           "  knvstd --replay-capture=FILE.hex [--replay-au-dir=DIR]\n"
+           "         [--replay-srtp=PROFILE:TAG:KEYHEX:SALTHEX] [--replay-vps=N]\n"
            "       [--log-dir=DIR]   (WASAPI synthetic PCM unless --no-audio)\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
            "  knvstd --list-selftests\n"
@@ -714,6 +724,427 @@ static int run_loopback(const char *src_arg, int seconds, int no_audio,
 
 #endif /* _WIN32 */
 
+/* ------------------------------------------------------------ replay mode
+ * knvstd --replay-capture=FILE.hex — the stage-2 OFFLINE transport gate:
+ * feed a kn_ring_dump hex capture (tools/make_rx_capture.py, or a real
+ * stage-2 receive-loop dump) through the FULL kn_rx pipeline (SRTP when
+ * material is given, reorder, FEC repair, AU assembly, RFI/NACK logic) on
+ * the capture's own millisecond timeline. Emits one JSON line per assembled
+ * access unit (fi/len/sha1/keyframe/contiguous — the G2 ffprobe story:
+ * --replay-au-dir writes the AUs as .264 files) and a final summary JSON.
+ * Portable: runs identically on the host (sandbox proofs) and the target.
+ */
+typedef struct rp_ctx {
+    const char *au_dir;
+    unsigned long aus, key_aus, write_errors;
+    unsigned long long bytes;
+} rp_ctx;
+
+static void rp_frame_cb(const kn_rx_frame *f, void *ud)
+{
+    rp_ctx *c = (rp_ctx *)ud;
+    uint8_t dig[KN_SHA1_DIGEST_LEN];
+    char hex[2 * KN_SHA1_DIGEST_LEN + 1];
+    int i;
+    kn_sha1(f->bytes, f->bytes_len, dig);
+    for (i = 0; i < KN_SHA1_DIGEST_LEN; ++i)
+        sprintf(hex + 2 * i, "%02x", (unsigned)dig[i]);
+    printf("{\"mode\":\"replay\",\"event\":\"au\",\"fi\":%u,\"len\":%lu,"
+           "\"sha1\":\"%s\",\"keyframe\":%d,\"contiguous\":%d,\"ts\":%u,"
+           "\"wire\":%u}\n",
+           (unsigned)(f->frame_index % 100000000u),
+           (unsigned long)(f->bytes_len % 100000000ul), hex,
+           f->keyframe ? 1 : 0, f->contiguous ? 1 : 0,
+           (unsigned)(f->timestamp % 100000000u),
+           (unsigned)(f->frame_type_wire % 1000u));
+    c->aus++;
+    if (f->keyframe) c->key_aus++;
+    c->bytes += (unsigned long long)f->bytes_len;
+    if (c->au_dir && c->au_dir[0]) {
+        char path[1200];
+        FILE *fp;
+        int n = snprintf(path, sizeof path, "%s/au_%05u_%c.264", c->au_dir,
+                         (unsigned)(f->frame_index % 100000u),
+                         f->keyframe ? 'k' : 'p');
+        if (n <= 0 || (size_t)n >= sizeof path) { c->write_errors++; return; }
+        fp = fopen(path, "wb");
+        if (!fp) { c->write_errors++; return; }
+        if (f->bytes_len &&
+            fwrite(f->bytes, 1, f->bytes_len, fp) != f->bytes_len)
+            c->write_errors++;
+        fclose(fp);
+    }
+}
+
+static int rp_hexval(char ch)
+{
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+static int rp_hexdecode(const char *s, uint8_t *out, size_t out_cap,
+                        size_t *out_len)
+{
+    size_t n = 0;
+    while (s[0] && s[1]) {
+        int hi = rp_hexval(s[0]), lo = rp_hexval(s[1]);
+        if (hi < 0 || lo < 0) return -1;
+        if (n >= out_cap) return -1;
+        out[n++] = (uint8_t)((hi << 4) | lo);
+        s += 2;
+    }
+    *out_len = n;
+    return 0;
+}
+
+/* PROFILE:TAG:KEYHEX:SALTHEX  (profile: none|cm128|cm256|gcm128|gcm256) */
+static int rp_parse_srtp(const char *spec, int *profile, size_t *tag,
+                         uint8_t *key, size_t *key_len,
+                         uint8_t *salt, size_t *salt_len)
+{
+    char buf[512];
+    char *part[4];
+    int i;
+    size_t n;
+    if (!spec || strlen(spec) >= sizeof buf) return -1;
+    memcpy(buf, spec, strlen(spec) + 1);
+    part[0] = buf;
+    for (i = 1; i < 4; ++i) {
+        char *c = strchr(part[i - 1], ':');
+        if (!c) return -1;
+        *c = '\0';
+        part[i] = c + 1;
+    }
+    if (strcmp(part[0], "none") == 0)       *profile = KN_RX_SRTP_NONE;
+    else if (strcmp(part[0], "cm128") == 0) *profile = KN_RX_SRTP_CM128_HMAC_SHA1;
+    else if (strcmp(part[0], "cm256") == 0) *profile = KN_RX_SRTP_CM256_HMAC_SHA1;
+    else if (strcmp(part[0], "gcm128") == 0)*profile = KN_RX_SRTP_GCM128;
+    else if (strcmp(part[0], "gcm256") == 0)*profile = KN_RX_SRTP_GCM256;
+    else return -1;
+    {
+        long t = strtol(part[1], NULL, 10);
+        if (t <= 0 || t > 16) return -1;
+        *tag = (size_t)t;
+    }
+    if (*profile == KN_RX_SRTP_NONE) { *key_len = 0; *salt_len = 0; return 0; }
+    if (rp_hexdecode(part[2], key, 32, &n) != 0) return -1;
+    *key_len = n;
+    if (rp_hexdecode(part[3], salt, 14, &n) != 0) return -1;
+    *salt_len = n;
+    return 0;
+}
+
+#define RP_LINE_CAP  262144
+#define RP_PKT_CAP   65600
+
+static int run_replay(const char *cap_path, const char *au_dir,
+                      const char *srtp_spec, long vps_override,
+                      const char *log_dir)
+{
+    static char line[RP_LINE_CAP];
+    static uint8_t pkt[RP_PKT_CAP];
+    static rp_ctx rc_ctx;
+    kn_rx_video v;
+    kn_rx_mem mem;
+    kn_rx_video_config cfg;
+    kn_rx_srtp_session sess;
+    uint8_t *arena = NULL;
+    FILE *f = NULL;
+    unsigned long records = 0, bad_lines = 0, linecap = 0;
+    uint32_t max_rec = 0;
+    uint64_t t_last_ms = 0;
+    int profile = KN_RX_SRTP_NONE, rc, exit_code = 3;
+    size_t tag_len = 0, key_len = 0, salt_len = 0;
+    uint8_t key[32], salt[14];
+    uint32_t slots, pkt_cap, shard_len, vps, scratch_len;
+    size_t arena_need, off;
+    kn_log_config lcfg;
+
+    memset(&rc_ctx, 0, sizeof rc_ctx);
+    rc_ctx.au_dir = au_dir;
+    if (au_dir && au_dir[0]) {
+        /* best-effort create (the summary's au_write_errors is the honest
+         * verdict when this fails — no silent fallback) */
+#ifdef _WIN32
+        (void)_mkdir(au_dir);
+#else
+        (void)mkdir(au_dir, 0777);
+#endif
+    }
+    memset(&lcfg, 0, sizeof lcfg);
+    lcfg.log_dir = log_dir;
+    (void)kn_log_init(&lcfg);
+    kn_diag_set_selftest_provider(kn_selftest_render_relevant);
+    (void)kn_diag_install(log_dir);       /* §7.7: auto bundle on failure */
+
+    if (srtp_spec && srtp_spec[0]) {
+        if (rp_parse_srtp(srtp_spec, &profile, &tag_len, key, &key_len,
+                          salt, &salt_len) != 0) {
+            printf("{\"mode\":\"replay\",\"error\":\"bad_srtp_spec\"}\n");
+            fflush(stdout);
+            kn_log_shutdown();
+            return 2;
+        }
+    }
+
+    f = fopen(cap_path, "rb");
+    if (!f) {
+        printf("{\"mode\":\"replay\",\"error\":\"capture_unreadable\","
+               "\"path\":\"%.300s\"}\n", cap_path);
+        fflush(stdout);
+        kn_log_shutdown();
+        return 1;
+    }
+    /* pass 1: record count + the largest record (sizes the pool) */
+    while (fgets(line, (int)sizeof line, f)) {
+        kn_gs_dump_rec rec;
+        size_t plen = 0;
+        if (!line[0] || line[0] == '\n') continue;
+        if (kn_gs_hexdump_parse_line(line, &rec, pkt, sizeof pkt, &plen)
+            != KN_GS_OK) {
+            bad_lines++;
+            continue;
+        }
+        records++;
+        if (plen > max_rec) max_rec = (uint32_t)plen;
+        if (strlen(line) + 1 >= sizeof line) linecap++;  /* truncated line */
+    }
+    if (records == 0 || max_rec < 12) {
+        printf("{\"mode\":\"replay\",\"error\":\"capture_empty_or_invalid\","
+               "\"records\":%lu,\"bad_lines\":%lu}\n",
+               records % 100000000ul, bad_lines % 100000000ul);
+        fflush(stdout);
+        fclose(f);
+        kn_log_shutdown();
+        return 1;
+    }
+
+    /* config: vps from the override or the largest PLAINTEXT record (a
+     * full-size capture packet IS shard_len; see make_rx_capture.py
+     * manifest). With an SRTP profile the records carry the auth tag on
+     * the wire — deriving vps from the protected size would inflate
+     * shard_len by tag_len and every FEC-recovered packet would grow
+     * trailing garbage (found by the E/F capture matrix). */
+    {
+        uint32_t plain_max = max_rec;
+        if (profile != KN_RX_SRTP_NONE && max_rec > (uint32_t)tag_len)
+            plain_max = max_rec - (uint32_t)tag_len;
+        vps = (vps_override > 0) ? (uint32_t)vps_override
+                                 : (plain_max >= 16u ? plain_max - 16u
+                                                     : 1280u);
+    }
+    if (vps < KN_RX_MIN_VIDEO_PACKET_SIZE) vps = KN_RX_MIN_VIDEO_PACKET_SIZE;
+    if (vps > KN_RX_MAX_VIDEO_PACKET_SIZE) vps = KN_RX_MAX_VIDEO_PACKET_SIZE;
+    shard_len = vps + KN_RX_FEC_HEADER_ALLOWANCE;
+    pkt_cap = (max_rec > shard_len ? max_rec : shard_len) + 64u;
+    /* every arena region starts 8-byte aligned (the pool byte region size
+     * is slots*pkt_cap; struct regions carry uint64_t — misalignment is UB
+     * and UBSan rightly aborts on it) */
+    pkt_cap = (pkt_cap + 7u) & ~7u;
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.codec = KN_GS_CODEC_H264;
+    cfg.reorder_window_packets = KN_RX_DEFAULT_REORDER_WINDOW;
+    cfg.max_access_unit_bytes = KN_GS_DEFAULT_MAX_ACCESS_UNIT;
+    cfg.video_packet_size = vps;
+    cfg.timeout_ms = KN_RX_MAX_TIMEOUT_MS;   /* the capture timeline drives
+                                                reorder/FEC deadlines; the
+                                                stream timeout must not fire
+                                                across capture gaps */
+    memset(&mem, 0, sizeof mem);
+    {
+        uint32_t fec_blocks = 32u, fec_shards = 64u;
+        size_t pool_budget = 32u * 1024u * 1024u;   /* 2 GB machine (R11) */
+        slots = cfg.reorder_window_packets + 1u + fec_blocks * fec_shards +
+                16u;
+        if ((size_t)slots * pkt_cap > pool_budget) {
+            uint32_t fit = (uint32_t)(pool_budget / (pkt_cap ? pkt_cap : 1));
+            if (fit < cfg.reorder_window_packets + 2u) {
+                printf("{\"mode\":\"replay\",\"error\":\"pool_budget\","
+                       "\"pkt_cap\":%u}\n", (unsigned)pkt_cap);
+                fflush(stdout);
+                fclose(f);
+                kn_log_shutdown();
+                return 3;
+            }
+            slots = fit;
+        }
+        scratch_len = ((uint32_t)kn_fec_scratch_bytes(fec_shards,
+                                                      shard_len) +
+                       4096u + 7u) & ~7u;   /* kn_fec_scratch_bytes can be
+                                               odd (p*p) — keep the arena
+                                               8-aligned */
+        arena_need = (size_t)slots * sizeof(kn_rx_pkt)
+                   + (size_t)slots * pkt_cap
+                   + (size_t)(cfg.reorder_window_packets + 1u) *
+                         sizeof(kn_rx_reorder_entry)
+                   + (size_t)fec_blocks * sizeof(kn_rx_fec_block)
+                   + (size_t)fec_blocks * fec_shards * sizeof(uint32_t)
+                   + scratch_len
+                   + (size_t)KN_RX_NACK_MAX_PENDING * sizeof(kn_rx_nack_entry)
+                   + cfg.max_access_unit_bytes
+                   + 16u * sizeof(kn_rx_event);
+        arena = (uint8_t *)malloc(arena_need);
+        if (!arena) {
+            printf("{\"mode\":\"replay\",\"error\":\"arena_alloc\","
+                   "\"need\":%lu}\n",
+                   (unsigned long)(arena_need % 1000000000ul));
+            fflush(stdout);
+            fclose(f);
+            kn_log_shutdown();
+            return 3;
+        }
+        off = 0;
+        mem.pool_meta = (kn_rx_pkt *)(void *)(arena + off);
+        off += (size_t)slots * sizeof(kn_rx_pkt);
+        mem.pool_bytes = arena + off;
+        off += (size_t)slots * pkt_cap;
+        mem.pool_slots = slots;
+        mem.pool_pkt_cap = pkt_cap;
+        mem.reorder_map = (kn_rx_reorder_entry *)(void *)(arena + off);
+        off += (size_t)(cfg.reorder_window_packets + 1u) *
+               sizeof(kn_rx_reorder_entry);
+        mem.fec_blocks = (kn_rx_fec_block *)(void *)(arena + off);
+        off += (size_t)fec_blocks * sizeof(kn_rx_fec_block);
+        mem.fec_shard_arena = (uint32_t *)(void *)(arena + off);
+        off += (size_t)fec_blocks * fec_shards * sizeof(uint32_t);
+        mem.fec_max_blocks = fec_blocks;
+        mem.fec_max_shards = fec_shards;
+        mem.fec_scratch = arena + off;
+        off += scratch_len;
+        mem.fec_scratch_len = scratch_len;
+        mem.nack_table = (kn_rx_nack_entry *)(void *)(arena + off);
+        off += (size_t)KN_RX_NACK_MAX_PENDING * sizeof(kn_rx_nack_entry);
+        mem.nack_capacity = KN_RX_NACK_MAX_PENDING;
+        mem.au_buffer = arena + off;
+        off += cfg.max_access_unit_bytes;
+        mem.au_buffer_capacity = cfg.max_access_unit_bytes;
+        mem.events = (kn_rx_event *)(void *)(arena + off);
+        mem.events_capacity = 16;
+    }
+
+    if (kn_rx_video_init(&v, &cfg, &mem, 0) != KN_RX_OK) {
+        printf("{\"mode\":\"replay\",\"error\":\"pipeline_init\"}\n");
+        fflush(stdout);
+        free(arena);
+        fclose(f);
+        kn_log_shutdown();
+        return 3;
+    }
+    rc = kn_rx_srtp_session_init(&sess, profile, key_len ? key : NULL,
+                                 key_len, salt_len ? salt : NULL, salt_len,
+                                 tag_len);
+    if (rc != KN_RX_OK) {
+        printf("{\"mode\":\"replay\",\"error\":\"srtp_session\","
+               "\"rc\":%d,\"backend_gcm\":%d,\"backend_256\":%d}\n", rc,
+               kn_srtp_backend_gcm(), kn_srtp_backend_256());
+        fflush(stdout);
+        free(arena);
+        fclose(f);
+        kn_log_shutdown();
+        return 3;
+    }
+    kn_rx_video_set_srtp(&v, &sess);
+
+    {
+        kn_lctx b;
+        kn_lctx_init(&b, KN_CH_MEDIA, KN_INFO, "replay_begin");
+        kn_lctx_str(&b, "capture", cap_path);
+        kn_lctx_i64(&b, "records", (long long)records);
+        kn_lctx_i64(&b, "vps", (long long)vps);
+        kn_lctx_i64(&b, "srtp_profile", (long long)profile);
+        kn_log_emit(&b);
+    }
+
+    /* pass 2: replay on the capture timeline */
+    rewind(f);
+    while (fgets(line, (int)sizeof line, f)) {
+        kn_gs_dump_rec rec;
+        size_t plen = 0;
+        uint64_t now_ms;
+        if (!line[0] || line[0] == '\n') continue;
+        if (kn_gs_hexdump_parse_line(line, &rec, pkt, sizeof pkt, &plen)
+            != KN_GS_OK)
+            continue;                       /* counted in pass 1 */
+        now_ms = rec.mono_us / 1000u;
+        if (now_ms < t_last_ms) now_ms = t_last_ms;   /* monotonic guard */
+        t_last_ms = now_ms;
+        (void)kn_rx_video_process_datagram(&v, pkt, plen, now_ms,
+                                           rp_frame_cb, &rc_ctx);
+        (void)kn_rx_video_poll(&v, now_ms, rp_frame_cb, &rc_ctx);
+    }
+    fclose(f);
+    f = NULL;
+    (void)linecap;
+
+    {
+        char drops[512];
+        size_t doff = 0;
+        int d;
+        for (d = 1; d < 24; ++d) {
+            if (!v.drop_counters[d]) continue;
+            if (doff + 48 < sizeof drops)
+                doff += (size_t)snprintf(drops + doff, sizeof drops - doff,
+                                         "%s\"%d\":%llu", doff ? "," : "",
+                                         d,
+                                         (unsigned long long)
+                                         (v.drop_counters[d] %
+                                          1000000000ull));
+        }
+        if (doff >= sizeof drops) doff = sizeof drops - 1;
+        drops[doff] = '\0';
+        printf("{\"mode\":\"replay\",\"summary\":{\"capture\":\"%.200s\","
+               "\"records\":%lu,\"bad_lines\":%lu,\"authenticated\":%llu,"
+               "\"frames\":%lu,\"keyframes\":%lu,\"frame_bytes\":%llu,"
+               "\"fec_repaired\":%llu,\"stale\":%llu,\"gaps\":%llu,"
+               "\"withheld\":%llu,\"kf_requests\":%llu,\"retransmits\":%llu,"
+               "\"replay_rejected\":%llu,\"ev_overflow\":%u,"
+               "\"au_write_errors\":%lu,\"vps\":%u,\"srtp_profile\":%d,"
+               "\"state\":%d,\"drops\":{%s}}}\n",
+               cap_path, records % 100000000ul, bad_lines % 100000000ul,
+               (unsigned long long)(v.authenticated_packets % 10000000000ull),
+               rc_ctx.aus % 100000000ul, rc_ctx.key_aus % 100000000ul,
+               (unsigned long long)(rc_ctx.bytes % 1000000000000ull),
+               (unsigned long long)(v.fec_repaired_packets % 1000000000ull),
+               (unsigned long long)(v.stale_packets % 1000000000ull),
+               (unsigned long long)(v.packet_gap_recoveries % 1000000000ull),
+               (unsigned long long)(v.withheld_frames % 1000000000ull),
+               (unsigned long long)(v.keyframe_requests % 1000000000ull),
+               (unsigned long long)(v.recovered_retransmissions %
+                                    1000000000ull),
+               (unsigned long long)(v.replay_rejections % 1000000000ull),
+               (unsigned)(v.ev_overflow % 1000000u),
+               rc_ctx.write_errors % 100000000ul,
+               (unsigned)(vps % 100000000u), profile, v.state, drops);
+        fflush(stdout);
+    }
+
+    exit_code = (rc_ctx.aus > 0 && rc_ctx.write_errors == 0) ? 0 : 1;
+    if (exit_code != 0) {
+        kn_log_on_failure("session.replay",
+                          rc_ctx.aus == 0 ? "E_REPLAY_NO_FRAMES"
+                                          : "E_REPLAY_AU_WRITE",
+                          rc_ctx.aus == 0
+                              ? "the capture replayed but no access unit "
+                                "completed (check drops in the summary)"
+                              : "AU file writes failed (disk/permissions?)",
+                          "inspect the summary JSON drops map + media.log; "
+                          "the auto-bundle path is in this log dir");
+    } else {
+        kn_lctx e;
+        kn_lctx_init(&e, KN_CH_MEDIA, KN_INFO, "replay_end");
+        kn_lctx_i64(&e, "frames", (long long)rc_ctx.aus);
+        kn_lctx_i64(&e, "fec_repaired",
+                    (long long)(v.fec_repaired_packets % 1000000000ull));
+        kn_log_emit(&e);
+    }
+    free(arena);
+    kn_log_shutdown();
+    return exit_code;
+}
+
 static int print_version(void)
 {
     static char build[4096];
@@ -735,6 +1166,10 @@ int main(int argc, char **argv)
     const char *log_dir = "logs";
     const char *selftest = NULL;
     const char *loopback = NULL;          /* "" = default source discovery */
+    const char *replay = NULL;
+    const char *replay_au_dir = NULL;
+    const char *replay_srtp = NULL;
+    long replay_vps = 0;
     int loopback_seconds = 600;           /* G1 default: 10 minutes */
     int no_audio = 0;
     int diagnostics = 0, version = 0, list = 0, i;
@@ -745,6 +1180,14 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--loopback") == 0) loopback = "";
         else if (strncmp(a, "--loopback=", 11) == 0) loopback = a + 11;
         else if (strcmp(a, "--no-audio") == 0) no_audio = 1;
+        else if (strncmp(a, "--replay-capture=", 17) == 0) replay = a + 17;
+        else if (strncmp(a, "--replay-au-dir=", 16) == 0)
+            replay_au_dir = a + 16;
+        else if (strncmp(a, "--replay-srtp=", 14) == 0) replay_srtp = a + 14;
+        else if (strncmp(a, "--replay-vps=", 13) == 0) {
+            replay_vps = strtol(a + 13, NULL, 10);
+            if (replay_vps < 0 || replay_vps > 65519) { usage(); return 2; }
+        }
         else if (strncmp(a, "--loopback-seconds=", 19) == 0) {
             long v = strtol(a + 19, NULL, 10);
             if (v < 1 || v > 86400) { usage(); return 2; }
@@ -760,6 +1203,9 @@ int main(int argc, char **argv)
     if (list) return print_registry();
     if (version) return print_version();
     if (selftest && selftest[0]) return run_selftests(selftest, log_dir);
+    if (replay && replay[0])
+        return run_replay(replay, replay_au_dir, replay_srtp, replay_vps,
+                          log_dir);
     if (loopback) return run_loopback(loopback, loopback_seconds, no_audio,
                                       log_dir);
     if (diagnostics) return run_diagnostics(log_dir);

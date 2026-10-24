@@ -8,7 +8,7 @@
  *   - non-interactive and bounded in time (worst case ~1 s each; SHA-1 TEST3
  *                           hashes 1M bytes, clock.resolution sleeps ~50 ms)
  *
- * The twelve names from §7.9, by phase:
+ * The §7.9 names plus the stage-2 addition (rx.vectors), by phase:
  *   A (offline, host-testable — IMPLEMENTED):
  *     fec.vectors     Cauchy RS encode/reconstruct against KAT vectors
  *                     (separates: our matrix vs a Vandermonde mistake)
@@ -27,6 +27,11 @@
  *     gs.parse          RTP/GS parse KAT battery (portable) + optional real
  *                       kn_ring_dump capture (separates: wire-format bugs vs
  *                       transport bugs; pitfalls #1/#2/#4 vectors)
+ *     rx.vectors        stage-2 receive pipeline battery (portable): the
+ *                       reorder/FEC/RFI/NACK/SRTP KAT set + 31 scripted
+ *                       pipeline scenarios re-run from the shipped binary
+ *                       (separates: transport-pipeline bugs vs wire-format
+ *                       bugs vs decoder bugs)
  *   C (network, target machine only — IMPLEMENTED, round XV):
  *     net.dns / net.tcp443   resolution + egress to the real GFN endpoints
  *                            (+ one non-NVIDIA baseline per layer, so

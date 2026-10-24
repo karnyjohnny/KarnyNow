@@ -327,3 +327,171 @@ void kn_srtp_replay_commit(kn_srtp_replay *w, uint64_t index)
         w->seen[age / 64u] |= (uint64_t)1 << (age % 64u);
     }
 }
+
+/* ============================ phase 3 ====================================
+ * AES-256 CM/KDF + AES-GCM via mbedTLS (see knsrtp.h phase-3 block for
+ * provenance). Bare builds: honest NO_BACKEND stubs, zero fake crypto.
+ * ======================================================================== */
+
+#ifdef KN_TLS_BACKEND_MBEDTLS
+#include <mbedtls/aes.h>
+#include <mbedtls/gcm.h>
+#endif
+
+int kn_srtp_backend_256(void)
+{
+#ifdef KN_TLS_BACKEND_MBEDTLS
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int kn_srtp_backend_gcm(void)
+{
+#ifdef KN_TLS_BACKEND_MBEDTLS
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int kn_srtp_kdf256(const uint8_t master_key[32],
+                   const uint8_t *master_salt, size_t salt_len,
+                   uint8_t label, uint8_t *out, size_t out_len)
+{
+#ifdef KN_TLS_BACKEND_MBEDTLS
+    mbedtls_aes_context ctx;
+    uint8_t iv[16], block[16];
+    size_t off = 0;
+    int rc;
+
+    if (!master_key || !master_salt || !out) return -1;
+    if (salt_len > KN_SRTP_MAX_SALT_LEN || out_len == 0 ||
+        out_len > KN_SRTP_MAX_KDF_OUT)
+        return -1;
+
+    memset(iv, 0, sizeof iv);
+    memcpy(iv, master_salt, salt_len);
+    iv[7] ^= label;                       /* key_id = label * 2^64 (byte 7) */
+
+    mbedtls_aes_init(&ctx);
+    rc = mbedtls_aes_setkey_enc(&ctx, master_key, 256);
+    if (rc != 0) { mbedtls_aes_free(&ctx); return -1; }
+    while (off < out_len) {
+        size_t n = (out_len - off) < 16u ? (out_len - off) : 16u;
+        if (mbedtls_aes_crypt_ecb(&ctx, MBEDTLS_AES_ENCRYPT, iv, block) != 0) {
+            mbedtls_aes_free(&ctx);
+            return -1;
+        }
+        memcpy(out + off, block, n);
+        off += n;
+        be128_add_u64(iv, 1);
+    }
+    mbedtls_aes_free(&ctx);
+    return 0;
+#else
+    (void)master_key; (void)master_salt; (void)salt_len; (void)label;
+    (void)out; (void)out_len;
+    return KN_SRTP_ERR_NO_BACKEND;
+#endif
+}
+
+void kn_srtp_aes256_cm_keystream_xor(const uint8_t key[32],
+                                     const uint8_t iv[16],
+                                     uint64_t start_block,
+                                     uint8_t *data, size_t len)
+{
+#ifdef KN_TLS_BACKEND_MBEDTLS
+    mbedtls_aes_context ctx;
+    uint8_t ctr[16], ks[16];
+    size_t off = 0;
+    if (!key || !iv || (!data && len > 0)) return;
+    mbedtls_aes_init(&ctx);
+    if (mbedtls_aes_setkey_enc(&ctx, key, 256) != 0) {
+        mbedtls_aes_free(&ctx);
+        return;
+    }
+    memcpy(ctr, iv, 16);
+    be128_add_u64(ctr, start_block);
+    while (off < len) {
+        size_t n = (len - off) < 16u ? (len - off) : 16u;
+        size_t k;
+        if (mbedtls_aes_crypt_ecb(&ctx, MBEDTLS_AES_ENCRYPT, ctr, ks) != 0)
+            break;
+        for (k = 0; k < n; ++k) data[off + k] ^= ks[k];
+        off += n;
+        be128_add_u64(ctr, 1);
+    }
+    mbedtls_aes_free(&ctx);
+#else
+    (void)key; (void)iv; (void)start_block; (void)data; (void)len;
+#endif
+}
+
+#ifdef KN_TLS_BACKEND_MBEDTLS
+static int gcm_key_bits_valid(unsigned key_bits)
+{
+    return key_bits == 128u || key_bits == 256u;
+}
+#endif
+
+int kn_srtp_gcm_auth_decrypt(const uint8_t *key, unsigned key_bits,
+                             const uint8_t iv[12],
+                             const uint8_t *aad, size_t aad_len,
+                             const uint8_t *tag, size_t tag_len,
+                             uint8_t *ct_pt, size_t ct_len)
+{
+#ifdef KN_TLS_BACKEND_MBEDTLS
+    mbedtls_gcm_context ctx;
+    int rc;
+    if (!key || !iv || !tag || (!ct_pt && ct_len) ||
+        !gcm_key_bits_valid(key_bits) || tag_len < 4u || tag_len > 16u ||
+        (aad_len && !aad))
+        return -1;
+    mbedtls_gcm_init(&ctx);
+    if (mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, key_bits) != 0) {
+        mbedtls_gcm_free(&ctx);
+        return -1;
+    }
+    rc = mbedtls_gcm_auth_decrypt(&ctx, ct_len, iv, 12, aad, aad_len,
+                                  tag, tag_len, ct_pt, ct_pt);
+    mbedtls_gcm_free(&ctx);
+    if (rc == MBEDTLS_ERR_GCM_AUTH_FAILED) return 1;
+    return rc == 0 ? 0 : -1;
+#else
+    (void)key; (void)key_bits; (void)iv; (void)aad; (void)aad_len;
+    (void)tag; (void)tag_len; (void)ct_pt; (void)ct_len;
+    return KN_SRTP_ERR_NO_BACKEND;
+#endif
+}
+
+int kn_srtp_gcm_auth_encrypt(const uint8_t *key, unsigned key_bits,
+                             const uint8_t iv[12],
+                             const uint8_t *aad, size_t aad_len,
+                             uint8_t tag_out[16], size_t tag_len,
+                             uint8_t *pt_ct, size_t pt_len)
+{
+#ifdef KN_TLS_BACKEND_MBEDTLS
+    mbedtls_gcm_context ctx;
+    int rc;
+    if (!key || !iv || !tag_out || (!pt_ct && pt_len) ||
+        !gcm_key_bits_valid(key_bits) || tag_len < 4u || tag_len > 16u ||
+        (aad_len && !aad))
+        return -1;
+    mbedtls_gcm_init(&ctx);
+    if (mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, key_bits) != 0) {
+        mbedtls_gcm_free(&ctx);
+        return -1;
+    }
+    rc = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_ENCRYPT, pt_len,
+                                   iv, 12, aad, aad_len, pt_ct, pt_ct,
+                                   tag_len, tag_out);
+    mbedtls_gcm_free(&ctx);
+    return rc == 0 ? 0 : -1;
+#else
+    (void)key; (void)key_bits; (void)iv; (void)aad; (void)aad_len;
+    (void)tag_out; (void)tag_len; (void)pt_ct; (void)pt_len;
+    return KN_SRTP_ERR_NO_BACKEND;
+#endif
+}

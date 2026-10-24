@@ -107,6 +107,49 @@ Still deferred to stage 2 (mbedTLS): AES-256 CM profiles, AES-GCM(_8),
 TLS/WSS/DTLS. The `kn_aes`/`kn_sha1` wrapper APIs are the switch points —
 the KATs must pass unchanged across backends.
 
+## Phase 3 (round XVI — DELIVERED, sandbox cross-verified; target pending)
+
+The mbedTLS backend landed with the TLS work, so phase 3 shipped as part
+of the stage-2 `kn_rx` receive path:
+
+1. **KDF256** (`kn_srtp_kdf256`): the RFC 3711 construction with the
+   AES-256-CM PRF (`derive_aes_cm_key`, nvst.rs:2873-2886 — `Aes256Ctr =
+   Ctr128BE`, so the existing full-128-bit counter carry applies).
+2. **AES-256-CM keystream** (`kn_srtp_aes256_cm_keystream_xor`) for the
+   CM256 profile (auth = the same 20-byte-key HMAC-SHA1 — key-size
+   independent).
+3. **AES-GCM 128/256** (`kn_srtp_gcm_auth_{encrypt,decrypt}`, tags 4..16 —
+   the Mjolnir policy is the 8-byte `aes_gcm_*_8_auth`): AAD = RTP header
+   region, IV = the RFC 7714 builder from phase 1, constant-time verdicts
+   via mbedTLS; on auth failure the tentatively decrypted region is
+   SCRUBBED (the one-call mbedTLS API decrypts before verifying — a
+   documented deviation from the reference's verify-then-decrypt; the
+   pipeline drops the packet either way).
+4. **Session layer** (`kn_rx_srtp_session_init` + `kn_rx_srtp_unprotect`
+   in kn_rx): the four `NvstSrtpMaterial` profiles (CM128/CM256/GCM128/
+   GCM256) with the reference's exact derivation map (nvst.rs:2576-2633)
+   and the exact unprotect order (parse → guess → cipher → check →
+   plaintext padding validation → commit). The legacy `nvstVideo` default
+   is **AEAD_AES_256_GCM with the 8-byte tag** — that profile is the
+   production expectation, CM128-HMAC80 the classic GameStream fallback.
+5. **Backend gating**: bare builds (no `KN_TLS_BACKEND_MBEDTLS`) compile
+   honest `KN_SRTP_ERR_NO_BACKEND`/`KN_RX_ERR_NO_CIPHER` stubs — never
+   fake crypto; `kn_srtp_backend_{256,gcm}()` report capability.
+
+Cross-verification: `tools/rx_reference.py` implements an INDEPENDENT
+pure-Python AES-256/GHASH/GCM/KDF256 (self-proved against FIPS-197 C.3,
+the GCM spec case-1/case-2 vectors and the H = E(K0,0) constant, and
+cross-checked against srtp_reference's proved AES-128) and emits session
+derivations + protected datagrams for all six profile/tag combinations;
+the C side (mbedTLS) must reproduce them byte-for-byte in both
+directions. All pass in the sandbox CMake build (test_knrx 209 checks,
+`rx.vectors` 153 from the shipped binary); the bare build checks the
+honest refusal instead (126/184). The `--replay-capture` E/F matrix
+exercises CM128 (bare + cmake) and GCM256 (cmake) end-to-end.
+
+SRTCP-GCM (Receiver Reports, nvst.rs:4346-4410) stays stage 3 with the
+SCTP/RTCP transport decision.
+
 ## Phase-1 checklist (kept for provenance)
 
 1. Vendor a vetted SHA-1/HMAC-SHA1 (or mbedTLS's) — never hand-roll.

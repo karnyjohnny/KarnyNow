@@ -367,7 +367,8 @@ def main():
     # ---- 2. unit tests ------------------------------------------------
     log("\n=== unit tests (on target) ===")
     suites = ["test_knlog", "test_knring", "test_knfec", "test_knsrtp",
-              "test_kndiag", "test_knselftest", "test_kngs", "test_knaudio"]
+              "test_kndiag", "test_knselftest", "test_kngs", "test_knaudio",
+              "test_knrx"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out
@@ -381,8 +382,8 @@ def main():
         names = json.loads(out.strip().splitlines()[-1])["selftests"]
     except Exception as exc:                       # noqa: BLE001
         log("  cannot parse list: %s" % exc)
-    check(rc == 0 and len(names) == 12, results,
-          "registry lists 12 self-tests")
+    check(rc == 0 and len(names) == 13, results,
+          "registry lists 13 self-tests (12 from §7.9 + rx.vectors)")
 
     # R25 milestone 0: d3d.present runs STANDALONE first — its own process,
     # so even a hard driver fault cannot take the rest of the run's evidence
@@ -427,9 +428,12 @@ def main():
             log("  %-17s %-8s %4dms  checks=%-4d %s" %
                 (r["name"], r["status"], r["ms"], r["checks"],
                  r["reason"][:80]))
-        # offline vectors MUST pass on the target binary too (gs.parse is
-        # portable: its KAT battery runs everywhere, capture is optional)
-        for nm in ("fec.vectors", "srtp.vectors", "gs.parse"):
+        # offline vectors MUST pass on the target binary too (gs.parse and
+        # rx.vectors are portable: their KAT batteries run everywhere;
+        # gs.parse's real capture is optional; rx.vectors' GCM/256 SRTP
+        # scenarios verify only in the mbedTLS build — the default since
+        # stage-2 kickoff, so on the target they MUST be active)
+        for nm in ("fec.vectors", "srtp.vectors", "gs.parse", "rx.vectors"):
             r = by_name.get(nm)
             check(r and r["status"] == "ok" and r["failures"] == 0, results,
                   "%s ok in the target binary" % nm)

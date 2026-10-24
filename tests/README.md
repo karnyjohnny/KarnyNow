@@ -1,5 +1,18 @@
 # Testy do uruchomienia na Dell E5500 (Windows 7 SP1 x64)
 
+> **Aktualizacja runda XVI (stage 2):** `T10_build_and_test.py` buduje i
+> uruchamia teraz DZIEWIĄTĄ suitę (`test_knrx` — potok odbioru NVST:
+> reorder/FEC/NACK/RFI/SRTP + 31 scenariuszy KAT) oraz 13. self-test
+> `rx.vectors`. Nic nowego do instalacji; T10 robi wszystko sam.
+> Dodatkowo (opcjonalne demo G2-offline, ~2 min):
+> ```bat
+> python tools\make_rx_capture.py --out cap.hex --manifest cap.json --fec-pct 25 --loss 6 --reorder 0.3
+> build\knvstd.exe --replay-capture=cap.hex --replay-au-dir=aus
+> python tools\make_rx_capture.py --verify cap.json < replay.jsonl
+> ffprobe aus\au_00001_k.264   (dekoder musi rozpoznać poprawny strumień H.264)
+> ```
+> (przekieruj stdout knvstd do replay.jsonl: `... --replay-capture=cap.hex > replay.jsonl`)
+
 Cztery testy. Każdy zapisuje wynik do pliku `T*_wynik.json` **obok skryptu**.
 Kolejność ma znaczenie: `T1` i `T2` rozstrzygają najwięcej, `T4` wymaga kompilatora.
 

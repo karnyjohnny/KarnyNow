@@ -48,3 +48,10 @@ logs/
 /selftest_render_check.json
 /T*_tmp/
 /tests/T*_tmp/
+
+# round XVI: replay-capture demo artifacts (tests/README.md header)
+/cap*.hex
+/cap*.json
+/replay*.jsonl
+/aus/
+/build-mbedtls/
