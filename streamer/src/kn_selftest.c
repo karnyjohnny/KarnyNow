@@ -98,6 +98,29 @@ typedef struct {
     char first_fail[KN_ST_REASON_MAX - 64];
 } st_tally;
 
+/* stdout/evidence JSON string sanitizer — same rules as knvstd_main.c's
+ * lb_json_path and knlog.c's json_escape (round XVIII: the T13 r1 landmine
+ * applies here too — gs.parse embeds the KN_GS_CAPTURE path, which on
+ * Windows carries backslashes; raw embedding makes the selftest JSON
+ * unparseable). '\\' and '/' -> '/', '"' escaped, C0 and bytes >= 0x7F
+ * -> '?' (Win32 argv/env is ANSI cp1250 — raw non-ASCII would be invalid
+ * UTF-8 inside the JSONL contract). */
+static void st_json_str(char *dst, size_t dstsz, const char *src)
+{
+    size_t i, o = 0;
+    if (!dst || dstsz == 0) return;
+    dst[0] = '\0';
+    if (!src) return;
+    for (i = 0; src[i] && o + 2 < dstsz; ++i) {
+        if (src[i] == '\\' || src[i] == '/') dst[o++] = '/';
+        else if (src[i] == '"') { dst[o++] = '\\'; dst[o++] = '"'; }
+        else if ((unsigned char)src[i] < 0x20) dst[o++] = '?';
+        else if ((unsigned char)src[i] >= 0x7F) dst[o++] = '?';
+        else dst[o++] = src[i];
+    }
+    dst[o] = '\0';
+}
+
 #define STV(t, cond, name)                                                \
     do {                                                                  \
         (t).checks++;                                                     \
@@ -1228,15 +1251,19 @@ static int st_gs_parse(kn_st_result *r)
             }
             fclose(f);
             STV(t, cap_bad == 0, "capture: every line well-formed");
+            {
+                char capp[160];
+                st_json_str(capp, sizeof capp, cap_path ? cap_path : "");
             snprintf(capnote, sizeof capnote,
                      "\"capture\":\"%.128s\",\"cap_lines\":%u,\"cap_bad\":%u,"
                      "\"cap_rtp_ok\":%u,\"cap_rtp_err\":%u,\"cap_gs\":%u,"
                      "\"cap_sof\":%u,\"cap_eof\":%u,\"cap_fec\":%u",
-                     cap_path ? cap_path : "", cap_lines % 1000000u,
+                     capp, cap_lines % 1000000u,
                      cap_bad % 1000000u, cap_rtp_ok % 1000000u,
                      cap_rtp_err % 1000000u, cap_gs % 1000000u,
                      cap_sof % 1000000u, cap_eof % 1000000u,
                      cap_fec % 1000000u);
+            }
         } else {
             snprintf(capnote, sizeof capnote,
                      "\"capture\":\"none (stage 2 records real dumps)\"");

@@ -111,6 +111,17 @@ def parse_jsonl(path):
     return docs
 
 
+def count_unparseable(docs):
+    return sum(1 for d in docs if d is None)
+
+
+def find_first(docs, mode, event):
+    for d in docs:
+        if d and d.get("mode") == mode and d.get("event") == event:
+            return d
+    return None
+
+
 def find_summary(docs, mode):
     for d in reversed(docs):
         if d and d.get("mode") == mode and "summary" in d:
@@ -194,6 +205,13 @@ def run_decode_leg(name, knvstd, cap_hex, manifest, speed, srtp_spec,
                 "%s: sender delivered %d records" % (name, EXPECT_RECORDS))
     ok &= check(rc == 0, "%s: knvstd --decode exit 0 (got %d)" % (name, rc))
     docs = parse_jsonl(out_path)
+    dbad = count_unparseable(docs)
+    ok &= check(dbad == 0, "%s: every stdout line parses as JSON "
+                           "(%d unparseable)" % (name, dbad))
+    begin = find_first(docs, "decode", "begin")
+    if begin:
+        log("  %s: rcvbuf_actual=%s (R34 headroom evidence), decoder=%s" %
+            (name, begin.get("rcvbuf_actual"), begin.get("decoder")))
     dsum = find_summary(docs, "decode")
     ok &= check(dsum is not None, "%s: decode summary present" % name)
     if dsum:
@@ -324,6 +342,10 @@ def main():
     check(rc == 0, "capture leg: knvstd --capture exit 0 (got %d)" % rc)
     csum = None
     cdocs = parse_jsonl(cap_out)
+    bad = count_unparseable(cdocs)
+    check(bad == 0, "capture leg: every stdout line parses as JSON "
+                    "(%d unparseable — the round-XVIII Windows-path "
+                    "escape class)" % bad)
     if cdocs:
         csum = find_summary(cdocs, "capture")
     check(csum is not None, "capture leg: summary present")
@@ -359,8 +381,31 @@ def main():
     log("$ %s --replay-capture=%s   [rc=%d]" % (knvstd, live_hex,
                                                 proc.returncode))
     check(proc.returncode == 0, "vector leg: replay exit 0")
+    rbad = count_unparseable(parse_jsonl(replay_out))
+    check(rbad == 0, "vector leg: every replay stdout line parses as JSON "
+                     "(%d unparseable)" % rbad)
     check(verify_against(cap_json, replay_out),
           "vector leg: live capture replays byte-identical to the reference")
+
+    # --- leg 2b: JSONL contract vs backslash paths (the T13 r1 finding:
+    # "C:\Users\..." embedded raw made summary lines unparseable). On
+    # Windows every leg already exercises absolute backslash paths; on
+    # POSIX we force the case with a literal backslash in the file name.
+    if not IS_WINDOWS:
+        odd_hex = os.path.join(WORK, "back\\slash.hex")
+        shutil.copyfile(cap_hex, odd_hex)
+        odd_out = os.path.join(WORK, "replay_backslash.jsonl")
+        with open(odd_out, "wb") as out_fh:
+            proc = subprocess.run([knvstd, "--replay-capture=" + odd_hex,
+                                   "--log-dir=" + LOGDIR],
+                                  stdout=out_fh, stderr=subprocess.DEVNULL,
+                                  cwd=ROOT, timeout=120)
+        obad = count_unparseable(parse_jsonl(odd_out))
+        check(proc.returncode == 0 and obad == 0,
+              "jsonl contract: backslash path stays parseable "
+              "(%d unparseable)" % obad)
+        check(verify_against(cap_json, odd_out),
+              "jsonl contract: backslash-path replay verifies")
 
     # --- legs 3+4: decode (paced + blast) ---------------------------------
     au_dir = os.path.join(WORK, "aus_paced")

@@ -76,6 +76,35 @@ static void usage(void)
            "exit codes: 0 ok/skipped, 1 failed verdict, 2 usage, 3 internal\n");
 }
 
+/* THE stdout-JSON string sanitizer for knvstd (name is historical — it
+ * started as the loopback path formatter and T11 proved it on the
+ * target). Rules: '\' and '/' both normalize to '/' (Windows paths stay
+ * readable and valid), '"' gets escaped, C0 controls and bytes >= 0x7F
+ * become '?'. Round XVIII hardening: Win32 argv is the ANSI codepage
+ * (cp1250 on the target) — a non-ASCII path byte would be INVALID UTF-8
+ * inside the JSONL contract, so it cannot pass through raw; '?' keeps the
+ * line parseable and the evidence honest ("foreign byte was here").
+ * Every printf-JSON site embedding an argv/path/foreign string MUST route
+ * through this (the T13 r1 landmine: replay/capture summaries embedded
+ * "C:\Users\..." raw — \U is not a legal JSON escape and the summary
+ * line became unparseable while all 60 frames actually matched). */
+static void lb_json_path(char *dst, size_t dstsz, const char *src)
+{
+    size_t i, o = 0;
+    if (!dst || dstsz == 0) return;
+    dst[0] = '\0';
+    if (!src) return;
+    for (i = 0; src[i] && o + 2 < dstsz; ++i) {
+        if (src[i] == '\\' || src[i] == '/') dst[o++] = '/';
+        else if (src[i] == '"') { dst[o++] = '\\'; dst[o++] = '"'; }
+        else if ((unsigned char)src[i] < 0x20) dst[o++] = '?';
+        else if ((unsigned char)src[i] >= 0x7F) dst[o++] = '?';
+        else dst[o++] = src[i];
+    }
+    dst[o] = '\0';
+}
+
+
 static int print_registry(void)
 {
     int i, n = kn_selftest_count();
@@ -141,7 +170,10 @@ static int run_selftests(const char *which, const char *log_dir)
         }
     } else {
         if (kn_selftest_run(which, &results[0]) != 0) {
-            printf("{\"error\":\"unknown_selftest\",\"name\":\"%s\"}\n", which);
+            char esc[128];
+            lb_json_path(esc, sizeof esc, which);
+            printf("{\"error\":\"unknown_selftest\",\"name\":\"%s\"}\n",
+                   esc);
             kn_log_shutdown();
             return 2;
         }
@@ -173,7 +205,9 @@ static int run_diagnostics(const char *log_dir)
     rc = kn_diag_write_bundle(log_dir, "manual", "E_NONE",
                               "--diagnostics requested", path, sizeof path);
     if (rc == 0) {
-        printf("{\"bundle\":\"%s\"}\n", path);
+        char esc[KN_DIAG_PATH_MAX + 96];
+    lb_json_path(esc, sizeof esc, path);
+    printf("{\"bundle\":\"%s\"}\n", esc);
         fflush(stdout);
         kn_log_shutdown();
         return 0;
@@ -533,18 +567,6 @@ static void lb_resolve_source(lb_ctx *c, const char *arg)
     c->src_is_file = 0;                    /* embedded fallback */
 }
 
-static void lb_json_path(char *dst, size_t dstsz, const char *src)
-{
-    size_t i, o = 0;
-    for (i = 0; src[i] && o + 2 < dstsz; ++i) {
-        if (src[i] == '\\' || src[i] == '/') dst[o++] = '/';
-        else if (src[i] == '"') { dst[o++] = '\\'; dst[o++] = '"'; }
-        else if ((unsigned char)src[i] < 0x20) dst[o++] = '?';
-        else dst[o++] = src[i];
-    }
-    dst[o] = '\0';
-}
-
 static int run_loopback(const char *src_arg, int seconds, int no_audio,
                         const char *log_dir)
 {
@@ -899,8 +921,10 @@ static int run_replay(const char *cap_path, const char *au_dir,
 
     f = fopen(cap_path, "rb");
     if (!f) {
+        char esc[608];
+        lb_json_path(esc, sizeof esc, cap_path);
         printf("{\"mode\":\"replay\",\"error\":\"capture_unreadable\","
-               "\"path\":\"%.300s\"}\n", cap_path);
+               "\"path\":\"%.300s\"}\n", esc);
         fflush(stdout);
         kn_log_shutdown();
         return 1;
@@ -1089,6 +1113,7 @@ static int run_replay(const char *cap_path, const char *au_dir,
 
     {
         char drops[512];
+        char esc[608];
         size_t doff = 0;
         int d;
         for (d = 1; d < 24; ++d) {
@@ -1103,6 +1128,7 @@ static int run_replay(const char *cap_path, const char *au_dir,
         }
         if (doff >= sizeof drops) doff = sizeof drops - 1;
         drops[doff] = '\0';
+        lb_json_path(esc, sizeof esc, cap_path);
         printf("{\"mode\":\"replay\",\"summary\":{\"capture\":\"%.200s\","
                "\"records\":%lu,\"bad_lines\":%lu,\"authenticated\":%llu,"
                "\"frames\":%lu,\"keyframes\":%lu,\"frame_bytes\":%llu,"
@@ -1111,7 +1137,7 @@ static int run_replay(const char *cap_path, const char *au_dir,
                "\"replay_rejected\":%llu,\"ev_overflow\":%u,"
                "\"au_write_errors\":%lu,\"vps\":%u,\"srtp_profile\":%d,"
                "\"state\":%d,\"drops\":{%s}}}\n",
-               cap_path, records % 100000000ul, bad_lines % 100000000ul,
+               esc, records % 100000000ul, bad_lines % 100000000ul,
                (unsigned long long)(v.authenticated_packets % 10000000000ull),
                rc_ctx.aus % 100000000ul, rc_ctx.key_aus % 100000000ul,
                (unsigned long long)(rc_ctx.bytes % 1000000000000ull),
@@ -1260,9 +1286,11 @@ static int run_capture(uint16_t port, const char *bind_ip, const char *out_path,
     rc = kn_sock_udp_open(&sock, bind_ip, port, KN_SOCK_RCVBUF_DEFAULT,
                           err, sizeof err);
     if (rc != KN_SOCK_OK) {
+        char esc3[256];
+        lb_json_path(esc3, sizeof esc3, err);
         printf("{\"mode\":\"capture\",\"error\":\"socket_open\",\"rc\":%d,"
                "\"errno\":%d,\"detail\":\"%.100s\"}\n", rc, sock.last_error,
-               err);
+               esc3);
         fflush(stdout);
         kn_log_on_failure("session.capture", "E_CAPTURE_SOCKET",
                           "UDP socket open/bind failed", err);
@@ -1271,8 +1299,10 @@ static int run_capture(uint16_t port, const char *bind_ip, const char *out_path,
     }
     fp = fopen(out_path, "wb");
     if (!fp) {
+        char esc2[608];
+        lb_json_path(esc2, sizeof esc2, out_path);
         printf("{\"mode\":\"capture\",\"error\":\"out_unwritable\","
-               "\"path\":\"%.300s\"}\n", out_path);
+               "\"path\":\"%.300s\"}\n", esc2);
         fflush(stdout);
         kn_sock_udp_close(&sock);
         kn_log_on_failure("session.capture", "E_CAPTURE_OUT",
@@ -1355,6 +1385,11 @@ static int run_capture(uint16_t port, const char *bind_ip, const char *out_path,
     exit_code = (datagrams > 0 && file_errors == 0 &&
                  strcmp(stop_reason, "socket_error") != 0) ? 0 : 1;
 
+    {
+        char escb[64], esco[608];
+        lb_json_path(escb, sizeof escb, bind_ip && bind_ip[0] ? bind_ip
+                                                              : "0.0.0.0");
+        lb_json_path(esco, sizeof esco, out_path);
     printf("{\"mode\":\"capture\",\"summary\":{\"bind\":\"%s\",\"port\":%u,"
            "\"seconds_budget\":%ld,\"stop_reason\":\"%s\","
            "\"datagrams\":%llu,\"bytes\":%llu,\"max_len\":%u,"
@@ -1362,7 +1397,7 @@ static int run_capture(uint16_t port, const char *bind_ip, const char *out_path,
            "\"recv_timeouts\":%llu,\"recv_errors\":%llu,"
            "\"ring_records\":%llu,\"ring_dropped\":%llu,\"ring_ok\":%d,"
            "\"file_errors\":%llu,\"flushes\":%llu,\"out\":\"%.300s\"}}\n",
-           bind_ip && bind_ip[0] ? bind_ip : "0.0.0.0",
+           escb,
            (unsigned)kn_sock_udp_port(&sock), seconds, stop_reason,
            datagrams % 10000000000ull, bytes % 10000000000000ull,
            max_len % 100000000u, sock.rcvbuf_requested, sock.rcvbuf_actual,
@@ -1372,8 +1407,9 @@ static int run_capture(uint16_t port, const char *bind_ip, const char *out_path,
                    : 0ull,
            ring_ok ? (unsigned long long)(ring.dropped % 1000000000ull) : 0ull,
            ring_ok ? 1 : 0,
-           file_errors % 1000000000ull, flushes % 1000000000ull, out_path);
+           file_errors % 1000000000ull, flushes % 1000000000ull, esco);
     fflush(stdout);
+    }
 
     if (exit_code != 0) {
         /* §7.10: the ring mirror rides into the auto-bundle as a .log so
@@ -1690,9 +1726,11 @@ static int run_decode(uint16_t port, const char *bind_ip, long seconds,
     rc = kn_sock_udp_open(&sock, bind_ip, port, KN_SOCK_RCVBUF_DEFAULT,
                           err, sizeof err);
     if (rc != KN_SOCK_OK) {
+        char esc3[256];
+        lb_json_path(esc3, sizeof esc3, err);
         printf("{\"mode\":\"decode\",\"error\":\"socket_open\",\"rc\":%d,"
                "\"errno\":%d,\"detail\":\"%.100s\"}\n", rc, sock.last_error,
-               err);
+               esc3);
         fflush(stdout);
         kn_log_on_failure("session.decode", "E_DECODE_SOCKET",
                           "UDP socket open/bind failed", err);

@@ -72,6 +72,25 @@ different concurrency model — the deviation is deliberate (below, §4).
 5. **`-pthread` is load-bearing on the host builds**: glibc hides POSIX
    declarations under strict `-std=c11` unless the compile links pthread —
    `build_native_tests.sh` always passed it; ad-hoc manual builds must too.
+6. **Windows paths in stdout JSONL MUST be sanitized (found by target T13
+   r1 — the gate earning its keep on the first real run)**: `"out":"C:\Users\…" `
+   embeds `\U`, which is not a legal JSON escape — the whole summary line
+   becomes unparseable and the consumer loses exactly the line it came for
+   (T13 r1: "VERIFY FAIL: 1 unparseable stdout lines" while all 60 frames
+   actually matched; capture-leg summary "missing" for the same reason).
+   The loopback mode had already solved this in round XII with
+   `lb_json_path()` (`\` and `/` → `/`, `"` escaped, controls → `?`) —
+   which is why T11 never hit it; the round-XVI/XVII replay/capture/decode
+   printfs did not use it. Fix: every argv/path/foreign string in every
+   knvstd printf-JSON site routes through `lb_json_path` (moved to the
+   platform-neutral section, hardened with a `>= 0x7F → '?'` rule because
+   Win32 argv is ANSI cp1250 — a raw non-ASCII byte would be invalid UTF-8
+   inside the JSONL contract), and `st_gs_parse`'s KN_GS_CAPTURE path
+   through the sibling `st_json_str` in kn_selftest.c. Reproduced 1:1 in
+   the sandbox with literal-backslash filenames (legal on POSIX) before
+   and after the fix; T13 now gates the contract explicitly ("every
+   stdout line parses as JSON" per leg + a POSIX backslash-path leg; on
+   Windows every leg's absolute paths exercise it).
 
 ## 3. The knvstd live modes
 
@@ -236,19 +255,27 @@ regenerated `cap.hex` (seed 1) matches the target's byte counts exactly
 (119 records / 360 333 B) and the target's console JSONL verifies
 `VERIFY PASS: 60 frames byte-identical` against the regenerated manifest.
 
-## 7. Target-side expectations (round XVIII)
+## 7. Target-side record and expectations
 
-* `python tests\T10_build_and_test.py` — expect **ALL PASS ~69 checks**:
-  10 suites (new `test_knsock` ~70 checks), registry **14**, new
-  `sock.loopback ok in the target binary` check.
-* `python tests\T13_udp_e2e.py` — the first Winsock execution of the live
-  modes: expect **ALL PASS 55 checks** (the mbedTLS default build enables
-  the gcm256 leg; FFmpeg static build enables real decode). Windows
-  Firewall does NOT filter loopback, so no prompt/allow is expected for
-  T13's 127.0.0.1 binds — a real cloud session (binding ANY, inbound from
-  the internet) is a different story and will be measured when the
-  WSS/RTSP client lands (landmine registered, not guessed).
-* Landmine watch on target: `rcvbuf_actual` in the decode begin line —
-  Windows should report the full 8 MiB request; if it reports less, the
-  burst-headroom math changes (recorded either way; that is the
-  measurement).
+* **T10 r13 (2026-10-25 08:36): ALL PASS 69 checks** — exactly as
+  predicted: test_knrx 215, test_knsock **71** (host 70 + the Win32
+  truncation-branch delta), registry 14, sock.loopback ok, zero warnings.
+  **First R34 datapoint: Windows applies SO_RCVBUF EXACTLY (262 144 req →
+  262 144 applied)** — unlike Linux's rmem_max cap. clock.resolution ok
+  (healthy timer regime: wall tick 1000 µs).
+* **T13 r1 (2026-10-25 08:39): FAIL (2 of 51) — one product defect, fixed
+  in round XVIII (landmine 6 above).** The stage-2 machinery itself all
+  worked on Win7: capture recorded 119/119 (proved by the vector leg),
+  every decode leg 60/60 with FFmpeg 63 incl. **gcm256 SRTP live**,
+  sock.loopback ok. Evidence: `artifacts/T13-round1/`.
+* `python tests\T13_udp_e2e.py` (r2, after the round-XVIII fix) — expect
+  **ALL PASS 61 checks** (r1's 51 + the 4 restored capture-summary checks
+  + 6 new JSONL-contract checks; the backslash-path leg is POSIX-only).
+  Windows Firewall does NOT filter loopback, so no prompt/allow is
+  expected for T13's 127.0.0.1 binds — a real cloud session (binding ANY,
+  inbound from the internet) is a different story and will be measured
+  when the WSS/RTSP client lands (landmine registered, not guessed).
+* Landmine watch: `rcvbuf_actual` is now logged per decode leg by T13 —
+  r2 should show the 8 MiB request applied in full (r1's decode begin
+  line had it, but in the unparseable-summary legs it was invisible;
+  sock.loopback's 262 144→262 144 strongly suggests Windows honours it).

@@ -1,4 +1,96 @@
-# INTEGRATION NOTES — Round XVII delta, rev 10 (STAGE 2 SOCKETS: kn_sock + --capture/--decode + persistent decoder + T13)
+# INTEGRATION NOTES — Round XX delta, rev 11 (STAGE 2 SIGNALING CORES: kn_ws + kn_rtsp)
+
+> **Rev 11 supersedes rev 1-10b.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/RTSP.md`** — §1-5 are the wire specification
+> (read from nvst_rtsp.rs/cloudmatch.rs @ a49b124 with line refs), §8 is
+> this round's implementation status + deviations D-w1..D-r4.
+>
+> **Round XX headline: the stage-2 signaling cores are implemented and
+> sandbox-proven — RFC 6455 client framing (`kn_ws`, 84 checks incl. the
+> RFC goldens) and the full RTSP-over-WS state machine (`kn_rtsp`, 127
+> checks with every fixture transcribed from the reference's own tests,
+> incl. a scripted OPTIONS→DESCRIBE→SETUP→ANNOUNCE→PLAY E2E).** No
+> production wiring yet: the TLS stream transport, CloudMatch, OAuth and
+> `--session` are round XXI. No existing module changed behaviour (kn_rx /
+> kn_sock / knvstd untouched this round).
+## New files (round XX)
+1. `streamer/include/kn/kn_ws.h` + `streamer/src/kn_ws.c` — RFC 6455
+   client framing over an injected byte-stream seam (`kn_ws_io`);
+   handshake with CSPRNG key + accept verification; masked sends;
+   resumable mid-frame timeouts; control-frame handling (ping→pong echo,
+   close answered); bounded caller-owned reassembly; exposed test hooks
+   `kn_ws_base64` / `kn_ws_accept` / `kn_ws_rand`. Win32 RNG = `rand_s()`
+   (msvcrt — NO new PE import); POSIX = getrandom/urandom fallback.
+2. `streamer/tests/test_knws.c` — the ELEVENTH suite (84 checks):
+   RFC 4648 + RFC 6455 §1.3 goldens, handshake request/response classes,
+   wire-exact frames at every length-boundary, fragmentation, control
+   frames, all protocol-error classes, oversize, 1-byte-chunk recv,
+   timeout resume. In-memory duplex shim (the framing contract is
+   transport-independent by design; real-socket/TLS E2E is the round-XXI
+   fake-rig gate).
+3. `streamer/include/kn/kn_rtsp.h` + `streamer/src/kn_rtsp.c` — the pure
+   RTSP-over-WS client: serializer/parser/request loop (CSeq==Request-Id,
+   Bifrost CRLF padding, Request-Id fallback, TEARDOWN mismatch-skip,
+   20 s / 4 MiB limits), SDP toolset (`sdp_attribute` with the `||`/`;;`
+   quirks, `media_control`, `runtime_key` + `{key_id:024X}` salt, the
+   8-profile scan defaulting AEAD_AES_256_GCM_8, `parse_video_peer` with
+   the span<16 collapse, the URI ladder), `extract_describe`, the full
+   SETUP sweep (poison-rule stop, bundle fallback, 3×3 s injected-sleep
+   retries, remaining-deadline narrowing), `build_announce` (complete
+   §3 attribute list) and `negotiate_announce` (16-rule range-validated
+   offer resolution + clamps + line rewrite).
+4. `streamer/tests/test_knrtsp.c` — the TWELFTH suite (127 checks):
+   reference-test fixtures transcribed (nvst_rtsp.rs:3443-3470 parser
+   cases, :3470+ official control, :2923+ announce params), scripted-
+   server full-sequence E2E with byte-exact request inspection, every
+   SETUP branch (happy/400-ladder/peerless+bundle/peerless-exhaust/
+   fatal-500/client-udp-form), TEARDOWN skip semantics, error paths.
+   Injected clock+sleep keep retry rounds instant and countable.
+
+## Changed files (round XX)
+1. `CMakeLists.txt` — kn_ws.c + kn_rtsp.c into kncore; knws + knrtsp in
+   the test foreach (ctest 12→14).
+2. `tools/build_native_tests.sh` + `tools/cross_check.sh` — the two new
+   suites + module compiles (12 native suites, 1183 checks).
+3. `tests/T10_build_and_test.py` — suites += test_knws, test_knrtsp
+   (target r15 expects 71 checks = r14's 69 + 2).
+4. `docs/RTSP.md` — §8 implementation status + deviations D-w1..D-r4.
+
+## Verification status (round XX, sandbox)
+native 12 suites 1183 checks PASS · cross mingw x64+i686 -Werror PASS ·
+ASan+UBSan+LSan clean on both new suites (the single runtime error is the
+known vendored sha1.c:26 note, triggered by SHA-1 padding — streamer code
+has zero diagnostics) · -Wformat-truncation=2 clean -O0..-O3 on kn_ws.c,
+kn_rtsp.c AND test_knrtsp.c · CMake ctest 14/14 both TLS backends ·
+T10 POSIX dry-run ALL PASS 60. Self-review catches this round (all fixed
+pre-gate): the kn_ws mid-payload timeout was NOT resumable in the first
+draft (frame state added), the RT_FOR_LINES macro ran its body per
+character (LF-only KAT caught it), the parser status-line scan leaked
+into the header block (GARBAGE KAT caught it), blank SDP lines aborted
+the attribute scan (the `;;` quirk KAT caught it).
+
+
+
+> **Rev 10b (round XVIII)** — the target T13 r1 finding, fixed:
+> 1. `streamer/src/knvstd_main.c` — `lb_json_path` (the loopback sanitizer
+>    T11 proved) promoted to the platform-neutral section as THE
+>    stdout-JSON string escaper, hardened with a `>=0x7F -> '?'` rule
+>    (cp1250 argv); every argv/path/foreign-string printf-JSON site routed
+>    through it (unknown_selftest name, diagnostics bundle, replay
+>    error+summary, capture error/detail/summary, decode error detail).
+>    Root cause of T13 r1's only 2 failures: `"out":"C:\Users\..."` raw —
+>    `\U` is not a legal JSON escape, summary lines became unparseable.
+> 2. `streamer/src/kn_selftest.c` — sibling `st_json_str`; gs.parse's
+>    KN_GS_CAPTURE path sanitized (=2 paranoid count unchanged at 9).
+> 3. `tests/T13_udp_e2e.py` — per-leg "every stdout line parses as JSON"
+>    checks, `rcvbuf_actual` logged per decode leg (R34), POSIX
+>    backslash-path contract leg. Target expectation: T10 r14 ALL PASS
+>    69 (rebuild is MANDATORY before T13), T13 r2 ALL PASS 61.
+> 4. `docs/SOCK.md` — landmine 6 + §7 target record (T10 r13 ALL PASS 69,
+>    T13 r1 analysis). Evidence: `artifacts/T13-round1/`.
+> Sandbox re-verification: 10 suites 972 PASS, cross PASS, ctest 12/12
+> x2, T13 ALL PASS 51/51(sanitized)/63(mbedTLS+gcm256), T10 dry 58.
+
 
 > **Rev 10 supersedes rev 1-9.** Canonical state: `PROJECT-STATE.md`.
 > Design record: **`docs/SOCK.md`** (provenance table with corrected
