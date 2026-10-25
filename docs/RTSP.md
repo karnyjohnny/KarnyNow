@@ -491,3 +491,158 @@ TLS-stream implementation compiles for the first time). T13 r3 → ALL
 PASS **61** unchanged. `--session` needs a real token + appId: that is
 the R7 measurement round (docs/AUTH.md §3 explains how to get the token
 manually until stage 4).
+
+## 10. Round XXIII — R7 runs 1-4 (the FIRST real CloudMatch traffic) + the control-host fix
+
+**What was measured (2026-10-25, target build = T10 r17 ALL PASS 72; real
+GFNJWT pasted from the browser + appId 107057914, Win7 target):** four
+consecutive live `--session` runs. EVERY run: `cm_created` OK — a real
+sessionId, status 1, and a PLAUSIBLE LIVE queuePosition (167/166/181/178
+while the browser saw 161 in the same minutes). Then the position FROZE:
+run 2 repeated `queue_position:163` for ~40 polls, run 3 `176` for ~30,
+run 4 `178` for 4; every run ended in
+`{"error":"not_ready","stop_reason":"cm_poll_failed"}` after a variable
+number of polls (2-43). The user's parallel DevTools capture of the
+official WebRTC client: it polls
+`https://np-waw-01.cloudmatchbeta.nvidiagrid.net/v2/session/{id}` — the
+REGIONAL node — every ~4.1 s (Δ 4.15/4.12/4.42/3.21 s), and its
+queuePosition MOVES (161→151 in 1 s, →147 in 4 s, →135 in 10 s).
+
+**Root cause (ONE contract violation):** `run_session` polled the CREATE
+host for the whole queue wait — the default `prod.cloudmatchbeta.
+nvidiagrid.net` (the reference's own DEFAULT_STREAMING_URL, gfn.rs:38 —
+correct for the create POST). The reference NEVER polls the create front:
+`session_info` learns `control_base` = `https://{sessionControlInfo.ip}`
+(cloudmatch.rs:1966-1984 — gated on port==443-or-absent + the
+trusted-base rules :2400-2456), `create` stores it as the allocation's
+base (:401-414), attach re-learns it (:1149-1152), and EVERY `poll` goes
+ONLY there (:652-656 → `get_session` :1356 joins `v2/session/{id}`). The
+global front evidently answers with stale snapshots of the session record
+(frozen `seatSetupInfo`) and intermittent non-200s — exactly the observed
+freeze-then-`cm_poll_failed`. The user's capture response body confirms
+the nomination: `sessionControlInfo:{ip:"np-waw-01.cloudmatchbeta.
+nvidiagrid.net", resourcePath:"/v2/session/{id}", usage:10, port:443}`.
+
+**Fix (round XXIII, all reference-mirrored):**
+* `kn_cm_session` learns `control_host/control_port/have_control`
+  (sessionControlInfo) + `req_status_code/req_status_desc` (requestStatus,
+  filled even when the session extraction fails, so a rejected payload
+  still says WHY — e.g. statusCode 11 SESSION_LIMIT, :2354+).
+* NEW `kn_cm_control_base` — the trust gate: the C mirror of
+  `trusted_learned_server_base` + `public_session_host/_ipv4`
+  (:2400-2456). https-only, port 443, no userinfo/query/fragment,
+  private/loopback/link-local/CGNAT/multicast/reserved/.local all
+  REJECTED (a response can never redirect polling into a private
+  address); documented IPv6 simplifications (prefix-class checks instead
+  of a full IpAddr decode). 0 → the caller falls back to the create host
+  (:1984 `unwrap_or(base)` semantics — also what keeps the loopback
+  fake-rig E2E unchanged).
+* Phase A polls the learned node: new `cm_control` JSONL event
+  (`poll_host`/`port`/`source`) is the R7 evidence line.
+* Cadence 2 s → **4 s** (`SESS_POLL_MS`, the capture's ~4.1 s).
+* Per-round transient retry: 3 attempts, 250/750 ms, on transport errors
+  and 408/425/429/500/502/503/504 (`get_session` :1369-1394); 404 →
+  `session_not_found` (:664-671); up to 4 consecutive failed rounds
+  tolerated (each one a `cm_poll_error` event carrying rc + http_status +
+  the cloud's requestStatus) before `cm_poll_failed`; the `not_ready`
+  line now carries `rc`/`http_status`.
+* Failed rounds never clobber the live session state (poll-into-temp +
+  commit — `kn_cm_extract_session` memsets its output BEFORE parsing, so
+  one bad payload used to be able to wipe `session_id` mid-wait).
+* NEW `kn_cm_cancel` = DELETE `v2/session/{id}` (the reference's `stop_at`
+  :789-800 / `validate_delete_response` :2728: 2xx and 404 = gone) +
+  best-effort cancel on EVERY not_ready exit except 404 (`cm_cancel`
+  JSONL event). Runs 1-4 each ORPHANED a queued session — with luck they
+  aged out server-side, but a live one can block the next create with
+  SESSION_LIMIT; from now on an aborted wait cleans up after itself.
+* `--session-queue-timeout` default 180 → **600** s (a real 160+-deep
+  queue deserves more than 3 minutes; cancel makes the longer wait safe).
+
+**D-cm1/D-cm2 — measured OK at the create stage:** all four runs created
+real queued sessions with `networkTestSessionId:null` (D-cm1) and
+`SubSessionId = device id` (D-cm2). The cloud accepted both for THIS
+account/zone/create; whether they matter at seat assignment/streaming
+stays open until a run reaches ready.
+
+**Not covered yet (honest list):** post-ready aborts (phases B-E) still
+don't cancel the session — churn discipline, next round; the poll loop's
+new branches are sandbox-proven only up to the fallback path (the rig's
+`sessionControlInfo.ip` is 127.0.0.1 → trust gate → create-host
+fallback; the ACCEPT path is pinned by the test_kncm capture-fixture
+battery — a public-host loopback rig is impossible without DNS games).
+**Next measurement = R7 run 5:** same command; expect `cm_control` with
+`source:"sessionControlInfo"` and a MOVING queue_position.
+
+## 11. Round XXIV — R7 run 5 (FIRST READY SESSION + first RTSPS traffic) + the DESCRIBE fix
+
+**What was measured (2026-10-25, the round-XXIII tree on the target, same
+command as runs 1-4):** the control-host fix WORKED end-to-end through
+the queue:
+* `cm_control: poll_host=np-waw-01.cloudmatchbeta.nvidiagrid.net,
+  source=sessionControlInfo` — the poll switch fired on the real cloud.
+* The session PROGRESSED: `queue_position:81/seat_step:1` for ~29 polls
+  (~2 min), then `seat_step:3` with queuePosition GONE (have_queue:0),
+  then `status:2 ready` — `rtsps://80-84-174-149.cloudmatchbeta.
+  nvidiagrid.net:322`. (`media_peer:":0"` is honest: the ready response
+  carried no usage-2/17 connection — the video peer comes from the SETUP
+  sweep, as in the reference.)
+* **Queue-position observation (NOT a defect, recorded):** on the NATIVE
+  session the position did not tick down per poll — the server published
+  step transitions instead (1 → 3 → ready). The user's moving browser
+  numbers (161→135) were a WebRTC-transport session; the two queue
+  feeds evidently differ. Client-side correctness is proven by the
+  state transitions + ready arriving. Keep observing at run 6.
+* Phase B: the RTSPS/WSS transport WORKS against a real GFN rig —
+  `OPTIONS rc:0 status:200` over TLS:322 + the WS handshake with
+  x-nv-sessionid. Then **`DESCRIBE rc:-2 status:0`** — a transport-level
+  failure with no response parsed (KN_RTSP_ERR_IO), the run's new
+  frontier.
+
+**Diagnosis (three real deviations from nvst_rtsp.rs, all fixed; without
+wire logs the first two are indistinguishable as THE cause of run 5 —
+both produce exactly rc=-2/status=0 at the first big response):**
+1. **The 8 KiB per-message scratch (the prime suspect).**
+   `kn_rtsp_request` read each WS message into `char scratch[8192]`;
+   the shim contract makes a larger message an IO error. A real DESCRIBE
+   SDP (QoS offers, codec lines, ICE/DTLS attributes — the user's own
+   capture shows the rig's style) routinely exceeds 8 KiB, while OPTIONS
+   responses are a few hundred bytes: precisely the observed
+   OPTIONS-200-then-DESCRIBE-IO signature. The reference has NO
+   per-message cap below the 4 MiB total: tungstenite reassembles whole
+   messages (`max_message_size = MAX_REQUEST_RESPONSE_BYTES`,
+   :559-566) and appends text AND binary to one buffer (:614-623).
+   **Fix:** kn_rtsp_request reads directly into the accumulation
+   buffer's tail (cap = the full remaining 4 MiB); the shim contract is
+   unchanged.
+2. **BINARY frames were refused.** The reference feeds `Message::Binary`
+   into the RTSP buffer (:621); both C adapters (knvstd +
+   sandbox_session_e2e) rejected `op != TEXT` with ERR_IO. **Fix:** both
+   accept TEXT|BINARY (kn_ws already reassembled and counted binary
+   messages — only the adapters gated).
+3. **Host header without the port.** The reference's Host = the target
+   minus the scheme — `80-84-...:322` WITH the port (:1070-1076); run 5
+   sent the bare host (the rig tolerated it for OPTIONS, but fidelity is
+   the R32 rule). **Fix:** knvstd + E2E build the authority from the
+   rtsps endpoint (scheme stripped, `/?#` cut).
+
+**Instrumentation (so run 6 measures even if it fails elsewhere):** a
+failed rtsp step now emits an `rtsp_detail` companion line: kn_rtsp's
+`err[160]` (which stage failed — send/recv/parse/timeout/limits) plus
+the WS-layer verdict (`ws_err` = KN_WS_ERR_*, `ws_close` = the peer's
+close code, `ws_text`/`ws_bin` frame counters). A server-side close now
+shows up as `ws_err:-7, ws_close:<code>` instead of a bare -2.
+
+**Sandbox proof of the fix shapes:** test_knrtsp +5 checks (a >19 KiB
+single-message DESCRIBE parses — the old scratch died here; the same
+response split across two messages accumulates); the fake rig now
+delivers its DESCRIBE SDP padded to ~11 KiB as TWO binary messages, and
+sandbox_session_e2e stays **36/36** over real loopback sockets (binary
+acceptance + across-message accumulation + negotiation on a padded SDP
+all exercised end-to-end).
+
+**Next measurement = R7 run 6:** same command. Expect DESCRIBE 200 (+
+`describe-shape`-class evidence via our extract), then the SETUP sweep
+(the reference's peerless-200 poison rule and the bundle fallback are
+already implemented — docs/RTSP.md §2), ANNOUNCE with the D-s1
+placeholder ICE/DTLS identity (its first real verdict), PLAY, and the
+media loop. If ANY step fails, the rtsp_detail line names the stage.

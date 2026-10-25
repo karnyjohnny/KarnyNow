@@ -1,4 +1,152 @@
-# INTEGRATION NOTES — Round XXII delta, rev 12b (T10 r16 build-fix + gate hardening)
+# INTEGRATION NOTES — Round XXIV delta, rev 14 (R7 run 5: FIRST READY SESSION — the queue fix confirmed live; DESCRIBE died on the 8 KiB per-message scratch → fixed + binary frames + Host:port + rtsp_detail instrumentation)
+
+> **Rev 14 supersedes rev 1-13.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/RTSP.md` §11** (the run-5 measurement + the
+> fix), §10 (run 1-4 + the control-host fix), §9 (round XXI deviations).
+>
+> **Round XXIV headline: R7 run 5 took the round-XXIII fix to the live
+> cloud — `cm_control` switched to np-waw-01 (source sessionControlInfo),
+> the session progressed (seat_step 1→3) and reached `status:2 ready`
+> with a real rtsps endpoint; the RTSPS/WSS transport then answered
+> OPTIONS 200 on a REAL GFN rig and died at `DESCRIBE rc:-2 status:0`.
+> Root-cause candidates (both produce exactly that signature at the
+> first big response; both fixed): kn_rtsp_request read each WS message
+> into an 8 KiB scratch — real DESCRIBE SDPs are bigger, while the
+> reference accumulates whole messages up to the 4 MiB total
+> (nvst_rtsp.rs:559-566, :614-623) — and the adapters refused BINARY
+> frames the reference accepts (:621). Also fixed: the Host header now
+> carries :port like the reference (:1070-1076). Failed rtsp steps now
+> emit an `rtsp_detail` evidence line (kn_rtsp err + WS close code +
+> frame counters), so run 6 measures even if it fails elsewhere.**
+>
+> ## Changed files (round XXIV)
+> 1. `streamer/src/kn_rtsp.c` — `kn_rtsp_request` reads DIRECTLY into
+>    the accumulation buffer's tail (no per-message cap below the 4 MiB
+>    total; runaway-shim guard kept; the seam contract is unchanged).
+> 2. `streamer/src/knvstd_main.c` — `sess_ws_recv_text` accepts
+>    TEXT|BINARY; Host = the rtsps authority WITH the port; NEW
+>    `sess_rtsp_detail` (err[160] + ws_err/ws_close/ws_text/ws_bin)
+>    emitted at all five step-failure sites (OPTIONS/DESCRIBE/SETUP/
+>    ANNOUNCE/PLAY).
+> 3. `tools/sandbox_session_e2e.c` — the same binary acceptance + Host
+>    authority (the two implementations stay mirrored).
+> 4. `tools/fake_rig.py` — the DESCRIBE SDP is padded to ~11 KiB and
+>    delivered as TWO binary messages (the run-5 shape, exercised over
+>    real sockets by the E2E).
+> 5. `streamer/tests/test_knrtsp.c` — `test_big_messages`: a >19 KiB
+>    single-message DESCRIBE parses (the old scratch died here) + the
+>    same response split across two messages accumulates: **127 → 132
+>    checks**.
+> 6. `docs/RTSP.md` §11 (the run-5 record incl. the queue-position
+>    observation: the NATIVE queue published step transitions, not
+>    per-poll ticks — NOT a defect, keep observing), this file,
+>    `PROJECT-STATE.md`.
+>
+> ## Verification (round XXIV, sandbox)
+> native 13 suites PASS (test_knrtsp 132/132, test_kncm 147/147) ·
+> cross x64+i686 `-Werror` PASS · paranoid `-Wformat-truncation=2` clean
+> (kn_rtsp.c/knvstd_main.c, host -O1 + mingw -O2 both arches) · CMake
+> 0 warnings + ctest **15/15 ×2** · sandbox_session_e2e **36/36** with
+> the new rig behaviour (binary + split + padded SDP over real loopback
+> sockets; announce key echo + plays=1 asserted by the rig) · T10 POSIX
+> dry-run ALL PASS **62** (baseline).
+> **Target expectations:** T10 r19 → ALL PASS **72** (suite count
+> unchanged). Then **R7 run 6**: same command; expect DESCRIBE 200 →
+> the SETUP sweep → ANNOUNCE (D-s1's first real verdict) → PLAY → the
+> media loop; any failure now names its stage in `rtsp_detail`.
+
+---
+
+# Round XXIII delta, rev 13 (R7 runs 1-4: the first REAL CloudMatch traffic — the control-host bug FOUND + FIXED)
+
+> **Rev 13 supersedes rev 1-12b.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/RTSP.md` §10** (the R7 measurement + the fix),
+> §9 (round XXI status + deviations D-s1/D-cm1..3), `docs/AUTH.md`.
+>
+> **Round XXIII headline: the user ran `knvstd --session` against the
+> LIVE production backend for the first time (T10 r17 build, ALL PASS 72;
+> a real pasted GFNJWT + appId 107057914). Create works — 4/4 real
+> sessions with plausible live queue positions. The queue wait FAILED:
+> polls froze at a stale queuePosition (40+ identical lines) and ended in
+> `cm_poll_failed`. Root cause: the poll loop stayed on the global create
+> front (`prod.cloudmatchbeta.nvidiagrid.net`) instead of switching to
+> the REGIONAL control node the create response nominates
+> (`sessionControlInfo.ip` — `np-waw-01.cloudmatchbeta.nvidiagrid.net`
+> in the user's DevTools capture; exactly where the official client polls
+> at ~4.1 s and exactly what cloudmatch.rs does: control_base learned at
+> :401-414/:1149-1152/:1966-1984, every poll goes there :652-656).
+> Fixed + the poll loop hardened to the reference's retry/404 semantics
+> + a best-effort DELETE cancel so an aborted wait no longer orphans a
+> session (runs 1-4 each left one behind).**
+>
+> ## Changed files (round XXIII)
+> 1. `streamer/{include/kn,src}/kn_cm.*` — `kn_cm_session` learns
+>    `control_host/control_port/have_control` (sessionControlInfo) and
+>    `req_status_code/req_status_desc` (requestStatus — filled even when
+>    the session extraction fails, so a rejected payload still says why);
+>    NEW `kn_cm_control_base` (the trust mirror of
+>    `trusted_learned_server_base` + `public_session_host/_ipv4`,
+>    cloudmatch.rs:2400-2456: https-only, port 443, private/loopback/
+>    link-local/CGNAT/multicast/reserved/.local/userinfo/path all
+>    rejected — a response can never redirect polling into a private
+>    address; 0 = fall back to the create host, which is also what keeps
+>    the loopback fake-rig E2E unchanged); NEW `kn_cm_cancel` (DELETE
+>    `v2/session/{id}` = the reference's stop_at :789-800; `cm_round`
+>    now tolerates `out == NULL`).
+> 2. `streamer/src/knvstd_main.c` — phase A: the poll-target switch (new
+>    `cm_control` JSONL event = the R7 evidence line), cadence 2 s → 4 s
+>    (`SESS_POLL_MS`, the capture's Δ≈4.1 s), per-round 3-attempt
+>    transient retry (408/425/429/5xx, 250/750 ms — get_session
+>    :1369-1394), 404 → `session_not_found`, requestStatus.statusCode≠1
+>    → failed round with the cloud's description in a `cm_poll_error`
+>    event, failed rounds never clobber the live session state
+>    (poll-into-temp + commit), 4 consecutive bad rounds tolerated before
+>    `cm_poll_failed`, the `not_ready` line carries `rc`+`http_status`,
+>    the `cm_create` error line carries the cloud's requestStatus
+>    (cloud_status 11 = SESSION_LIMIT — runs 1-4 orphaned four queued
+>    sessions), best-effort `cm_cancel` on every not_ready exit except
+>    404, `cm_created` now includes the initial queue_position,
+>    `--session-queue-timeout` default 180 → 600 s.
+> 3. `streamer/tests/test_kncm.c` — NEW control-base battery (the exact
+>    R7 capture fixture + the full accept/reject matrix + requestStatus-
+>    on-failed-extract) and the cancel wire checks (DELETE line, Host,
+>    GFNJWT header, 204/404/200-with-body, empty-id guard): **91 → 147
+>    checks**.
+> 4. `tools/fake_rig.py` — answers `DELETE /v2/session/{id}` with 204 No
+>    Content (the validate_delete_response shape); E2E legs unchanged.
+> 5. `docs/RTSP.md` §10 (R7 runs 1-4 + the fix + the honest not-covered
+>    list), this file, `PROJECT-STATE.md`.
+>
+> ## Verification (round XXIII, sandbox)
+> native **13 suites PASS** (test_kncm 147/147, incl. ASan+UBSan+LSan
+> run) · cross x64+i686 `-Werror` PASS · kn_cm.c + knvstd_main.c clean
+> under `-Wformat-truncation=2` at -O1 host / -O2 mingw (x64+i686) ·
+> CMake fresh configure both backends: 0 warnings, ctest **15/15 ×2** ·
+> sandbox_session_e2e **36/36** (exercises the control-host FALLBACK
+> path: the rig's 127.0.0.1 is rejected by the trust gate → create-host;
+> the ACCEPT path is unit-pinned by the capture fixture — a public-host
+> loopback rig is impossible without DNS games) · T10 POSIX dry-run ALL
+> PASS **62** (62 is also the pre-delta baseline on this tree — the
+> round-XXI "61" predates a check added since; verified by a stashed
+> rerun).
+> **Target expectations:** T10 r18 → ALL PASS **72** (suite count
+> unchanged; test_kncm's internal count is not a T10 check). Then **R7
+> run 5** = the same `--session` command: expect `cm_control` with
+> `source:"sessionControlInfo"`, a MOVING queue_position, and — if a
+> seat arrives — phase B onward (D-s1 gets its first real answer there).
+>
+> ## Known gaps carried forward (honest)
+> * Phases B-E aborts still don't cancel the session (churn discipline;
+>   next round).
+> * IPv6 trust checks are prefix-class approximations, not a full
+>   IpAddr decode (documented in kn_cm.c; reject-direction only affects
+>   exotic control hosts, which fall back to the create host).
+> * D-cm1/D-cm2 measured OK AT CREATE (4/4 real sessions); seat/streaming
+>   stages still unmeasured.
+
+---
+
+# Round XXII delta, rev 12b (T10 r16 build-fix + gate hardening)
 
 > **Rev 12b (round XXII):** target T10 r16 caught a round-XXI uncounted-
 > replace edit in `kn_net_mbedtls.c` (port snippet landed in the DNS

@@ -196,6 +196,17 @@ int kn_cm_extract_session(const char *json_text, kn_cm_session *out)
     if (kn_json_parse(&d, json_text, strlen(json_text), NULL) != KN_JSON_OK)
         return -1;
     root = kn_json_root(&d);
+
+    /* requestStatus mirror (:2310-2352) — filled BEFORE the session
+     * checks so a REJECTED payload (no session / no sessionId) still
+     * carries the cloud-side reason for the caller's diagnostics. */
+    {
+        const kn_jnode *rs = kn_json_get(&d, root, "requestStatus");
+        (void)jint(kn_json_get(&d, rs, "statusCode"), &out->req_status_code);
+        (void)jstr(&d, kn_json_get(&d, rs, "statusDescription"),
+                   out->req_status_desc, sizeof out->req_status_desc);
+    }
+
     session = kn_json_get(&d, root, "session");
     if (!session) return -1;
 
@@ -273,6 +284,21 @@ int kn_cm_extract_session(const char *json_text, kn_cm_session *out)
             }
         }
     }
+    /* the control node this session lives on (:1966-1984) — the poll/stop
+     * target (round XXIII, the R7 run-1 finding). Port defaults to 443
+     * (:1978 is_none_or(443)); an out-of-range port degrades to 443 and
+     * the trust gate in kn_cm_control_base makes the final decision. */
+    {
+        const kn_jnode *sci = kn_json_get(&d, session, "sessionControlInfo");
+        long long cport = 443;
+        if (jstr(&d, kn_json_get(&d, sci, "ip"), out->control_host,
+                 sizeof out->control_host) == 0 && out->control_host[0]) {
+            (void)jint(kn_json_get(&d, sci, "port"), &cport);
+            if (cport < 1 || cport > 65535) cport = 443;
+            out->control_port = (uint16_t)cport;
+            out->have_control = 1;
+        }
+    }
     /* serverIp fallback: sessionControlInfo.ip (:1966) */
     if (!out->server_ip[0]) {
         const kn_jnode *sci = kn_json_get(&d, session, "sessionControlInfo");
@@ -282,6 +308,180 @@ int kn_cm_extract_session(const char *json_text, kn_cm_session *out)
     out->ready = (out->status == 2 || out->status == 3) && out->have_rtsps;
     (void)n;
     return 0;
+}
+
+/* --------------------------------------------- learned control host gate
+ * Round XXIII. The C mirror of trusted_learned_server_base
+ * (cloudmatch.rs:2414-2424) + trusted_cloudmatch_base (:2400-2412) +
+ * public_session_host/_ipv4 (:2426-2456), bounded and allocation-free.
+ * Documented simplifications vs the reference's Url/IpAddr parsing: an
+ * unbracketed "ipv6:port" string is rejected outright (real captures
+ * carry plain domain names — the user's 2026-10-25 evidence:
+ * sessionControlInfo.ip = "np-waw-01.cloudmatchbeta.nvidiagrid.net"),
+ * IPv6 scope IDs are rejected, and an IPv6 address with an embedded
+ * IPv4 tail has that tail checked against the IPv4 rules. Every reject
+ * just means "fall back to the create host" — the safe direction. */
+
+static int cm_hexval(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* strict dotted-quad public check (public_session_ipv4, :2443-2456) */
+static int cm_ipv4_public(const char *h)
+{
+    unsigned o[4];
+    int i;
+    const char *p = h;
+    for (i = 0; i < 4; ++i) {
+        const char *start = p;
+        long v = 0;
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); ++p; }
+        if (p == start || v > 255) return 0;
+        if (p - start > 1 && *start == '0') return 0;   /* no leading zeros */
+        o[i] = (unsigned)v;
+        if (i < 3) {
+            if (*p != '.') return 0;
+            ++p;
+        }
+    }
+    if (*p) return 0;
+    if (o[0] == 0 || o[0] >= 240) return 0;         /* 0/8 + reserved (:2450) */
+    if (o[0] == 10) return 0;                       /* private */
+    if (o[0] == 127) return 0;                      /* loopback */
+    if (o[0] == 172 && o[1] >= 16 && o[1] <= 31) return 0;  /* private */
+    if (o[0] == 192 && o[1] == 168) return 0;       /* private */
+    if (o[0] == 169 && o[1] == 254) return 0;       /* link-local */
+    if (o[0] == 100 && o[1] >= 64 && o[1] <= 127) return 0; /* CGNAT (:2454) */
+    if (o[0] >= 224) return 0;                      /* multicast (240+ gone) */
+    return 1;
+}
+
+static int cm_is_ipv4_text(const char *h)
+{
+    if (!strchr(h, '.')) return 0;
+    for (; *h; ++h)
+        if (!((*h >= '0' && *h <= '9') || *h == '.')) return 0;
+    return 1;
+}
+
+/* IPv6 text check: charset + the non-public prefix classes of
+ * public_session_host (:2429-2441). s may carry an embedded IPv4 tail.
+ * Documented simplification vs the reference's IpAddr parse: reserved
+ * forms are caught by exact/prefix comparison ("::", "::1", ff/fc/fd/
+ * fe8-feb heads), not by a full address decode. */
+static int cm_ipv6_public(const char *s, size_t n)
+{
+    size_t i;
+    int colons = 0;
+    char head[3];
+    if (n == 0 || n > 46) return 0;
+    for (i = 0; i < n; ++i) {
+        char c = s[i];
+        if (c == ':') { ++colons; continue; }
+        if (c == '.') continue;               /* embedded IPv4 tail */
+        if (cm_hexval(c) < 0) return 0;
+    }
+    if (colons < 2) return 0;
+    /* embedded IPv4 tail (e.g. "::ffff:127.0.0.1"): the dotted quad
+     * after the last ':' must itself be public */
+    if (memchr(s, '.', n)) {
+        const char *v4 = s + n;
+        while (v4 > s && *v4 != ':') --v4;
+        if (*v4 == ':') ++v4;
+        if (!v4[0] || !cm_ipv4_public(v4)) return 0;
+    }
+    /* unspecified + loopback */
+    if ((n == 2 && s[0] == ':' && s[1] == ':') ||
+        (n == 3 && s[0] == ':' && s[1] == ':' && s[2] == '1'))
+        return 0;
+    /* first-hextet prefix classes: ff00::/8 multicast, fc00::/7 ULA,
+     * fe80::/10 link-local */
+    head[0] = head[1] = head[2] = '\0';
+    for (i = 0; i < n && s[i] != ':' && i < 2; ++i)
+        head[i] = (char)(s[i] | 0x20);
+    if (head[0] == 'f') {
+        if (head[1] == 'f' || head[1] == 'c' || head[1] == 'd')
+            return 0;
+        if (head[1] == 'e') {
+            char c3 = (i < n && s[i] != ':') ? (char)(s[i] | 0x20) : '\0';
+            if (c3 >= '8' && c3 <= 'b') return 0;     /* fe8x-febx */
+        }
+    }
+    return 1;
+}
+
+/* domain shape: labels of [A-Za-z0-9-] (no edge hyphens), >= 1 dot, no
+ * ".local" suffix (:2427-2429), total <= 253 */
+static int cm_domain_public(const char *h, size_t len)
+{
+    size_t i, lab = 0;
+    int dots = 0;
+    if (len == 0 || len > 253) return 0;
+    for (i = 0; i <= len; ++i) {
+        char c = (i < len) ? h[i] : '.';
+        if (c == '.') {
+            if (lab == 0) return 0;                   /* empty/edge label */
+            if (h[i - lab] == '-' || h[i - 1] == '-') return 0;
+            if (i < len) ++dots;
+            lab = 0;
+        } else {
+            ++lab;
+        }
+    }
+    if (dots == 0) return 0;                          /* no TLD (:2428) */
+    if (len >= 6) {                                   /* ".local" suffix */
+        const char *t = h + len - 6;
+        if (t[0] == '.' &&
+            (t[1] | 0x20) == 'l' && (t[2] | 0x20) == 'o' &&
+            (t[3] | 0x20) == 'c' && (t[4] | 0x20) == 'a' &&
+            (t[5] | 0x20) == 'l')
+            return 0;
+    }
+    return 1;
+}
+
+int kn_cm_control_base(const kn_cm_session *s, char *host_out, size_t hostsz,
+                       uint16_t *port_out)
+{
+    const char *p;
+    size_t len, i;
+    if (!s || !s->have_control || !host_out || hostsz < 2 || !port_out)
+        return 0;
+    if (s->control_port != 443) return 0;             /* (:1976-1980) */
+    p = s->control_host;
+    if (strncmp(p, "https://", 8) == 0) p += 8;       /* (:2415-2416) */
+    else if (strstr(p, "://")) return 0;              /* any other scheme */
+    if (!p[0]) return 0;
+    len = strlen(p);
+    if (len + 1 > hostsz) return 0;
+    /* charset whitelist — also rejects the userinfo/query/fragment
+     * carriers '/', '@', '?', '#' and whitespace (:2403-2409) */
+    for (i = 0; i < len; ++i) {
+        char c = p[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '.' || c == '-' ||
+                 c == ':' || c == '[' || c == ']';
+        if (!ok) return 0;
+    }
+    if (p[0] == '[') {                                /* bracketed IPv6 */
+        const char *close = strchr(p, ']');
+        if (!close || close[1] != '\0' || close == p + 1) return 0;
+        if (!cm_ipv6_public(p + 1, (size_t)(close - p - 1))) return 0;
+    } else if (strchr(p, ':')) {                      /* bare IPv6 text */
+        if (!cm_ipv6_public(p, len)) return 0;
+    } else if (cm_is_ipv4_text(p)) {
+        if (!cm_ipv4_public(p)) return 0;
+    } else if (!cm_domain_public(p, len)) {
+        return 0;
+    }
+    memcpy(host_out, p, len);
+    host_out[len] = '\0';
+    *port_out = 443;
+    return 1;
 }
 
 /* --------------------------------------------------------- network ops */
@@ -312,6 +512,7 @@ static int cm_round(kn_http_io io, const char *method, const char *host,
     if (rc != KN_HTTP_OK) return rc;
     if (http_status) *http_status = resp.status;
     if (resp.status != 200) return KN_HTTP_OK;    /* caller inspects */
+    if (!out) return KN_HTTP_OK;   /* DELETE: the body is not inspected */
     if (resp.truncated) return KN_HTTP_ERR_BIG;
     return kn_cm_extract_session(jsonbuf, out) == 0 ? KN_HTTP_OK
                                                     : KN_HTTP_ERR_PROTO;
@@ -353,4 +554,22 @@ int kn_cm_poll(kn_http_io io, const char *host, const char *base_path,
     return cm_round(io, "GET", host, path, s, NULL, 0, timeout_ms,
                     now_ms, now_ctx, rxb, rxbsz, jsonbuf, jsoncap,
                     http_status, out);
+}
+
+int kn_cm_cancel(kn_http_io io, const char *host, const char *base_path,
+                 const kn_cm_settings *s, const char *session_id,
+                 uint32_t timeout_ms,
+                 uint64_t (*now_ms)(void *), void *now_ctx,
+                 uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
+                 int *http_status)
+{
+    char path[320];
+    int n;
+    if (!host || !s || !session_id || !session_id[0]) return KN_HTTP_ERR_ARGS;
+    n = snprintf(path, sizeof path, "%sv2/session/%.64s",
+                 base_path ? base_path : "/", session_id);
+    if (n < 0 || (size_t)n >= sizeof path) return KN_HTTP_ERR_ARGS;
+    return cm_round(io, "DELETE", host, path, s, NULL, 0, timeout_ms,
+                    now_ms, now_ctx, rxb, rxbsz, jsonbuf, jsoncap,
+                    http_status, NULL);
 }

@@ -128,7 +128,11 @@ static int ws_recv_text(void *c, char *buf, size_t cap, uint32_t t,
     int rc = kn_ws_recv_msg(w, t, &op, &n);
     if (rc == KN_WS_ERR_TIMEOUT) return KN_RTSP_ERR_TIMEOUT;
     if (rc != KN_WS_OK) return KN_RTSP_ERR_IO;
-    if (op != KN_WS_OP_TEXT || n + 1 > cap) return KN_RTSP_ERR_IO;
+    /* the reference feeds TEXT **and BINARY** frames into the RTSP
+     * buffer (nvst_rtsp.rs:620-623); the rig exercises the binary path
+     * on DESCRIBE (round XXIV) */
+    if ((op != KN_WS_OP_TEXT && op != KN_WS_OP_BINARY) || n + 1 > cap)
+        return KN_RTSP_ERR_IO;
     memcpy(buf, w->msg, n);
     buf[n] = '\0';
     *out = n;
@@ -301,7 +305,19 @@ int main(void)
                   == KN_RTSP_OK, "rtsp client init");
 
         common[0].name = "X-GS-Version"; common[0].value = "14.2";
-        common[1].name = "Host";         common[1].value = "127.0.0.1";
+        {   /* Host = the authority WITH the port (nvst_rtsp.rs:1070-76
+             * strips only the scheme; mirrored with knvstd round XXIV) */
+            static char authbuf[64];
+            const char *a = sess.rtsps_endpoint + 8;  /* "rtsps://" */
+            size_t al = strcspn(a, "/?#");
+            if (al == 0 || al >= sizeof authbuf) {
+                printf("bad rtsps endpoint authority\n");
+                goto done;
+            }
+            memcpy(authbuf, a, al);
+            authbuf[al] = '\0';
+            common[1].name = "Host";     common[1].value = authbuf;
+        }
         common[2].name = "x-nv-sessionid";
         common[2].value = "FAKE-SESS-0001";
 

@@ -743,6 +743,72 @@ static void test_full_sequence(void)
           "five rounds, one shared counter");
 }
 
+/* Round XXIV — the R7 run-5 shape: the real DESCRIBE response arrived as
+ * a message larger than the old 8 KiB per-request scratch and died with
+ * rc=-2/status=0 while OPTIONS (small) had passed. The reference has no
+ * per-message cap below the 4 MiB total (nvst_rtsp.rs:559-566 appends
+ * whole tungstenite messages to its buffer, :620-623 accepts text AND
+ * binary). These checks pin both wire shapes: one big message, and the
+ * same response split across two. */
+static void test_big_messages(void)
+{
+    static rio r;
+    static kn_rtsp_client c;
+    static char big[32 * 1024], part1[16 * 1024], part2[16 * 1024];
+    static char body[24 * 1024];
+    kn_rtsp_response resp;
+    size_t bl = 0, total, half;
+    int n, rc;
+
+    printf("-- big/split messages (round XXIV, R7 run-5 shape) --\n");
+    n = snprintf(body + bl, sizeof body - bl,
+                 "v=0\r\no=- 0 0 IN IP4 1.2.3.4\r\ns=big\r\nt=0 0\r\n"
+                 "a=x-nv-general.pingVersion:6\r\n"
+                 "a=x-nv-general.nativeRtcOnBundlePort:1\r\n");
+    bl += (size_t)n;
+    {
+        unsigned i;
+        for (i = 0; i < 250 && bl + 96 < sizeof body; ++i)
+            bl += (size_t)snprintf(body + bl, sizeof body - bl,
+                                   "a=x-kn-pad-%04u:%064u\r\n", i, i);
+    }
+    n = snprintf(body + bl, sizeof body - bl,
+                 "m=video 5004 RTP/AVP 96\r\n"
+                 "a=control:streamid=video/0\r\n");
+    bl += (size_t)n;
+    total = (size_t)snprintf(big, sizeof big,
+        "RTSP/1.0 200 OK\r\nCSeq: 1\r\nRequest-Id: 1\r\n"
+        "Session: SESSBIG\r\nContent-Type: application/sdp\r\n"
+        "Content-Length: %lu\r\n\r\n", (unsigned long)bl);
+    memcpy(big + total, body, bl);
+    big[total + bl] = '\0';
+    total += bl;
+    CHECK(total > 19000 && total < sizeof big,
+          "fixture: the DESCRIBE response really exceeds 8 KiB");
+
+    client_reset(&r, &c);
+    rio_add(&r, big);
+    rc = kn_rtsp_request(&c, "DESCRIBE", "rtsps://big.example:322",
+                         NULL, 0, NULL, 0, 0, &resp);
+    CHECK(rc == KN_RTSP_OK && resp.status == 200 &&
+          resp.body_len == bl &&
+          strstr(resp.body, "a=control:streamid=video/0") != NULL,
+          "single >8 KiB message parses (the old scratch died here)");
+
+    client_reset(&r, &c);
+    half = total / 2;
+    memcpy(part1, big, half);
+    part1[half] = '\0';
+    memcpy(part2, big + half, total - half);
+    part2[total - half] = '\0';
+    rio_add(&r, part1);
+    rio_add(&r, part2);
+    rc = kn_rtsp_request(&c, "DESCRIBE", "rtsps://big.example:322",
+                         NULL, 0, NULL, 0, 0, &resp);
+    CHECK(rc == KN_RTSP_OK && resp.status == 200 && resp.body_len == bl,
+          "the same response split across two messages accumulates");
+}
+
 static void test_teardown_skip(void)
 {
     rio r;
@@ -815,6 +881,7 @@ int main(void)
     test_describe();
     test_setup();
     test_full_sequence();
+    test_big_messages();
     test_teardown_skip();
     test_errors();
     return kn_test_summary("test_knrtsp");

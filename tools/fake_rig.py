@@ -52,7 +52,12 @@ DESCRIBE_SDP = (
     "000102030405060708090A0B0C0D0E0F"
     "000102030405060708090A0B0C0D0E0F\r\n"
     "a=x-nv-runtime.encryptionKeyId:1194884\r\n"
-    "m=video 5004 RTP/AVP 96\r\n"
+    # round XXIV: real DESCRIBE SDPs routinely exceed 8 KiB (R7 run-5
+    # died rc=-2 on the old per-message scratch); pad with inert
+    # session-level attributes BEFORE the m= line so every parser path
+    # (sdp_attribute scans, media_control, negotiate) sees a >8 KiB body.
+    + "".join("a=x-kn-pad-%04d:%s\r\n" % (i, "P" * 60) for i in range(150))
+    + "m=video 5004 RTP/AVP 96\r\n"
     "a=control:streamid=video/0\r\n"
 )
 
@@ -207,6 +212,10 @@ class Rig:
                     http_respond(conn, 200, self.session_payload())
                 elif req.startswith("GET /v2/session/"):
                     http_respond(conn, 200, self.session_payload())
+                elif req.startswith("DELETE /v2/session/"):
+                    # round XXIII: the reference's stop_at answers 2xx/404;
+                    # 204 with no body (validate_delete_response shape)
+                    conn.sendall(b"HTTP/1.1 204 No Content\r\n\r\n")
                 else:
                     http_respond(conn, 404, {"error": "unknown"})
 
@@ -267,10 +276,20 @@ class Rig:
                         ["Public: OPTIONS, DESCRIBE, SETUP, ANNOUNCE, "
                          "PLAY, TEARDOWN"])))
                 elif first == "DESCRIBE":
-                    conn.sendall(ws_frame(self.rtsp_response(
+                    # round XXIV: deliver the (>8 KiB) SDP response as TWO
+                    # BINARY messages — the reference reads both frame
+                    # types into its accumulation buffer (nvst_rtsp.rs
+                    # :620-623) and real rigs fragment large responses;
+                    # this exercises binary acceptance + across-message
+                    # accumulation over real sockets.
+                    raw = self.rtsp_response(
                         first, cseq,
                         ["Session: %s" % self.session_id,
-                         "Content-Type: application/sdp"], DESCRIBE_SDP)))
+                         "Content-Type: application/sdp"],
+                        DESCRIBE_SDP).encode()
+                    half = len(raw) // 2
+                    conn.sendall(ws_frame(raw[:half], opcode=0x2))
+                    conn.sendall(ws_frame(raw[half:], opcode=0x2))
                 elif first == "SETUP":
                     conn.sendall(ws_frame(self.rtsp_response(
                         first, cseq,

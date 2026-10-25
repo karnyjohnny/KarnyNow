@@ -371,14 +371,28 @@ int kn_rtsp_request(kn_rtsp_client *c, const char *method, const char *uri,
                      method, rc);
             return rc;
         }
-        {   /* wait for the next message with the remaining time */
-            char scratch[8192];
+        {   /* wait for the next message with the remaining time — read
+             * DIRECTLY into the accumulation buffer's tail. There is no
+             * per-message cap below the 4 MiB total: the reference's
+             * tungstenite reassembles WHOLE messages up to
+             * MAX_REQUEST_RESPONSE_BYTES and appends them to the buffer
+             * (nvst_rtsp.rs:559-566, :614-623). A real DESCRIBE SDP
+             * routinely exceeds the 8 KiB scratch that used to live here
+             * — R7 run-5's DESCRIBE rc=-2/status=0 with OPTIONS 200 is
+             * the measurement that found it. */
             size_t got = 0;
             uint64_t remain = deadline - now;
             uint32_t wait_ms = remain > 60000ull ? 60000u
                                                  : (uint32_t)remain;
-            int rrc = c->io.recv_text(c->io.ctx, scratch,
-                                      sizeof scratch - 1, wait_ms, &got);
+            int rrc;
+            if (c->buf_len + 1 >= c->buf_cap) {
+                snprintf(c->err, sizeof c->err,
+                         "%.16s: accumulation overflow", method);
+                return KN_RTSP_ERR_BIG;
+            }
+            rrc = c->io.recv_text(c->io.ctx, c->buf + c->buf_len,
+                                  c->buf_cap - c->buf_len - 1, wait_ms,
+                                  &got);
             if (rrc == KN_RTSP_ERR_TIMEOUT || (rrc == 0 && got == 0))
                 continue;                   /* the deadline check exits */
             if (rrc < 0) {
@@ -386,12 +400,11 @@ int kn_rtsp_request(kn_rtsp_client *c, const char *method, const char *uri,
                          "%.16s: transport recv failed", method);
                 return KN_RTSP_ERR_IO;
             }
-            if (c->buf_len + got + 1 > c->buf_cap) {
+            if (got > c->buf_cap - c->buf_len - 1) {  /* runaway shim */
                 snprintf(c->err, sizeof c->err,
                          "%.16s: accumulation overflow", method);
                 return KN_RTSP_ERR_BIG;
             }
-            memcpy(c->buf + c->buf_len, scratch, got);
             c->buf_len += got;
             c->buf[c->buf_len] = '\0';
         }

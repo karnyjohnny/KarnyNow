@@ -65,6 +65,20 @@ typedef struct kn_cm_session {
     int       have_media;
     int       resumable;            /* status 2..5 (:1505-1512) */
     int       ready;                /* status 2|3 AND have_rtsps */
+    /* Round XXIII (the R7 run-1 finding): the REGIONAL control node that
+     * owns this session — session.sessionControlInfo.{ip,port}
+     * (:1966-1984). Every poll/stop must target it (the reference learns
+     * it into control_base at create :401-414/:1149-1152 and polls ONLY
+     * there :652-656); polling the global create front instead returns
+     * stale snapshots (frozen queuePosition — measured live 2026-10-25). */
+    char      control_host[128];
+    uint16_t  control_port;         /* 443 when absent (:1978) */
+    int       have_control;
+    /* requestStatus mirror (:2310-2352). Filled even when the session
+     * extraction FAILS, so callers can surface the cloud-side reason
+     * (e.g. statusCode 11 SESSION_LIMIT). 0/"" = absent. */
+    long long req_status_code;
+    char      req_status_desc[64];
 } kn_cm_session;
 
 /* Build the POST v2/session body ({"sessionRequestData":{...}}) —
@@ -109,6 +123,31 @@ int kn_cm_poll(kn_http_io io, const char *host, const char *base_path,
                uint64_t (*now_ms)(void *), void *now_ctx,
                uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
                int *http_status, kn_cm_session *out);
+
+/* Validate + normalize the LEARNED control node (sessionControlInfo.ip)
+ * into a pollable host. The C mirror of trusted_learned_server_base +
+ * trusted_cloudmatch_base + public_session_host (cloudmatch.rs
+ * :2400-2456) and the port==443 gate (:1976-1980): https-only, no
+ * userinfo/query/fragment, port 443, public IPv4/IPv6/domain (private,
+ * loopback, link-local, CGNAT, multicast, reserved and .local are all
+ * rejected — a response can never redirect polling into a private
+ * address). Returns 1 with host_out/port_out filled when pollable; 0
+ * when absent/untrusted — the caller MUST then fall back to the create
+ * host (the reference's unwrap_or(base) semantics, :1984). */
+int kn_cm_control_base(const kn_cm_session *s, char *host_out,
+                       size_t hostsz, uint16_t *port_out);
+
+/* DELETE {base_path}v2/session/{id} — the reference's stop_at
+ * (:789-800). Best-effort cleanup so an aborted queue wait does not
+ * orphan a session (a pending one blocks the next create with
+ * SESSION_LIMIT, :2354+). Mirrors validate_delete_response (:2728):
+ * 2xx and 404 both mean "gone" — the CALLER decides via *http_status. */
+int kn_cm_cancel(kn_http_io io, const char *host, const char *base_path,
+                 const kn_cm_settings *s, const char *session_id,
+                 uint32_t timeout_ms,
+                 uint64_t (*now_ms)(void *), void *now_ctx,
+                 uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
+                 int *http_status);
 
 #ifdef __cplusplus
 }

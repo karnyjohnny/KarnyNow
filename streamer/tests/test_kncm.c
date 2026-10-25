@@ -566,12 +566,213 @@ static void test_cm_network(void)
     CHECK(rc == KN_HTTP_OK && status == 503, "503 passes through as status");
 }
 
+/* ------------------------------------------- learned control-host gate */
+
+static int cb_ok(const char *ip, unsigned port, const char *want)
+{
+    kn_cm_session s;
+    char host[128];
+    uint16_t p = 0;
+    memset(&s, 0, sizeof s);
+    snprintf(s.control_host, sizeof s.control_host, "%.127s", ip);
+    s.control_port = (uint16_t)port;
+    s.have_control = 1;
+    if (!kn_cm_control_base(&s, host, sizeof host, &p)) return 0;
+    return want && strcmp(host, want) == 0 && p == 443;
+}
+
+static void test_cm_control(void)
+{
+    kn_cm_session s;
+    char host[128];
+    uint16_t port = 0;
+
+    printf("-- kn_cm control base (R7 run-1 fix) --\n");
+    /* the exact R7 capture: the create response nominates the regional
+     * node that owns the session (np-waw-01...) */
+    CHECK(cb_ok("np-waw-01.cloudmatchbeta.nvidiagrid.net", 443,
+                "np-waw-01.cloudmatchbeta.nvidiagrid.net"),
+          "capture host accepted (:1149)");
+    CHECK(cb_ok("https://np-waw-01.cloudmatchbeta.nvidiagrid.net", 443,
+                "np-waw-01.cloudmatchbeta.nvidiagrid.net"),
+          "https:// prefix stripped (:2415)");
+    CHECK(!cb_ok("np-waw-01.cloudmatchbeta.nvidiagrid.net", 8443, NULL),
+          "port != 443 rejected (:1976-1980)");
+    CHECK(!cb_ok("http://np-waw-01.example", 443, NULL),
+          "http:// scheme rejected (:2405)");
+    /* private/loopback/link-local/CGNAT/multicast/reserved
+     * (public_session_ipv4, :2443-2456) */
+    CHECK(!cb_ok("10.0.0.1", 443, NULL), "private 10/8 rejected");
+    CHECK(!cb_ok("172.16.5.5", 443, NULL), "private 172.16/12 rejected");
+    CHECK(cb_ok("172.32.5.5", 443, "172.32.5.5"), "172.32/16 stays public");
+    CHECK(!cb_ok("192.168.1.1", 443, NULL), "private 192.168/16 rejected");
+    CHECK(!cb_ok("127.0.0.1", 443, NULL), "loopback rejected");
+    CHECK(!cb_ok("169.254.1.1", 443, NULL), "link-local rejected");
+    CHECK(!cb_ok("100.64.0.1", 443, NULL), "CGNAT 100.64/10 rejected");
+    CHECK(!cb_ok("100.127.9.9", 443, NULL), "CGNAT upper edge rejected");
+    CHECK(cb_ok("100.128.0.1", 443, "100.128.0.1"), "100.128 is public");
+    CHECK(!cb_ok("224.0.0.1", 443, NULL), "multicast rejected");
+    CHECK(!cb_ok("0.1.2.3", 443, NULL), "0/8 rejected (:2450)");
+    CHECK(!cb_ok("240.1.2.3", 443, NULL), "reserved 240+ rejected (:2451)");
+    CHECK(!cb_ok("255.255.255.255", 443, NULL), "broadcast rejected");
+    CHECK(!cb_ok("010.1.2.3", 443, NULL), "leading-zero octet rejected");
+    CHECK(!cb_ok("1.2.3.4.5", 443, NULL), "malformed IPv4 rejected");
+    CHECK(cb_ok("8.238.0.113", 443, "8.238.0.113"), "public IPv4 accepted");
+    /* hostname shape rules (:2427-2429) */
+    CHECK(!cb_ok("localhost", 443, NULL), "dotless hostname rejected");
+    CHECK(!cb_ok("rig.local", 443, NULL), ".local rejected");
+    CHECK(!cb_ok("RIG.LOCAL", 443, NULL), ".LOCAL rejected (case-insens.)");
+    CHECK(!cb_ok("bad host.example", 443, NULL), "space rejected");
+    CHECK(!cb_ok("user:pw@seat.example", 443, NULL), "userinfo rejected");
+    CHECK(!cb_ok("seat.example/path", 443, NULL), "path rejected");
+    CHECK(!cb_ok("seat.example?x=1", 443, NULL), "query rejected");
+    CHECK(!cb_ok("-seat.example", 443, NULL), "leading edge hyphen rejected");
+    CHECK(!cb_ok("seat-.example", 443, NULL), "trailing edge hyphen rejected");
+    CHECK(!cb_ok("seat..example", 443, NULL), "empty label rejected");
+    CHECK(cb_ok("np-waw-01.example", 443, "np-waw-01.example"),
+          "in-label hyphens/digits accepted");
+    /* IPv6 (the documented simplified mirror — see kn_cm.c) */
+    CHECK(cb_ok("2600:1f18::9", 443, "2600:1f18::9"), "public IPv6 accepted");
+    CHECK(!cb_ok("::1", 443, NULL), "IPv6 loopback rejected");
+    CHECK(!cb_ok("::", 443, NULL), "IPv6 unspecified rejected");
+    CHECK(!cb_ok("fe80::1", 443, NULL), "IPv6 link-local rejected");
+    CHECK(!cb_ok("FE80::1", 443, NULL), "IPv6 link-local rejected (case)");
+    CHECK(!cb_ok("fd00::1", 443, NULL), "IPv6 ULA rejected");
+    CHECK(!cb_ok("ff02::1", 443, NULL), "IPv6 multicast rejected");
+    CHECK(!cb_ok("::ffff:127.0.0.1", 443, NULL),
+          "IPv4-mapped loopback rejected");
+    CHECK(!cb_ok("[::1]", 443, NULL), "bracketed loopback rejected");
+    CHECK(cb_ok("[2600:1f18::9]", 443, "[2600:1f18::9]"),
+          "bracketed public IPv6 kept verbatim");
+    /* absent control info -> 0 (the caller falls back to the create host) */
+    memset(&s, 0, sizeof s);
+    CHECK(!kn_cm_control_base(&s, host, sizeof host, &port),
+          "absent sessionControlInfo -> fallback");
+    CHECK(!kn_cm_control_base(NULL, host, sizeof host, &port) &&
+          !kn_cm_control_base(&s, NULL, 0, &port),
+          "argument guards");
+
+    /* extract fills the control fields — the ready fixture's 10.0.0.1 is
+     * filled honestly but then rejected by the trust gate */
+    CHECK(kn_cm_extract_session(k_session_ready, &s) == 0 && s.have_control &&
+          strcmp(s.control_host, "10.0.0.1") == 0 && s.control_port == 443 &&
+          s.req_status_code == 1,
+          "extract fills control+requestStatus (ready fixture)");
+    CHECK(!kn_cm_control_base(&s, host, sizeof host, &port),
+          "private control IP rejected -> create-host fallback");
+
+    {   /* the EXACT R7 capture shape (2026-10-25, np-waw-01) */
+        static const char fx[] =
+            "{\"requestStatus\":{\"statusCode\":1,"
+            "\"statusDescription\":\"SUCCESS_STATUS\",\"serverId\":"
+            "\"NP-WAW-01\"},\"session\":{\"sessionId\":"
+            "\"480e517f-a5bc-4bb2-80b8-dcf3f77ed2fa\",\"status\":1,"
+            "\"sessionControlInfo\":{\"protocol\":0,\"appLevelProtocol\":5,"
+            "\"ip\":\"np-waw-01.cloudmatchbeta.nvidiagrid.net\","
+            "\"resourcePath\":\"/v2/session/"
+            "480e517f-a5bc-4bb2-80b8-dcf3f77ed2fa\",\"usage\":10,"
+            "\"port\":443},\"connectionInfo\":null,"
+            "\"seatSetupInfo\":{\"queuePosition\":159,\"seatSetupStep\":1,"
+            "\"seatSetupEta\":30000},\"errorCode\":1}}";
+        CHECK(kn_cm_extract_session(fx, &s) == 0 && s.have_control &&
+              strcmp(s.control_host,
+                     "np-waw-01.cloudmatchbeta.nvidiagrid.net") == 0 &&
+              s.control_port == 443 && s.status == 1 &&
+              strcmp(s.phase, "preparing") == 0 &&
+              s.have_queue && s.queue_position == 159 &&
+              s.have_seat && s.seat_setup_step == 1 && !s.ready &&
+              s.req_status_code == 1 &&
+              strcmp(s.req_status_desc, "SUCCESS_STATUS") == 0,
+              "R7 capture fixture extracts (queue 159, control np-waw-01)");
+        CHECK(kn_cm_control_base(&s, host, sizeof host, &port) == 1 &&
+              strcmp(host, "np-waw-01.cloudmatchbeta.nvidiagrid.net") == 0 &&
+              port == 443,
+              "captured control base is pollable");
+    }
+    {   /* absent port defaults to 443 (:1978 is_none_or(443)) */
+        static const char fx[] =
+            "{\"session\":{\"sessionId\":\"S10\",\"status\":1,"
+            "\"sessionControlInfo\":{\"ip\":\"np-waw-01.example\"}}}";
+        CHECK(kn_cm_extract_session(fx, &s) == 0 && s.have_control &&
+              s.control_port == 443, "absent control port defaults to 443");
+    }
+    {   /* a rejected payload still reports the cloud-side reason
+         * (:2337-2352 — e.g. statusCode 11 SESSION_LIMIT, :2354+) */
+        static const char fx[] =
+            "{\"requestStatus\":{\"statusCode\":11,"
+            "\"statusDescription\":\"SESSION_LIMIT_REACHED\"}}";
+        CHECK(kn_cm_extract_session(fx, &s) == -1 && s.req_status_code == 11 &&
+              strcmp(s.req_status_desc, "SESSION_LIMIT_REACHED") == 0,
+              "failed extract keeps requestStatus for diagnostics");
+    }
+}
+
+static void test_cm_cancel(void)
+{
+    static hio h;
+    kn_cm_settings st;
+    int status = 0, rc;
+
+    printf("-- kn_cm cancel (DELETE v2/session/{id}) --\n");
+    memset(&st, 0, sizeof st);
+    st.token = "T0KEN"; st.device_id = "dev-1"; st.app_id = 42;
+    st.title = "T"; st.width = 1280; st.height = 720; st.fps = 30;
+
+    hio_reset(&h);
+    hio_queue(&h, "HTTP/1.1 204 No Content\r\n\r\n");
+    g_now = 0;
+    rc = kn_cm_cancel(hio_io(&h), "np-waw-01.example", "/", &st, "SESS-1",
+                      1000, fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
+                      sizeof g_body, &status);
+    CHECK(rc == KN_HTTP_OK && status == 204,
+          "cancel: 204 accepted (validate_delete_response :2728)");
+    h.from[h.flen] = '\0';
+    CHECK(strstr((char *)h.from, "DELETE /v2/session/SESS-1 HTTP/1.1\r\n") ==
+          (char *)h.from, "cancel used DELETE v2/session/{id} (:789-800)");
+    CHECK(strstr((char *)h.from, "Host: np-waw-01.example\r\n") != NULL,
+          "cancel targets the given (control) host");
+    CHECK(strstr((char *)h.from, "Authorization: GFNJWT T0KEN\r\n") != NULL,
+          "cancel carries the GFNJWT auth header");
+
+    hio_reset(&h);
+    hio_queue(&h, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+    rc = kn_cm_cancel(hio_io(&h), "np-waw-01.example", "/", &st, "SESS-1",
+                      1000, fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
+                      sizeof g_body, &status);
+    CHECK(rc == KN_HTTP_OK && status == 404,
+          "cancel: 404 passes through (already gone)");
+
+    hio_reset(&h);
+    {   static const char k_delete_body[] =
+            "{\"requestStatus\":{\"statusCode\":1,"
+            "\"statusDescription\":\"SUCCESS_STATUS\"}}";
+        char framed[512];
+        snprintf(framed, sizeof framed,
+                 "HTTP/1.1 200 OK\r\nContent-Length: %lu\r\n\r\n%s",
+                 (unsigned long)strlen(k_delete_body), k_delete_body);
+        hio_queue(&h, framed);
+    }
+    rc = kn_cm_cancel(hio_io(&h), "np-waw-01.example", "/", &st, "SESS-1",
+                      1000, fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
+                      sizeof g_body, &status);
+    CHECK(rc == KN_HTTP_OK && status == 200,
+          "cancel: 200 + JSON body accepted without session extraction");
+
+    hio_reset(&h);
+    CHECK(kn_cm_cancel(hio_io(&h), "np-waw-01.example", "/", &st, "",
+                       1000, fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
+                       sizeof g_body, &status) == KN_HTTP_ERR_ARGS,
+          "cancel: empty session_id rejected");
+}
+
 int main(void)
 {
     test_json();
     test_http();
     test_cm_extract();
+    test_cm_control();
     test_cm_body();
     test_cm_network();
+    test_cm_cancel();
     return kn_test_summary("test_kncm");
 }

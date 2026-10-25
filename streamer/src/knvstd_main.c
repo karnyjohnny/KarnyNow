@@ -2159,7 +2159,12 @@ static int sess_ws_recv_text(void *c, char *buf, size_t cap, uint32_t t,
     int rc = kn_ws_recv_msg(w, t, &op, &n);
     if (rc == KN_WS_ERR_TIMEOUT) return KN_RTSP_ERR_TIMEOUT;
     if (rc != KN_WS_OK) return KN_RTSP_ERR_IO;
-    if (op != KN_WS_OP_TEXT || n + 1 > cap) return KN_RTSP_ERR_IO;
+    /* The reference feeds BOTH text and binary frames into the RTSP
+     * buffer (nvst_rtsp.rs:620-623 — Message::Binary is appended
+     * lossy-UTF8); control frames (ping/pong/close) never surface here
+     * (kn_ws handles them internally), so anything else is an error. */
+    if ((op != KN_WS_OP_TEXT && op != KN_WS_OP_BINARY) || n + 1 > cap)
+        return KN_RTSP_ERR_IO;
     memcpy(buf, w->msg, n);
     buf[n] = '\0';
     *out = n;
@@ -2167,6 +2172,23 @@ static int sess_ws_recv_text(void *c, char *buf, size_t cap, uint32_t t,
 }
 
 static uint64_t sess_now(void *c) { (void)c; return kn_sock_now_ms(); }
+
+/* Round XXIV: the failure companion for the rtsp step events — kn_rtsp's
+ * human err[160] plus the WS-layer verdict (last_error, the peer's close
+ * code, and the text/binary frame counters), so a failed step is wire
+ * EVIDENCE instead of a bare rc (R7 run-5's DESCRIBE -2/0 taught that). */
+static void sess_rtsp_detail(const char *step, const kn_rtsp_client *rtc,
+                             const kn_ws_client *wsc)
+{
+    char esc[192];
+    lb_json_path(esc, sizeof esc, rtc->err);
+    printf("{\"mode\":\"session\",\"event\":\"rtsp_detail\",\"step\":\"%s\","
+           "\"detail\":\"%s\",\"ws_err\":%d,\"ws_close\":%d,"
+           "\"ws_text\":%llu,\"ws_bin\":%llu}\n", step, esc,
+           wsc->last_error, wsc->last_close_code, wsc->frames_in_text,
+           wsc->frames_in_binary);
+    fflush(stdout);
+}
 static void sess_sleep(uint32_t ms, void *c)
 {
     (void)c;
@@ -2270,6 +2292,18 @@ static void sess_local_identity(char *ufrag, size_t ufsz, char *pwd,
 
 #define SESS_JSON_CAP  (128u * 1024u)
 #define SESS_RTSP_BUF  (KN_RTSP_MAX_RESPONSE + 4096u)
+/* Round XXIII: the production WebRTC client polls the session every
+ * ~4.1 s (the user's DevTools capture, 2026-10-25: Δ = 4.15/4.12/4.42 s).
+ * --session mirrors that cadence instead of the round-XXI 2 s guess. */
+#define SESS_POLL_MS   4000u
+
+/* cloudmatch.rs get_session :1369-1377 — the statuses worth an immediate
+ * in-round retry (3 attempts, 250/750 ms backoff) */
+static int cm_status_transient(int status)
+{
+    return status == 408 || status == 425 || status == 429 ||
+           status == 500 || status == 502 || status == 503 || status == 504;
+}
 
 static int run_session(const char *token, const char *device_id,
                        long long app_id, const char *title,
@@ -2306,6 +2340,15 @@ static int run_session(const char *token, const char *device_id,
     kn_rtsp_msg_io rio;
     kn_rtsp_header common[3];
     char err[192], line[512];
+    char authbuf[288];                  /* round XXIV: the RTSP Host header
+                                           authority (host:port — the
+                                           reference strips only the
+                                           scheme, nvst_rtsp.rs:1070-76) */
+    char poll_host[256];                /* round XXIII: the learned control
+                                           node (fallback = cm_host) */
+    const char *poll_src;
+    uint16_t poll_port = 443;
+    unsigned poll_fails = 0;            /* consecutive failed poll rounds */
     char ufrag[24], pwd[32], fp[128];
     char key_hex[65], salt_hex[25];
     uint8_t key_bin[32], salt_bin[14];
@@ -2387,58 +2430,169 @@ static int run_session(const char *token, const char *device_id,
     kn_net_tls_stream_close(cm_tls);
     cm_tls = NULL;
     if (rc != KN_HTTP_OK || http_status != 200) {
+        char esc[96];
+        lb_json_path(esc, sizeof esc, sess.req_status_desc);
         printf("{\"mode\":\"session\",\"error\":\"cm_create\",\"rc\":%d,"
-               "\"http_status\":%d}\n", rc, http_status);
+               "\"http_status\":%d,\"cloud_status\":%lld,\"desc\":\"%s\"}\n",
+               rc, http_status, (long long)sess.req_status_code, esc);
         fflush(stdout);
         kn_log_on_failure("session.cm", "E_SESSION_CM_CREATE",
                           "POST v2/session did not return a usable session",
                           "check the account/token/entitlements; the raw "
-                          "status is in this log (R7 measurement)");
+                          "status is in this log (R7 measurement); "
+                          "cloud_status 11 = SESSION_LIMIT (an earlier "
+                          "session is still alive server-side)");
         kn_log_shutdown();
         return 1;
     }
     printf("{\"mode\":\"session\",\"event\":\"cm_created\",\"session_id\":"
-           "\"%.64s\",\"status\":%lld,\"phase\":\"%s\"}\n",
-           sess.session_id, (long long)sess.status, sess.phase);
+           "\"%.64s\",\"status\":%lld,\"phase\":\"%s\",\"queue_position\":"
+           "%lld,\"have_queue\":%d}\n",
+           sess.session_id, (long long)sess.status, sess.phase,
+           (long long)sess.queue_position, sess.have_queue);
     fflush(stdout);
 
-    /* poll until ready (one fresh TLS connection per poll — Connection:
-     * close semantics; 2 s cadence, bounded by queue_timeout) */
+    /* Poll-target switch (round XXIII — the R7 run-1 finding): the create
+     * response nominates the REGIONAL control node that owns the session
+     * (session.sessionControlInfo.ip — the user's browser capture shows
+     * the official client polling exactly that host, np-waw-01.cloudmatch
+     * beta.nvidiagrid.net, at ~4.1 s, while runs 1-4 polled the global
+     * create front and saw a FROZEN queuePosition + intermittent non-200s
+     * -> cm_poll_failed). The reference learns the same control_base
+     * (cloudmatch.rs:401-414, :1149-1152) and every poll goes there
+     * (:652-656 -> get_session :1356). kn_cm_control_base applies the
+     * reference's trust rules; an untrusted/absent value falls back to
+     * the create host (:1984 unwrap_or semantics). */
+    if (kn_cm_control_base(&sess, poll_host, sizeof poll_host, &poll_port))
+        poll_src = "sessionControlInfo";
+    else {
+        snprintf(poll_host, sizeof poll_host, "%.250s", cm_host);
+        poll_port = 443;
+        poll_src = "create-host";
+    }
+    {
+        char esc[300];
+        lb_json_path(esc, sizeof esc, poll_host);
+        printf("{\"mode\":\"session\",\"event\":\"cm_control\","
+               "\"poll_host\":\"%s\",\"port\":%u,\"source\":\"%s\"}\n",
+               esc, (unsigned)poll_port, poll_src);
+        fflush(stdout);
+    }
+
+    /* Poll until ready: one fresh TLS connection per attempt
+     * (Connection: close), SESS_POLL_MS cadence, bounded by queue_timeout.
+     * A round retries transient outcomes up to 3 attempts (250/750 ms —
+     * get_session :1369-1394); a still-failed round is tolerated up to 4
+     * consecutive times before cm_poll_failed ends the wait. Failed rounds
+     * NEVER clobber the live session state (poll into a temp + commit on
+     * success — kn_cm_extract_session memsets its output before parsing,
+     * so a bad payload would otherwise wipe session_id). */
     t_start = kn_sock_now_ms();
     while (!sess.ready && !g_knv_stop) {
+        kn_cm_session ps;
+        int attempt, round_ok = 0;
         if (queue_timeout > 0 &&
             kn_sock_now_ms() - t_start >= (uint64_t)queue_timeout * 1000u) {
             stop_reason = "queue_timeout";
             break;
         }
         if (sess.status == 7) { stop_reason = "terminated"; break; }
-        sess_sleep(2000, NULL);
-        cm_tls = kn_net_tls_stream_open(cm_host, 443, 15000, err,
-                                        sizeof err);
-        if (!cm_tls) { stop_reason = "cm_tls_retry"; break; }
-        cm_io_ctx.s = cm_tls;
-        rc = kn_cm_poll(hio, cm_host, "/", &st, sess.session_id, 20000,
-                        sess_now, NULL, cm_rxb, sizeof cm_rxb, cm_json,
-                        sizeof cm_json, &http_status, &sess);
-        kn_net_tls_stream_close(cm_tls);
-        cm_tls = NULL;
-        if (rc != KN_HTTP_OK || http_status != 200) {
+        sess_sleep(SESS_POLL_MS, NULL);
+        memset(&ps, 0, sizeof ps);
+        rc = KN_HTTP_ERR_IO;
+        http_status = 0;
+        for (attempt = 0; attempt < 3 && !g_knv_stop; ++attempt) {
+            memset(&ps, 0, sizeof ps);
+            cm_tls = kn_net_tls_stream_open(poll_host, poll_port, 15000,
+                                            err, sizeof err);
+            if (cm_tls) {
+                cm_io_ctx.s = cm_tls;
+                rc = kn_cm_poll(hio, poll_host, "/", &st, sess.session_id,
+                                20000, sess_now, NULL, cm_rxb,
+                                sizeof cm_rxb, cm_json, sizeof cm_json,
+                                &http_status, &ps);
+                kn_net_tls_stream_close(cm_tls);
+                cm_tls = NULL;
+            } else {
+                rc = KN_HTTP_ERR_IO;
+                http_status = 0;
+            }
+            if (rc == KN_HTTP_OK && http_status == 200 &&
+                (ps.req_status_code == 0 || ps.req_status_code == 1)) {
+                round_ok = 1;
+                break;
+            }
+            /* 404 = the cloud dropped the session (:664-671); non-
+             * transient HTTP statuses are not worth an in-round retry */
+            if (rc == KN_HTTP_OK && http_status != 0 &&
+                !cm_status_transient(http_status))
+                break;
+            if (attempt < 2) sess_sleep(attempt == 0 ? 250u : 750u, NULL);
+        }
+        if (round_ok) {
+            poll_fails = 0;
+            sess = ps;
+            printf("{\"mode\":\"session\",\"event\":\"queue\",\"status\":%lld,"
+                   "\"phase\":\"%s\",\"queue_position\":%lld,\"have_queue\":%d,"
+                   "\"seat_step\":%lld,\"ready\":%d}\n",
+                   (long long)sess.status, sess.phase,
+                   (long long)sess.queue_position, sess.have_queue,
+                   (long long)sess.seat_setup_step, sess.ready);
+            fflush(stdout);
+            continue;
+        }
+        if (rc == KN_HTTP_OK && http_status == 404) {
+            stop_reason = "session_not_found";
+            break;
+        }
+        if (g_knv_stop) { stop_reason = "interrupted"; break; }
+        ++poll_fails;
+        {   /* a failed round is EVIDENCE, not silence: rc (transport),
+             * the raw HTTP status and the cloud-side requestStatus (the
+             * extract fills it even when the session body is rejected) */
+            char esc[96];
+            lb_json_path(esc, sizeof esc, ps.req_status_desc);
+            printf("{\"mode\":\"session\",\"event\":\"cm_poll_error\","
+                   "\"rc\":%d,\"http_status\":%d,\"cloud_status\":%lld,"
+                   "\"desc\":\"%s\",\"consecutive\":%u}\n", rc, http_status,
+                   (long long)ps.req_status_code, esc, poll_fails);
+            fflush(stdout);
+        }
+        if (poll_fails >= 5) {
             stop_reason = "cm_poll_failed";
             break;
         }
-        printf("{\"mode\":\"session\",\"event\":\"queue\",\"status\":%lld,"
-               "\"phase\":\"%s\",\"queue_position\":%lld,\"have_queue\":%d,"
-               "\"seat_step\":%lld,\"ready\":%d}\n",
-               (long long)sess.status, sess.phase,
-               (long long)sess.queue_position, sess.have_queue,
-               (long long)sess.seat_setup_step, sess.ready);
-        fflush(stdout);
     }
     if (!sess.ready) {
         printf("{\"mode\":\"session\",\"error\":\"not_ready\","
-               "\"stop_reason\":\"%s\",\"status\":%lld}\n", stop_reason,
-               (long long)sess.status);
+               "\"stop_reason\":\"%s\",\"status\":%lld,\"rc\":%d,"
+               "\"http_status\":%d}\n", stop_reason, (long long)sess.status,
+               rc, http_status);
         fflush(stdout);
+        /* Best-effort cancel (the reference's stop_at :789-800 — DELETE
+         * v2/session/{id}): an abandoned queue slot orphans a live
+         * session, and the next create can hit SESSION_LIMIT (:2354+;
+         * R7 runs 1-4 each left one behind — no cancel existed then).
+         * Skipped for session_not_found (404 = already gone). One
+         * attempt, no retry: cleanup, not the mission. */
+        if (sess.session_id[0] &&
+            strcmp(stop_reason, "session_not_found") != 0) {
+            int c_rc = KN_HTTP_ERR_IO, c_status = 0;
+            cm_tls = kn_net_tls_stream_open(poll_host, poll_port, 15000,
+                                            err, sizeof err);
+            if (cm_tls) {
+                cm_io_ctx.s = cm_tls;
+                c_rc = kn_cm_cancel(hio, poll_host, "/", &st,
+                                    sess.session_id, 20000, sess_now, NULL,
+                                    cm_rxb, sizeof cm_rxb, cm_json,
+                                    sizeof cm_json, &c_status);
+                kn_net_tls_stream_close(cm_tls);
+                cm_tls = NULL;
+            }
+            printf("{\"mode\":\"session\",\"event\":\"cm_cancel\",\"rc\":%d,"
+                   "\"http_status\":%d}\n", c_rc, c_status);
+            fflush(stdout);
+        }
         kn_log_on_failure("session.cm", "E_SESSION_NOT_READY",
                           "the session never reached ready state",
                           "queue position/seat step lines above show where "
@@ -2462,6 +2616,21 @@ static int run_session(const char *token, const char *device_id,
         fflush(stdout);
         kn_log_shutdown();
         return 1;
+    }
+    {   /* Host header = the target minus the scheme, INCLUDING :port —
+         * nvst_rtsp.rs:1070-1076 strips only "rtsps://"; run 5 sent the
+         * bare host. The endpoint prefix is verified by parse_rtsps. */
+        const char *a = sess.rtsps_endpoint + 8;
+        size_t al = strcspn(a, "/?#");
+        if (al == 0 || al >= sizeof authbuf) {
+            printf("{\"mode\":\"session\",\"error\":\"bad_rtsps_endpoint\","
+                   "\"note\":\"authority\"}\n");
+            fflush(stdout);
+            kn_log_shutdown();
+            return 1;
+        }
+        memcpy(authbuf, a, al);
+        authbuf[al] = '\0';
     }
     sig_tls = kn_net_tls_stream_open(hostbuf, ws_port, 15000, err,
                                      sizeof err);
@@ -2500,7 +2669,7 @@ static int run_session(const char *token, const char *device_id,
                               sess_sleep, NULL);
 
     common[0].name = "X-GS-Version";   common[0].value = "14.2";
-    common[1].name = "Host";           common[1].value = hostbuf;
+    common[1].name = "Host";           common[1].value = authbuf;
     common[2].name = "x-nv-sessionid"; common[2].value = sess.session_id;
 
     rc = kn_rtsp_request(&rtc, "OPTIONS", sess.rtsps_endpoint, common, 3,
@@ -2508,7 +2677,10 @@ static int run_session(const char *token, const char *device_id,
     printf("{\"mode\":\"session\",\"event\":\"rtsp\",\"step\":\"OPTIONS\","
            "\"rc\":%d,\"status\":%d}\n", rc, rc == KN_RTSP_OK ? resp.status : 0);
     fflush(stdout);
-    if (rc != KN_RTSP_OK || resp.status != 200) goto teardown;
+    if (rc != KN_RTSP_OK || resp.status != 200) {
+        sess_rtsp_detail("OPTIONS", &rtc, &wsc);
+        goto teardown;
+    }
     {
         kn_rtsp_header dh[5];
         dh[0] = common[0]; dh[1] = common[1]; dh[2] = common[2];
@@ -2520,7 +2692,10 @@ static int run_session(const char *token, const char *device_id,
     printf("{\"mode\":\"session\",\"event\":\"rtsp\",\"step\":\"DESCRIBE\","
            "\"rc\":%d,\"status\":%d}\n", rc, rc == KN_RTSP_OK ? resp.status : 0);
     fflush(stdout);
-    if (rc != KN_RTSP_OK || resp.status != 200) goto teardown;
+    if (rc != KN_RTSP_OK || resp.status != 200) {
+        sess_rtsp_detail("DESCRIBE", &rtc, &wsc);
+        goto teardown;
+    }
     if (kn_rtsp_extract_describe(&resp, &desc) != KN_RTSP_OK) {
         printf("{\"mode\":\"session\",\"error\":\"describe_extract\"}\n");
         fflush(stdout);
@@ -2567,7 +2742,10 @@ static int run_session(const char *token, const char *device_id,
                (unsigned)setup.peer_port, setup.bundle_fallback,
                setup.rounds_slept);
         fflush(stdout);
-        if (rc != KN_RTSP_OK) goto teardown_sock;
+        if (rc != KN_RTSP_OK) {
+            sess_rtsp_detail("SETUP", &rtc, &wsc);
+            goto teardown_sock;
+        }
 
         /* SRTP material (docs/RTSP.md §2): DESCRIBE runtime key or a
          * locally generated one; salt = {key_id:024X} */
@@ -2688,7 +2866,10 @@ static int run_session(const char *token, const char *device_id,
                rc == KN_RTSP_OK ? resp.status : 0,
                (unsigned long)(nlen % 1000000ul));
         fflush(stdout);
-        if (rc != KN_RTSP_OK || resp.status != 200) goto teardown_sock;
+        if (rc != KN_RTSP_OK || resp.status != 200) {
+            sess_rtsp_detail("ANNOUNCE", &rtc, &wsc);
+            goto teardown_sock;
+        }
         if (!desc.disable_play) {
             rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint, ah, 4,
                                  NULL, 0, 0, &resp);
@@ -2696,7 +2877,10 @@ static int run_session(const char *token, const char *device_id,
                    "\"rc\":%d,\"status\":%d}\n", rc,
                    rc == KN_RTSP_OK ? resp.status : 0);
             fflush(stdout);
-            if (rc != KN_RTSP_OK || resp.status != 200) goto teardown_sock;
+            if (rc != KN_RTSP_OK || resp.status != 200) {
+                sess_rtsp_detail("PLAY", &rtc, &wsc);
+                goto teardown_sock;
+            }
         }
         /* the handoff line — shapes and LENGTHS only, never key material
          * (docs/RTSP.md §4 logging rule) */
@@ -3051,7 +3235,10 @@ int main(int argc, char **argv)
     const char *sess_title = "KarnyNow session", *sess_cm_host = NULL;
     const char *sess_au_dir = NULL;
     long long sess_app = 0;
-    long sess_seconds = 60, sess_queue_timeout = 180, sess_expect = 0;
+    /* queue default 600 s (round XXIII): the R7 runs showed real queues
+     * 160+ deep; 180 s risked aborting a legitimate wait (the abort now
+     * also cancels the session, but a seat is a seat) */
+    long sess_seconds = 60, sess_queue_timeout = 600, sess_expect = 0;
     long cap_port = 4798, dec_port = 4798;
     long cap_seconds = 30, dec_seconds = 30;
     long dec_vps = 0, dec_expect = 0;
