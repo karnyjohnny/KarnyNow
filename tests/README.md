@@ -1,17 +1,30 @@
 # Testy do uruchomienia na Dell E5500 (Windows 7 SP1 x64)
 
-> **Aktualizacja runda XVI (stage 2):** `T10_build_and_test.py` buduje i
-> uruchamia teraz DZIEWIĄTĄ suitę (`test_knrx` — potok odbioru NVST:
-> reorder/FEC/NACK/RFI/SRTP + 31 scenariuszy KAT) oraz 13. self-test
-> `rx.vectors`. Nic nowego do instalacji; T10 robi wszystko sam.
-> Dodatkowo (opcjonalne demo G2-offline, ~2 min):
+> **Aktualizacja runda XVII (stage 2 — sockety):** nowy harness
+> `T13_udp_e2e.py` sprawdza CAŁĄ ścieżkę stage-2 lokalnie (loopback, bez
+> konta GFN): nadajnik UDP (`tools\send_rx_capture.py`) → `knvstd
+> --capture` (nagrywa prawdziwy plik przechwycenia) → `--replay-capture`
+> (weryfikacja wobec referencji) → `knvstd --decode` (żywy potok kn_rx +
+> prawdziwy dekoder, kolejka AU o pojemności 2) → nogi SRTP cm128/gcm256.
+> T10 obejmuje teraz DZIESIĄTĄ suitę (`test_knsock`) i 14. self-test
+> (`sock.loopback`). Uruchomienie po T10:
+> ```bat
+> python tests\T13_udp_e2e.py
+> ```
+> (używa gotowego build\knvstd.exe; wynik: T13_wynik.txt + T13_skrot.txt)
+>
+> **Runda XVI (stage 2):** `T10_build_and_test.py` buduje i uruchamia
+> `test_knrx` (potok odbioru NVST: reorder/FEC/NACK/RFI/SRTP + 31
+> scenariuszy KAT) oraz self-test `rx.vectors`.
+> Demo G2-offline (~2 min) — UWAGA: krok 2 MUSI przekierować stdout do
+> pliku, inaczej krok 3 nie ma czego czytać („Nie można odnaleźć
+> określonego pliku"):
 > ```bat
 > python tools\make_rx_capture.py --out cap.hex --manifest cap.json --fec-pct 25 --loss 6 --reorder 0.3
-> build\knvstd.exe --replay-capture=cap.hex --replay-au-dir=aus
+> build\knvstd.exe --replay-capture=cap.hex --replay-au-dir=aus > replay.jsonl
 > python tools\make_rx_capture.py --verify cap.json < replay.jsonl
 > ffprobe aus\au_00001_k.264   (dekoder musi rozpoznać poprawny strumień H.264)
 > ```
-> (przekieruj stdout knvstd do replay.jsonl: `... --replay-capture=cap.hex > replay.jsonl`)
 
 Cztery testy. Każdy zapisuje wynik do pliku `T*_wynik.json` **obok skryptu**.
 Kolejność ma znaczenie: `T1` i `T2` rozstrzygają najwięcej, `T4` wymaga kompilatora.

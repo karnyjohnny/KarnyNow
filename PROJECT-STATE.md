@@ -23,7 +23,11 @@ git clone https://github.com/OpenCloudGaming/OpenNOW.git
 #    AES/SHA-1 source files into the ignored third_party/ tree and verifies
 #    pinned SHA-256 hashes before configuring/building. No manual vendor setup.
 # 4. OPTIONAL (sandbox compile-checks of kn_decode.c only; the TARGET build uses
-#    the user's own FFmpeg dev tree instead): headers at the user's exact commit:
+#    the user's own FFmpeg dev tree instead): headers at the user's exact commit —
+#    scripted: python3 tools/fetch_ffmpeg_headers_sandbox.py
+#    (downloads bf0e831606938f530326c9679591109407fa8d0d, extracts
+#    libavcodec/libavutil/libswscale *.h into third_party/ffmpeg-headers/,
+#    writes the avconfig.h/ffversion.h stand-ins). Manual recipe:
 #       https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/bf0e831606938f530326c9679591109407fa8d0d
 #    extract libavcodec/*.h libavutil/*.h libswscale/*.h -> third_party/ffmpeg-headers/
 #    then create two stand-ins for configure-generated headers:
@@ -37,29 +41,34 @@ reinstall every session, ~2-4 min):
 ```sh
 apt-get update && apt-get install -y gcc cmake ninja-build libc6-dev \
     gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
+# optional, for sandbox --decode E2E with a REAL decoder (system FFmpeg 5.1):
+apt-get install -y libavcodec-dev libswscale-dev libavutil-dev libswresample-dev
 # verify everything before trusting a run:
-sh tools/build_native_tests.sh     # host: 8 suites + knvstd smoke + zip/jsonl validation
+sh tools/build_native_tests.sh     # host: 10 suites + knvstd smoke + zip/jsonl validation
 sh tools/cross_check.sh            # mingw x64+i686, -Wall -Wextra -Werror, F1 flags
 ```
 
 **The authoritative compile+run gate is the TARGET machine** (w64devkit GCC
 16.2.0 — stricter than sandbox GCC 12; it catches warnings GCC 12 misses):
 `python tests\T10_build_and_test.py` under ConEmu → `T10_wynik.txt` +
-`T10_skrot.txt`. The user runs it quickly and willingly — ask for a
-measurement instead of guessing (§10.7).
+`T10_skrot.txt`. The stage-2 socket gate is `python tests\T13_udp_e2e.py`
+(loopback-only, no account; reuses T10's build). The user runs both quickly
+and willingly — ask for a measurement instead of guessing (§10.7).
 
-## Current status (updated 2026-10-23, post-T10 TLS backend work)
+## Current status (updated 2026-10-25, post-round-XVII stage-2 sockets)
 
 | Stage | State |
 |---|---|
 | **0 — measurements** | **COMPLETE.** G0.1 CPU ✅ · G0.2 D3D9 presentation ✅ **(T4 v4)** · G0.3 toolchain ✅ · G0.4 console ✅ |
 | **1 — C skeleton, logging, loopback/audio** | **CLOSED.** Stage-1 scope complete; G0 closed and target T11 full G1 passed (see round XV evidence below). |
-| **2 — NVST media/transport** | **IN PROGRESS — MEDIA CORE DONE (round XVI, sandbox-verified; awaiting target T10 r12).** `kn_rx` ports the full pure receive pipeline (reorder, FEC repair + re-wrap, RFI invalidation, NACK tracker + NACK-v2/RTCP/ServerControl encoders, watchdog, timeouts, SRTP session incl. GCM/CM256 via mbedTLS) — 31 KAT scenarios + 5 property families + the 6-case `--replay-capture` matrix (real H.264 clip, injected loss, SRTP-protected) all byte-identical vs an independent Python reference. Remaining: target verification, sockets/UDP capture loop, WSS+RTSP client, G2. |
+| **2 — NVST media/transport** | **IN PROGRESS — MEDIA CORE TARGET-VERIFIED (T10 r12: ALL PASS 67) + SOCKET LAYER DONE (round XVII, sandbox-verified incl. the full T13 E2E matrix under three builds + sanitizers; awaiting target T10 r13 + T13 r1).** `kn_rx` (reorder, FEC repair + re-wrap, RFI, NACK tracker + encoders, watchdog, SRTP incl. GCM/CM256) passed on Win7: test_knrx 209/209, rx.vectors 153/153 (scenarios 31/31, srtp256/gcm verified), registry 13. Round XVII adds the live path: `kn_sock` (real UDP, Win32+POSIX), `knvstd --capture` (streaming gs_capture.hex-format recorder — the R32 mechanism), `knvstd --decode` (socket → kn_rx on a real QPC clock → capacity-2 AU queue → the NEW persistent `kn_decode_stream_*` session), `tools/send_rx_capture.py` (paced/blast UDP sender), `tests/T13_udp_e2e.py` (the socket gate: capture → replay-verify → decode paced/blast → SRTP cm128/gcm256 → sock.loopback), and `sock.loopback` — the 14th self-test (portable, gated). Remaining: target runs, WSS+RTSP client, real-session G2. |
 | **3–5** | Not started; see BOOTSTRAP stage gates. |
 
-Stage 1 closure: T11 full G1 passed on the target before this continuation; graphics, decode, audio, and logging gates are closed. No GPU retest is needed for the current Stage-2 AU assembler work.
+Stage 1 closure: T11 full G1 passed on the target before this continuation; graphics, decode, audio, and logging gates are closed. No GPU retest is needed for the current Stage-2 socket work (round XVII touched no graphics code).
 
-**Latest full target T10 (user-reported 2026-10-23):** `ALL PASS`, 65/65 checks after mbedTLS integration. The earlier Schannel-only run failed TLS with `0x80090302`; current default is mbedTLS.
+**Latest full target T10 (user-reported 2026-10-24 12:52, round 12):** `ALL PASS`, **67/67 checks** — the round-XVI media core verified on Win7 with mbedTLS default: build zero-warning (116 s), 9 unit suites (test_knrx **209/209** first target run incl. the GCM/CM256 legs), registry **13** self-tests all usable, `rx.vectors ok` (153 checks, scenarios 31/31, `srtp_backend:1`), decode 60/60 @ 3333 fps, d3d probes reproduced (pitch 1536, present mean 0.29 ms), net.tls/tls.chain OK (TLS 1.2, depth 3, Amazon Root CA 1), bundle 139 545 B validated, PE 6.01. `clock.resolution` reported **ok** this run (Sleep(1) 1.00→1.75 ms, wall tick 1000→1000 µs — the machine state swung back; R30 note updated). Raw evidence: `artifacts/T10-round12/`.
+
+**G2-offline demo on the target (idk_g2.txt, 2026-10-24): SUCCESS — the one failed command was a missing shell redirect, not a product bug.** Capture generation matched the sandbox byte-for-byte (seed-1 determinism across machines: 119 records / 360 333 B); `--replay-capture` delivered 60/60 AUs (fec_repaired=19, zero stale/gaps/withheld, state 0); ffprobe accepted the dumped AU. The `--verify` step failed with "Nie można odnaleźć określonego pliku" because knvstd's stdout was never redirected into `replay.jsonl` (cmd could not open the missing redirect INPUT — python never ran). The console JSONL was reconstructed in the sandbox and verified against the regenerated manifest: **VERIFY PASS, 60 frames byte-identical to the reference receiver**. tests/README.md's demo block now carries the redirect inline; T13 automates the whole sequence.
 
 **Latest target T12 (2026-10-23 22:47):** `ALL PASS`, 27/27 checks using `KN_TLS_BACKEND=mbedtls`. Build is warning-free; DNS + TCP/443 pass; TLS verifies `login.nvidia.com`, CloudMatch, and Cloudflare; `tls.chain` is clean, depth 3, root Amazon Root CA 1, trust/policy both zero. Probe is pinned to TLS 1.2 (min=max); TLS 1.3's Finished/PSA issue remains isolated and is not used on Win7. User subsequently reported full T10 `ALL PASS (65 checks)`.
 
@@ -85,6 +94,7 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | **D18** | **FFmpeg is consumed STATIC** (`--enable-static --disable-shared`), linked into `knvstd.exe` under the canonical F1 `-static` (D8). The decode.synthetic clip is **embedded in the binary** (`streamer/src/kn_synthetic_clip.h`, generated by `tools/make_synthetic_clip.py` from `streamer/assets/synthetic.264`; 60 frames 320×240 yuv420p, 42 KB). | T10 round 2 proof: GNU ld with `-static` **ignores `.dll.a` import libraries** ("cannot find -lavcodec — have you installed the static version?") — a shared-only FFmpeg cannot link into an F1 binary. Embedded clip: the user's FFmpeg build has no encoder (`--disable-autodetect`, no libx264 — `-preset` unrecognized), and §7.9 says "a BUNDLED .264" — hermetic beats external file. Static also kills DLL deployment failure modes on Win7. | If a future dependency is shared-only (e.g. an NVENC-style DLL), relax `-static` per-target and ship DLLs next to the exe (the CMake POST_BUILD copy path still exists) |
 | **D20 (new, round XIII)** | **On-screen FPS counter overlay, low-overhead, toggleable by key (F5).** 5x7 bitmap font blitted straight into the locked NV12 surface during the per-frame copy (no D3DX, no GDI, no lockable backbuffer — zero new imports, ~1.5 k pixel writes/frame, inside the VEH-guarded section); shows the SAME number perf.jsonl reports (frames presented per completed 1-s interval). Default ON in `--loopback` (debug surface); production streamer defaults OFF with the same toggle (stage-2 wiring). | User requirement 2026-10-23 ("niskonarzutowy fps counter ze switchem pod klawiszem — dobrze wiedziec, ile fps generuje streamer"); implementation choice follows the measured D3D9 constraints (G0.2: offscreen conversion targets refused; d3dx9 not OS-built-in on Win7) | user preference |
 | **D19** | **Toolchain stays w64devkit** (GCC 16.2.0 + cmake 4.4.3 + ninja, `C:\Programy\w64devkit`). NOT WinLibs, NOT Nuwen, NOT Cygwin. | It is measured end-to-end on the target: T2 (15 variants ran on Win7), T9/T10 (zero-warning builds, correct PE 6.01, imports only KERNEL32/msvcrt/WINMM), FFmpeg built with it works. Cygwin is disqualified by design (POSIX runtime layer, not native Win32). WinLibs-MSVCRT/Nuwen are equivalent-ish but unproven here — switching re-opens R6 for zero gain. | Only if w64devkit develops a blocking defect; WinLibs **MSVCRT** variant (never UCRT — no UCRT on stock Win7) is the designated fallback, re-run T2 before trusting it |
+| **D21 (new, round XVII)** | **The stage-2 live loops (`--capture`, `--decode`) are SINGLE-THREADED**: one loop does `recv(10 ms timeout)` → `kn_rx_video_process_datagram` → inline AU-queue drain → `kn_rx_video_poll` at the reference's 10 ms cadence, all on the QPC-ms clock. The capacity-2 encoded queue keeps the reference's overflow semantics (drop-new + `kn_rx_inval_lose` + `kn_rx_video_request_keyframe`) so a later receive-thread split touches no pipeline logic. The 8 MiB SO_RCVBUF absorbs decode stalls (~16 ms worst 720p frame ≈ 500 datagrams at 30 fps). | Stage-1 loopback precedent (same shape, 30.000 fps for 600 s, G1); 2-core E5500 — threads cost context switches the budget cannot spare; kn_rx is single-threaded by contract (no locks = no lock bugs); sandbox T13 blast leg (119 datagrams in <1 ms) decoded 60/60 with zero overflows. | **Measured** socket-buffer backlog or `recv_errors`/`q_overflows` in a REAL session's decode summary → move the receive side to a thread (docs/SOCK.md §3 revisit condition) |
 
 ## Risk register — changes this session
 
@@ -99,41 +109,49 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | **R26 (REVISED, impl round VI/VII)** | The agent sandbox **DOES have a working toolchain** (the round-II "apt fails" era is over): `apt-get update && apt-get install -y gcc cmake ninja-build libc6-dev gcc-mingw-w64-x86-64 gcc-mingw-w64-i686` (~2-4 min). **Packages do NOT persist between chat messages** — reinstall at the start of every session (see Bootstrapping). If apt lists hang, fall back to direct .deb downloads from `deb.debian.org/debian/pool/` + `dpkg -i` (proven: libc6-dev must match installed libc6 `2.36-9+deb12u14`; ninja must be bookworm `1.11.1`, NOT trixie `1.13.2` which needs GLIBC_2.38). Sandbox GCC is 12.2 — the TARGET's GCC 16.2 remains the authority (it catches `-Wformat-truncation` classes GCC 12 misses; see R28). Every C delta still ships through `build_native_tests.sh` + `cross_check.sh` + a target T10 run. |
 | **R27 (new, CLOSED by D18)** | `-static` (F1/D8) vs shared FFmpeg: ld ignores `.dll.a`, error text is misleading ("have you installed the static version?"). Reproduced 1:1 in the sandbox. Mitigation shipped: CMake configure-time FATAL_ERROR with the rebuild recipe when `lib/libavcodec.a` is missing; FFmpeg rebuilt static per D18. |
 | **R28 (new)** | Sandbox GCC 12.2 vs target GCC 16.2 warning drift: T10 round 1 failed on two `-Wformat-truncation` GCC 16 flags that GCC 12 accepted (timestamp formatters). Mitigation: all `snprintf` with time/foreign-string inputs use **explicitly bounded arguments** (modulo/precision), verified at `-O0..-O3`; T10 fails the build on ANY warning so drift can never ship silently. Round IX re-confirmed the discipline (cross `-Werror` caught a 64-bit format promotion in the new d3d code on the first pass). **Round XI third incident:** GCC 16 flagged the new `st_gs_parse` capnote (worst case 284 B > 256 B buffer, sandbox GCC 12 default level silent) — fix verified under `-Wformat-truncation=2` (paranoid level) on BOTH toolchains; that flag level is now the pre-check for any new snprintf aggregation before handover. |
-| **R30 (round X: stable pattern, informational)** | `clock.resolution` variance is NOT transient load: rounds 4+5 both measured Sleep(1) 15.6→**2.75/2.88** ms (verdict `degraded`, threshold 2.6 from round 1's 1.25→1.00) with wall tick pinned at 15600 us **even after timeBeginPeriod(1)** (round 1 saw 1250 us ticks — the machine state changed between rounds, probably a reboot cleared whatever had raised the timer). Consequences: (a) treat **~2.9 ms as the realistic Sleep(1) floor** on this machine — enough for 33.3 ms frame pacing at 30 fps, NOT enough for precise 1 ms spins; (b) wall-clock granularity stays 15.6 ms — timestamps below that resolution are quantised; (c) D9 stands stronger than ever: pacing measures real Present intervals, never assumes. Thresholds unchanged (honest `degraded` beats a fudged `ok`). |
+| **R30 (round X: stable pattern, informational; round XVII: swings BOTH ways)** | `clock.resolution` variance is NOT transient load: rounds 4+5 both measured Sleep(1) 15.6→**2.75/2.88** ms (verdict `degraded`, threshold 2.6 from round 1's 1.25→1.00) with wall tick pinned at 15600 us **even after timeBeginPeriod(1)** (round 1 saw 1250 us ticks — the machine state changed between rounds, probably a reboot cleared whatever had raised the timer). Rounds 8/9/12 then measured the OTHER state again: round 12 (2026-10-24) `ok` with Sleep(1) **1.00→1.75 ms and wall tick 1000→1000 us** — the machine genuinely alternates between a ~1 ms and a ~15.6 ms timer regime across reboots/sessions. Consequences: (a) treat **~2.9 ms as the realistic WORST-CASE Sleep(1) floor** on this machine — enough for 33.3 ms frame pacing at 30 fps, NOT enough for precise 1 ms spins; (b) wall-clock granularity may be 15.6 ms — timestamps below that resolution are quantised in the degraded regime; (c) D9 stands stronger than ever: pacing measures real Present intervals, never assumes; (d) the T13 sender's hybrid sleep+spin pacing is regime-proof by design. Thresholds unchanged (honest `degraded` beats a fudged `ok`). |
 | **R15 (impl round II)** | **Mostly closed.** T8 on the target resolved all 14 Python packages rc=0 (pip honours Requires-Python, so every pin declares 3.8 support): textual 6.2.1, rich 14.3.4, httpx 0.28.1, httpcore 1.0.9, h11 0.16.0, anyio 4.5.2, + 8 more — `python/requirements.txt` updated, wheels cached on target in `tests\t8_wheels\`. Remaining: offline install + runtime smoke at stage 4 (httpx 0.28 removed `proxies=`; textual 6.x API churn vs old docs). |
 | **R31 (updated)** | Sandbox has host GCC 13.3 but no MinGW/Windows SDK headers (apt install denied). Target T12 now confirms the mbedTLS Win32 compile/link, zero warnings, TLS 1.2 verification on all three hosts, and a clean depth-3 chain. TLS 1.3 Finished/PSA still fails; the Win7 backend is capped at TLS 1.2. |
-| **R32 (new, round XVI)** | **kn_rx has never seen a real GFN packet.** The pipeline is verified against an independent Python port of nvst.rs + injected-loss captures of a real H.264 clip — but the canonical parity construction, the SPI-vs-seq relationship and the GCM256-tag8 profile are DERIVED from the reference and its tests, not from captured cloud traffic. First real Mjolnir traffic (stage-2 sockets + a live session) is the true test; `--capture` dumps + `--replay-capture` + `gs.parse`'s capture hook exist precisely so that first session becomes a permanent regression vector. Until then every deviation is documented (RX.md D-a..D-e) and the replay matrix exercises the loss/reorder/RFI paths offline. |
-| **R33 (round XVI: CLOSED)** | Arena-memory class of bugs: two real defects (reorder-map `used` garbage from malloc; 8-byte arena misalignment) slipped past static-context unit tests and were caught by the malloc'd-arena scenario battery + UBSan BEFORE handover. Rule adopted: vector runners allocate through malloc (never statics), every arena carve rounds to 8, and ASan+UBSan+LSan is part of the pre-handover gate for any kn_rx-family change. |
+| **R32 (round XVII: REVISED — mechanism shipped, real traffic still pending)** | **kn_rx has still never seen a real GFN packet**, but the recording/rehearsal mechanism now exists and is proven: `knvstd --capture` writes real-socket datagrams in gs_capture.hex format (so ANY real session becomes a `--replay-capture` regression vector), `tools/send_rx_capture.py` + `tests/T13_udp_e2e.py` rehearse the whole graph offline (capture → replay-verify → decode paced/blast → SRTP cm128/gcm256), and the target's own G2-offline demo run (idk_g2.txt) verified byte-identical against the reference. The canonical parity construction, SPI-vs-seq relationship and GCM256-tag8 profile remain DERIVED from the reference and its tests — first real Mjolnir traffic (stage-2 WSS/RTSP + a live session) is still the true test. Until then every deviation is documented (RX.md D-a..D-e) and T13 exercises the loss/reorder/RFI/SRTP paths over real sockets. |
+| **R33 (round XVI: CLOSED; round XVII: extended)** | Arena-memory class of bugs: two real defects (reorder-map `used` garbage from malloc; 8-byte arena misalignment) slipped past static-context unit tests and were caught by the malloc'd-arena scenario battery + UBSan BEFORE handover. Rule adopted: vector runners allocate through malloc (never statics), every arena carve rounds to 8, and ASan+UBSan+LSan is part of the pre-handover gate for any kn_rx-family change. **Round XVII proved the rule's worth again: LSan caught a real leak in the NEW `kn_decode_stream_close()` (kd_deliver's NV12 buffer, 115 264 B) on the first sanitized E2E run — fixed, and the whole T13 matrix now passes under ASan+UBSan+LSan.** Sanitizer policy note: the vendored `third_party/crypto-algorithms-sha1/sha1.c:26` (`data[j] << 24`, int promotion) is PRE-EXISTING formal UB in a hash-pinned file that must NOT be edited — sanitizer runs use recover mode and the gate is ZERO diagnostics from `streamer/` code (verified: the sha1.c line is the only runtime error in a sanitized T13). |
+| **R34 (new, round XVII)** | **The Winsock side of the live modes has never executed** — `kn_sock`, `--capture` and `--decode` are sandbox-proven on POSIX (T13 ALL PASS on three builds) and cross-compile zero-warning, but Win7 winsock behaviour (SO_RCVBUF applying the full 8 MiB, WSAEMSGSIZE path, SetConsoleCtrlHandler graceful stop, select() cadence under ConEmu) is first measured by target T13 r1. Loopback legs need no firewall changes (WFP does not filter 127.0.0.1); a REAL session binding INADDR_ANY with inbound internet UDP is a different story — the firewall-allow question is deferred to the WSS/RTSP round and must be MEASURED, not assumed. `rcvbuf_actual` is reported in every decode begin line + capture summary precisely so r13 answers the headroom question with data. |
 
 Everything else (R3 usrsctp/DTLS spike, R7 first real `POST v2/session`, R22 31-field
 session context, R23 RESUME, R24 catalog revision binding) unchanged — see BOOTSTRAP §9.
 
 ## Next steps (ordered)
 
-1. **Target-verify round XVI (one T10 run).** Sync the repo, then under
-   ConEmu: `python tests\T10_build_and_test.py`. Expect ALL PASS with
-   ~66 checks: 9 unit suites (the new `test_knrx` reports 209 checks in
-   the mbedTLS-default build), registry lists **13** self-tests,
-   `rx.vectors ok` (~153 checks, srtp256/gcm VERIFIED — mbedTLS is the
-   default backend). No GPU/T11 rerun needed (no graphics code touched).
-   Optional 2-minute G2-offline demo (tests/README.md header): generate a
-   capture with tools/make_rx_capture.py, replay it with
-   `knvstd --replay-capture=... --replay-au-dir=aus`, verify against the
-   manifest, and ffprobe one dumped AU.
-2. **Stage-2 sockets**: the Mjolnir UDP receive loop (winsock, 8 MiB
-   SO_RCVBUF, nvst.rs:222) → `kn_rx_video_process_datagram` + paced
-   `kn_rx_video_poll` on a QPC clock → kn_ring capture of raw datagrams
-   (`--capture` writing `gs_capture.hex`-format dumps) → `--decode` mode
-   feeding `kn_decode` from the frame callback (capacity-2 AU queue per
-   analiza/04 §2.4, overflow → invalidate + keyframe request). The frame
-   callback contract is proven; this is platform glue + a real clock.
-3. **WSS + RTSP client** on the validated mbedTLS TLS-1.2 backend
+1. **Target-verify round XVII (two runs, ~5 min total).** Sync the repo,
+   then under ConEmu:
+   a) `python tests\T10_build_and_test.py` — expect **ALL PASS ~69 checks**:
+      10 unit suites (new `test_knsock` ~70 checks; `test_knrx` now 215 in
+      the mbedTLS build — +6 for the new keyframe-request API), registry
+      lists **14** self-tests, new gated `sock.loopback ok in the target
+      binary` check. No GPU/T11 rerun needed (no graphics code touched).
+   b) `python tests\T13_udp_e2e.py` — the first Winsock execution of the
+      live modes (reuses T10's build\knvstd.exe): expect **ALL PASS 55
+      checks** (gcm256 leg auto-enables on the mbedTLS default; real
+      FFmpeg decode in the static build). Record the `rcvbuf_actual`
+      value from the decode begin line (Windows should apply the full
+      8 MiB — R34's headroom question). Send `T13_wynik.txt` +
+      `T13_skrot.txt` (+ `T10_wynik.txt`/`T10_skrot.txt`).
+2. **WSS + RTSP client** on the validated mbedTLS TLS-1.2 backend
    (`OPTIONS→DESCRIBE→SETUP→ANNOUNCE→PLAY`), the 31-field session context
    (R22) → `kn_rx_video_config` + SRTP material; first real `POST
-   v2/session` (R7). G2 gate: RTSP 200 + ffprobe-verified AUs from a REAL
-   stream + reorder/NACK-v2 surviving real loss.
+   v2/session` (R7). This is where the live `--decode`/`--capture` modes
+   meet real traffic: the video port/SSRC/crypto come from the RTSP
+   session, and `--capture` records the first real Mjolnir session as a
+   permanent regression vector (R32). G2 gate: RTSP 200 + ffprobe-verified
+   AUs from a REAL stream + reorder/NACK-v2 surviving real loss. Measure
+   the firewall question for inbound UDP (R34) — do not assume.
+3. **Presentation wiring for the live path**: `--decode` frames →
+   `kn_d3d_vp_*` presenter (the G1-proven chain) = moving video from the
+   socket path on screen; the D20 FPS overlay defaults OFF there. Small
+   and independent of WSS/RTSP — can ship in the same round as step 2 or
+   be rehearsed against `send_rx_capture.py` first.
 4. Control senders wiring (stage 3 with SCTP): the NACK-v2/IDR/RFI
-   encoders are DONE and KAT'd — they await the transport. SRTCP-GCM RR
+   encoders are DONE and KAT'd; `kn_rx_video_take_keyframe_request` now
+   also carries the decode-queue-overflow requests (D21). SRTCP-GCM RR
    when !rtcp_on_sctp.
 5. Stage 3+ per BOOTSTRAP §12 (R3 spike → TUI → hardening). R22/R23
    mandatory at their stages.
@@ -155,6 +173,8 @@ karnynow/
 │   ├── RX.md                   ← kn_rx receive pipeline: provenance table,
 │   │                              §Parity construction, deviations, landmines,
 │   │                              replay-capture usage (ROUND XVI)
+│   ├── SOCK.md                 ← kn_sock + --capture/--decode + persistent
+│   │                              decoder session + T13 (ROUND XVII record)
 │   ├── AUDIO.md                ← kn_audio (WASAPI) provenance + landmines
 │   ├── NET.md                  ← kn_net phase-C probes (schannel) + verdict table
 │   ├── LOOPBACK.md             ← stage-1 video path design + G1 gates
@@ -163,7 +183,7 @@ karnynow/
 ├── streamer/                   ← knvstd (C11)
 │   ├── include/kn/             ← knlog knring knfec knsrtp kn_aes kn_sha1
 │   │                              kn_diag kn_selftest kn_decode kn_d3d kn_gs
-│   │                              kn_perf kn_audio kn_net kn_rx
+│   │                              kn_perf kn_audio kn_net kn_rx kn_sock
 │   ├── src/                    ← implementations + GENERATED: knfec_tables.h,
 │   │   │                          knfec_kat_vectors.h, knsrtp_kat_vectors.h,
 │   │   │                          kn_gs_kat_vectors.h, kn_rx_kat_vectors.h,
@@ -173,17 +193,20 @@ karnynow/
 │   ├── assets/synthetic720.264 ← loopback/G1 source: 720p High@5.1, NOT embedded
 │   └── tests/                  ← portable unit tests (run on Linux AND Win7):
 │                                  knlog knring knfec knsrtp kndiag knselftest
-│                                  kngs knaudio knrx
+│                                  kngs knaudio knrx knsock
 ├── python/                     ← TUI (stage 4); requirements.txt RESOLVED via T8
-├── tests/                      ← target-machine harnesses T1-T12
+├── tests/                      ← target-machine harnesses T1-T13
 │                                 (T9 = old build gate; T10 = build+selftests;
 │                                  T11 = the G1-video loopback gate;
-│                                  T12 = network-only gate)
+│                                  T12 = network-only gate;
+│                                  T13 = stage-2 UDP E2E gate, loopback-only)
 ├── tools/                      ← build/verify scripts + KAT generators
 │   (build_native_tests.sh, cross_check.sh, check_jsonl.py, check_zip.py,
 │    fec_reference.py, srtp_reference.py, gs_reference.py, rx_reference.py,
-│    make_synthetic_clip.py, make_rx_capture.py, prepare_mbedtls_sandbox.sh,
-│    sandbox_decode_{check,edge}.c, sandbox_loopback_source.c)
+│    make_synthetic_clip.py, make_rx_capture.py, send_rx_capture.py,
+│    prepare_mbedtls_sandbox.sh, fetch_ffmpeg_headers_sandbox.py,
+│    sandbox_decode_{check,edge}.c, sandbox_loopback_source.c,
+│    sandbox_stream_decode.c)
 ├── third_party/                ← GITIGNORED: tiny-aes-c, crypto-algorithms-sha1
 │                                  (+ ffmpeg-headers in the agent sandbox only)
 └── CMakeLists.txt              ← Windows build (w64devkit: cmake + ninja);
@@ -1034,3 +1057,143 @@ rx.vectors incl. the GCM/CM256 legs), then stage-2 sockets (Next steps 2).
   `tools/{build_native_tests,cross_check}.sh`,
   `tests/T10_build_and_test.py`, `docs/{RX,SRTP,GS}.md`,
   `INTEGRATION.md` rev 9, `tests/README.md`, this file
+
+### 2026-10-25 · impl round XVII (T10 r12 ALL PASS 67 + G2-offline demo CLOSED → stage-2 SOCKET LAYER delivered: kn_sock + --capture/--decode + persistent decoder + T13)
+**Context:** fresh agent session bootstrapped from THIS file + the repo clone
+(HEAD `c3ff27c`) + OpenNOW @ a49b124 (nvst.rs sha256 `f52fc09f…`, 14 695
+lines re-verified) + the user's three uploads (T10_wynik.txt = round 12,
+idk_g2.txt = the G2-offline demo console, this file). Baseline reproduced
+FIRST: vendor files hash-verified, native suites green, cross-check green —
+exactly the round-XVI numbers (889 checks then; 972 now with the new suite).
+**Target evidence analysed (both items round XVI awaited):**
+(1) **T10 round 12 (2026-10-24 12:52): VERDICT ALL PASS, 67/67 checks.**
+The round-XVI media core is target-verified: test_knrx **209/209** on Win7
+(first execution — the GCM/CM256 legs active in the mbedTLS build),
+`rx.vectors ok` 153 checks (scenarios 31/31, `srtp_backend:1`), registry
+13/13 usable, zero warnings (GCC 16.2, 116 s build), decode 60/60 @
+3333 fps, d3d probes reproduced (pitch 1536, present mean 0.29 ms, fill
+max 28 ms = first touch), net.tls + tls.chain ok (TLS 1.2, depth 3, Amazon
+Root CA 1), bundle 139 545 B validated, PE 6.01. **clock.resolution `ok`
+this run** (Sleep(1) 1.00→1.75 ms, wall tick 1000→1000 µs) — the machine
+alternates timer regimes across reboots; R30 reworded (worst-case floor
+2.9 ms stands for pacing design; both regimes now have target samples).
+(2) **idk_g2.txt (the user's G2-offline demo): SUCCESS — one missing shell
+redirect, zero product defects.** Target capture generation matched the
+sandbox regeneration byte-counts exactly (seed-1 determinism ACROSS
+machines: 119 records / 360 333 B). Target replay: 60/60 AUs, all
+contiguous, fec_repaired=19, zero stale/gaps/withheld, state 0; ffprobe
+accepted au_00001_k.264 (h264 CB 320×240 — the synthetic.264 KAT clip's
+profile, expected). The failing `--verify` line: `python … --verify
+cap.json < replay.jsonl` → cmd's "Nie można odnaleźć określonego pliku"
+= the redirect INPUT `replay.jsonl` never existed because step 2 ran
+WITHOUT `> replay.jsonl` (python never even started). Reconstructed the
+console JSONL in the sandbox → **VERIFY PASS: 60 frames byte-identical to
+the reference receiver**, and the sandbox replay of the same capture is
+byte-identical to the target's console output (all 60 AU lines + every
+summary counter). tests/README.md's demo block now carries the redirect
+INLINE (the parenthetical note was missed — make the command itself
+correct); T13 automates the whole sequence so no future demo depends on
+hand-copied redirects. Raw evidence archived: `artifacts/T10-round12/`.
+**Round-XVII delta — the stage-2 socket layer (docs/SOCK.md is the design
+record; provenance re-read from nvst.rs @ a49b124: 8 MiB SO_RCVBUF :235
+(applied :5682), 10 ms poll :244 — the old Next-steps cite ":222" was
+stale, RX.md corrected):**
+- **`kn_sock`** (new module): bounded UDP, Win32 winsock + POSIX BOTH
+  REAL (no stubs — the sandbox runs the full live E2E), zero allocation,
+  refcounted WSAStartup, QPC/CLOCK_MONOTONIC µs+ms clock (the live
+  `now_ms` source), SO_RCVBUF request + getsockopt READBACK (Linux caps at
+  ~208 KiB→reports 425 984; Windows honours 8 MiB — every summary reports
+  both), select-based recv with honest per-platform truncation semantics
+  (Win32 WSAEMSGSIZE = datagram LOST, POSIX silent truncation — documented
+  + tested both ways), sendto, lifetime counters. `test_knsock` (TENTH
+  suite, 70 checks): clock/ipv4/lifecycle/100-datagram byte-exact
+  round-trip/timeout/65 507 B max datagram/512-burst drain with seq
+  markers/the PLATFORM-DELTA case/bad-args — section-isolated per the
+  round-XVI suite rule.
+- **`knvstd --capture`**: streaming recorder in the EXACT kn_ring_dump
+  line format (→ `--replay-capture` + `--verify` read real sessions with
+  ZERO tooling changes — the R32 mechanism). Documented deviation from the
+  old Next-steps wording: the FILE is primary (a ring cannot hold a whole
+  session on 2 GB); the 64 KiB kn_ring is the failure-diagnostic mirror
+  (dumped to `<log_dir>/wire_capture.log` → rides the auto-bundle). Flush
+  every 32 records/100 ms (bounded R2b loss, no fsync storm). Ctrl-C
+  graceful (SetConsoleCtrlHandler/SIGINT) → clean summary. Empty capture =
+  rc 1 + E_CAPTURE_EMPTY amplification (never a silent pass).
+- **`knvstd --decode`**: live socket → kn_rx (real QPC-ms clock, real 5 s
+  timeout — the production watchdog, unlike replay's MAX) → **capacity-2
+  encoded queue** (analiza/04 §2.4) with the reference overflow policy
+  (drop-new + `kn_rx_inval_lose` + `kn_rx_video_request_keyframe` — the
+  ONE new kn_rx API, +6 test_knrx checks: 190 bare / 215 mbedTLS) →
+  persistent decoder session. Per-AU JSONL with sha1 + capped rx-event
+  lines + kf_request lines (UNSENT until stage 3 — recorded, never
+  dropped) + 1 s transport stats log lines. Summary is FIELD-COMPATIBLE
+  with `make_rx_capture.py --verify` ("frames" alias) → the cross-impl
+  contract now covers LIVE traffic. **D21: single-threaded** (recv→process
+  →inline drain→poll at 10 ms cadence; 8 MiB rcvbuf absorbs decode
+  stalls; stage-1 loopback precedent; queue semantics already
+  thread-ready; revisit on measured backlog).
+- **`kn_decode_stream_*`** (new persistent session in kn_decode):
+  `kn_decode_h264_mem` is one-shot — per-AU feeding through it kills
+  inter-frame references. MEASURED (sandbox_stream_decode.c control):
+  one-shot per AU delivers **2 of 60** frames; the persistent session
+  delivers **60/60, 0 failures**, survives a poisoned mid-stream AU, and
+  has a sticky callback abort. NO parser on this path (whole AUs in) → the
+  round-IX parser-flush landmine cannot occur; `flush()` drains the
+  decoder. Honest stubs in bare builds (`--decode` then runs
+  pipeline-only, reported as such).
+- **`sock.loopback`** — the 14th self-test, PORTABLE + GATED (loopback UDP
+  failing blocks stage 2 anywhere): 64-datagram burst byte-exact, honest
+  50 ms timeout, rcvbuf readback, closed-socket discipline; ~50 ms from
+  the shipped binary. Relevance mapping learned socket/udp/recv/bind/
+  capture/decode keywords (§7.7.4).
+- **`tools/send_rx_capture.py`**: paced UDP sender on the capture's µs
+  timeline (hybrid sleep+spin — regime-proof per R30; `--speed 0` blast);
+  **`tests/T13_udp_e2e.py`**: the socket gate (capture leg → vector leg
+  (replay of the LIVE-RECORDED file vs the reference manifest) → decode
+  paced → decode blast → SRTP cm128 → SRTP gcm256 (auto-enabled from the
+  binary's rx.vectors evidence) → sock.loopback → jsonl hygiene; wipes
+  t13work/t13logs per the T11 lesson; reuses T10's build). T10 rev: 10
+  suites + registry 14 + sock.loopback gated (POSIX dry-run 58 ALL PASS).
+**Bugs caught by the gates this round (all fixed, all recorded in
+docs/SOCK.md):** (1) **LSan: `kn_decode_stream_close()` leaked
+kd_deliver's NV12 buffer (115 264 B)** — R33's rule earned its keep on
+the FIRST sanitized E2E run; (2) `_POSIX_C_SOURCE` preamble missing in two
+fresh files (the kn_diag landmine re-fires in every new POSIX-side file —
+now documented in both); (3) mingw `socklen_t` needs `<ws2tcpip.h>` (the
+kn_net landmine, re-confirmed); (4) WSA-refcount leak in open()'s error
+paths (self-review, pre-gate); (5) T13 initially merged stderr into the
+verify input — the PRE-EXISTING vendored `sha1.c:26` int-promotion UB
+(pinned by hash, must NOT be edited) poisoned instrumented runs →
+stdout-only capture + last-JSON-line parsing; sanitizer policy: recover
+mode, zero streamer-code diagnostics (verified: sha1.c is the ONLY runtime
+error in a sanitized T13).
+**Verification matrix (sandbox, before handover):** native **10 suites 972
+checks PASS**; cross mingw x64+i686 `-Werror` PASS (incl. kn_sock +
+extended knvstd/kn_decode/kn_rx/kn_selftest); `-Wformat-truncation=2`
+clean -O0/-O2/-O3 on every touched file (two host-only errsz==1
+over-approximations documented, round-XI class); CMake ctest **12/12 in
+BOTH backends** (schannel + mbedTLS, `tls=mbedtls` recorded);
+ASan+UBSan+LSan: suites + the FULL T13 matrix clean; **T13 ALL PASS on
+three builds** (44 FFmpeg-bare with real decode 60/60 paced+blast+cm128 ·
+44 under sanitizers · **55 mbedTLS incl. the gcm256 leg**); T10 POSIX
+dry-run ALL PASS 58; cross-machine parity: target idk_g2 JSONL == sandbox
+output byte-identical, regenerated capture == target's 119 records/
+360 333 B, cap.hex sha256 `31386ca8…` recorded.
+**Awaiting (round XVIII):** target `T10 r13` (expect ALL PASS ~69:
+test_knsock ~70, test_knrx 215, registry 14) + target `T13 r1` (expect
+ALL PASS 55 — first Winsock execution of the live modes; record
+`rcvbuf_actual` from the decode begin line: R34's headroom question).
+Then WSS+RTSP (Next steps 2) and the presentation wiring (Next steps 3).
+→ `streamer/{include/kn,src}/kn_sock.*` (new), `streamer/tests/test_knsock.c`
+  (new), `streamer/{include/kn,src}/kn_decode.*` (stream session + leak fix),
+  `streamer/{include/kn,src}/kn_rx.*` (request_keyframe),
+  `streamer/tests/test_knrx.c` (+6), `streamer/src/kn_selftest.c`
+  (sock.loopback + relevance), `streamer/include/kn/kn_selftest.h`,
+  `streamer/tests/test_knselftest.c` (115 checks),
+  `streamer/src/knvstd_main.c` (--capture/--decode/stop-handling),
+  `tools/send_rx_capture.py` (new), `tools/sandbox_stream_decode.c` (new),
+  `tools/fetch_ffmpeg_headers_sandbox.py` (new), `tests/T13_udp_e2e.py` (new),
+  `tests/T10_build_and_test.py`, `CMakeLists.txt`,
+  `tools/{build_native_tests,cross_check}.sh`, `docs/SOCK.md` (new),
+  `docs/RX.md`, `tests/README.md`, `INTEGRATION.md` rev 10, `.gitignore`,
+  `artifacts/T10-round12/` (raw evidence, gitignored), this file

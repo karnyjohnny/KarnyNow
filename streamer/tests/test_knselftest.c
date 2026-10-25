@@ -63,7 +63,7 @@ static void test_registry(void)
 {
     int n = kn_selftest_count();
     int i, saw_fec = 0, saw_srtp = 0, saw_clock = 0, saw_console = 0;
-    CHECK(n == 13, "registry holds the 12 §7.9 names + rx.vectors");
+    CHECK(n == 14, "registry holds the 12 §7.9 names + rx.vectors + sock.loopback");
     for (i = 0; i < n; ++i) {
         const char *nm = kn_selftest_name(i);
         CHECK(nm && nm[0], "registry name non-empty");
@@ -220,7 +220,7 @@ static void test_run_all_and_render(void)
     int n = kn_selftest_run_all(results, 16);
     int i, ok_count = 0, skipped_count = 0;
 
-    CHECK(n == 13, "run_all executes the whole registry");
+    CHECK(n == 14, "run_all executes the whole registry");
     for (i = 0; i < n; ++i) {
         if (results[i].status == KN_ST_OK) ok_count++;
         if (results[i].status == KN_ST_SKIPPED) skipped_count++;
@@ -232,6 +232,15 @@ static void test_run_all_and_render(void)
             !strcmp(results[i].name, "srtp.vectors") ||
             !strcmp(results[i].name, "rx.vectors"))
             CHECK(results[i].status == KN_ST_OK, "offline vector test OK");
+    /* sock.loopback is portable (real Winsock AND real POSIX sockets) —
+     * it must EXECUTE everywhere, never skip (round XVII) */
+    for (i = 0; i < n; ++i)
+        if (!strcmp(results[i].name, "sock.loopback")) {
+            CHECK(results[i].status != KN_ST_SKIPPED,
+                  "sock.loopback executed (portable)");
+            CHECK(results[i].status == KN_ST_OK,
+                  "sock.loopback passed (stage-2 UDP layer works)");
+        }
 #ifdef _WIN32
     /* on the target, clock.resolution and console.host REALLY run.
      * console.host may legitimately report failed WITHOUT ConEmu (that is
@@ -261,10 +270,10 @@ static void test_run_all_and_render(void)
                   || results[i].failures > 0,
                   "decode did not fail silently");
 #else
-    CHECK(ok_count == 4, "the four offline vector tests are OK (host)");
+    CHECK(ok_count == 5, "offline vector tests + sock.loopback OK (host)");
     CHECK(skipped_count == 9, "the rest honestly report skipped (host)");
     /* host skips: clock, console, d3d x2, net x4 (+decode w/o ffmpeg);
-     * host oks: fec, srtp, gs.parse, rx.vectors */
+     * host oks: fec, srtp, gs.parse, rx.vectors, sock.loopback */
 #endif
 
     n_doc = kn_selftest_render_json(results, n, doc, sizeof doc);
@@ -318,6 +327,17 @@ static void test_render_relevant(void)
                                       doc, sizeof doc) > 0, "default render ok");
     CHECK(strstr(doc, "\"name\":\"fec.vectors\"") != NULL, "default includes fec");
     CHECK(strstr(doc, "\"name\":\"srtp.vectors\"") != NULL, "default includes srtp");
+
+    /* stage-2 socket failure -> sock.loopback re-proves the UDP layer
+     * (round XVII; session.capture/session.decode failure codes) */
+    CHECK(kn_selftest_render_relevant("session.capture", "E_CAPTURE_SOCKET",
+                                      doc, sizeof doc) > 0, "sock render ok");
+    CHECK(strstr(doc, "\"name\":\"sock.loopback\"") != NULL,
+          "capture socket failure -> sock.loopback");
+    CHECK(kn_selftest_render_relevant("session.decode", "E_DECODE_NO_DATA",
+                                      doc, sizeof doc) > 0, "decode render ok");
+    CHECK(strstr(doc, "\"name\":\"sock.loopback\"") != NULL,
+          "decode no-data failure -> sock.loopback");
 }
 
 static void test_diag_provider_integration(void)

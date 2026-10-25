@@ -247,11 +247,20 @@ amplification + auto-bundle; relevance mapping learned
 
 ## Stage-2 remainders growing from here
 
-- **Sockets**: the Mjolnir UDP receive loop (winsock, 8 MiB SO_RCVBUF per
-  `nvst.rs:222`) → `process_datagram` + `poll` on a real clock → kn_ring
-  capture of the raw datagrams (`--capture`); the loop must feed
-  `gs_capture.hex`-format dumps so `gs.parse` and `--replay-capture` turn
-  every real session into a regression test.
+- **Sockets — DONE (round XVII, docs/SOCK.md)**: `kn_sock` (real UDP,
+  Win32 winsock + POSIX, 8 MiB SO_RCVBUF request per `nvst.rs:235`,
+  honest getsockopt readback) + `knvstd --capture`/`--decode` feed
+  `process_datagram` + `poll` on a real QPC clock. `--capture` writes
+  `gs_capture.hex`-format dumps (streaming file primary, kn_ring mirror
+  for failure bundles), so `gs.parse` and `--replay-capture` turn every
+  real session into a regression test; `--decode` adds the capacity-2
+  encoded queue (overflow → `kn_rx_inval_lose` +
+  `kn_rx_video_request_keyframe`, the NEW external setter for the
+  internal flag) and the persistent `kn_decode_stream_*` session. T13
+  (`tests/T13_udp_e2e.py`) proves the whole graph on loopback: capture →
+  replay-verify → decode paced/blast → SRTP cm128 + gcm256 → the binary's
+  own `sock.loopback` self-test. The pipeline CORE is unchanged — the
+  round-XVI KAT battery still pins every behaviour.
 - **WSS + RTSP client** on the validated mbedTLS TLS-1.2 backend
   (`OPTIONS→DESCRIBE→SETUP→ANNOUNCE→PLAY`), the 31-field session context
   (R22) feeding `kn_rx_video_config` + SRTP material.

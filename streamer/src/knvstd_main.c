@@ -30,8 +30,11 @@
 #include "kn/kn_rx.h"
 #include "kn/kn_selftest.h"
 #include "kn/kn_sha1.h"
+#include "kn/kn_sock.h"
 #include "kn/knlog.h"
+#include "kn/knring.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +62,11 @@ static void usage(void)
            "  knvstd --loopback[=FILE.264] [--loopback-seconds=N] [--no-audio]\n"
            "  knvstd --replay-capture=FILE.hex [--replay-au-dir=DIR]\n"
            "         [--replay-srtp=PROFILE:TAG:KEYHEX:SALTHEX] [--replay-vps=N]\n"
+           "  knvstd --capture [--capture-port=N] [--capture-bind=IP]\n"
+           "         [--capture-out=FILE] [--capture-seconds=N]   (0 = until Ctrl-C)\n"
+           "  knvstd --decode [--decode-port=N] [--decode-bind=IP]\n"
+           "         [--decode-seconds=N] [--decode-srtp=SPEC] [--decode-vps=N]\n"
+           "         [--decode-au-dir=DIR] [--decode-expect-frames=N]\n"
            "       [--log-dir=DIR]   (WASAPI synthetic PCM unless --no-audio)\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
            "  knvstd --list-selftests\n"
@@ -1145,6 +1153,894 @@ static int run_replay(const char *cap_path, const char *au_dir,
     return exit_code;
 }
 
+/* ------------------------------------------------------ graceful stop */
+/* Ctrl-C (Win32 console handler) / SIGINT+SIGTERM (POSIX) set a flag the
+ * capture/decode loops poll every iteration: the run ends with a complete
+ * summary line and a flushed capture file instead of a torn write (R2b:
+ * the writer must preserve evidence through an abnormal end). */
+static volatile sig_atomic_t g_knv_stop;
+
+#ifdef _WIN32
+static BOOL WINAPI knv_ctrl_handler(DWORD type)
+{
+    (void)type;
+    g_knv_stop = 1;
+    return TRUE;
+}
+static void knv_stop_install(void) { SetConsoleCtrlHandler(knv_ctrl_handler, TRUE); }
+#else
+static void knv_sig_handler(int sig) { (void)sig; g_knv_stop = 1; }
+static void knv_stop_install(void)
+{
+    signal(SIGINT, knv_sig_handler);
+    signal(SIGTERM, knv_sig_handler);
+}
+#endif
+
+/* RTP sequence from the unencrypted header bytes — valid even for SRTP
+ * datagrams (only the payload/tag are protected). meta column of the
+ * kn_ring_dump line format; 0 when the datagram is not RTP-shaped. */
+static uint32_t knv_rtp_seq_meta(const uint8_t *p, size_t n)
+{
+    if (n >= 12 && (p[0] >> 6) == 2u)
+        return ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+    return 0u;
+}
+
+/* ---------------------------------------------------------- capture mode
+ * knvstd --capture — the stage-2 RECORDING mechanism (R32's answer: the
+ * first real Mjolnir session becomes a permanent regression vector).
+ *
+ * Receives raw UDP datagrams and writes them SEQUENTIALLY to a file in the
+ * kn_ring_dump line format — byte-identical to what tools/make_rx_capture.py
+ * emits and what --replay-capture reads:
+ *     "<mono_us> <meta_%08x> <flags> <len> <hex bytes...>\n"
+ * Deviation from the Next-steps wording (documented in docs/SOCK.md): the
+ * PRIMARY record is a streaming file writer, not the ring — a kn_ring only
+ * ever holds the LAST N records, so a ring-primary capture could not record
+ * a whole session on a 2 GB machine. The kn_ring (64 KiB, §7.10 sizing) is
+ * kept as a failure-diagnostic mirror and dumped into the log dir on a
+ * failed run so the auto-bundle carries recent wire bytes.
+ * Flush policy: every 32 records or 100 ms (bounded loss on a hard crash,
+ * no fsync storm — §7.12).
+ */
+#define CAP_LINE_BUF   (3u * KN_SOCK_RECV_BUF + 96u)  /* " xx" per byte */
+#define CAP_FLUSH_EVERY 32u
+
+static int cap_build_line(char *line, size_t linesz, uint64_t mono_us,
+                          uint32_t meta, uint32_t flags,
+                          const uint8_t *d, size_t n, size_t *out_len)
+{
+    static const char hexd[] = "0123456789abcdef";
+    size_t o, i;
+    int h = snprintf(line, linesz, "%llu %08x %u %u",
+                     (unsigned long long)(mono_us % 10000000000000000ull),
+                     (unsigned)meta, (unsigned)(flags % 100u),
+                     (unsigned)(n % 100000000u));
+    if (h < 0 || (size_t)h + 3 * n + 2 > linesz) return -1;
+    o = (size_t)h;
+    for (i = 0; i < n; ++i) {
+        line[o++] = ' ';
+        line[o++] = hexd[d[i] >> 4];
+        line[o++] = hexd[d[i] & 0x0Fu];
+    }
+    line[o++] = '\n';
+    line[o] = '\0';
+    *out_len = o;
+    return 0;
+}
+
+static int run_capture(uint16_t port, const char *bind_ip, const char *out_path,
+                       long seconds, const char *log_dir)
+{
+    static uint8_t pkt[KN_SOCK_RECV_BUF];
+    static char line[CAP_LINE_BUF];
+    kn_sock_udp sock;
+    kn_ring ring;
+    FILE *fp = NULL;
+    char err[128];
+    char ringpath[640];
+    uint64_t t_start_ms, t_last_flush_us, now_us;
+    unsigned long long datagrams = 0, bytes = 0, flushes = 0, file_errors = 0;
+    unsigned long long since_flush = 0;
+    uint32_t max_len = 0;
+    size_t plen;
+    int ring_ok, rc, exit_code;
+    const char *stop_reason = "time";
+    kn_log_config lcfg;
+
+    knv_stop_install();
+    memset(&lcfg, 0, sizeof lcfg);
+    lcfg.log_dir = log_dir;
+    (void)kn_log_init(&lcfg);
+    kn_diag_set_selftest_provider(kn_selftest_render_relevant);
+    (void)kn_diag_install(log_dir);
+
+    err[0] = '\0';
+    rc = kn_sock_udp_open(&sock, bind_ip, port, KN_SOCK_RCVBUF_DEFAULT,
+                          err, sizeof err);
+    if (rc != KN_SOCK_OK) {
+        printf("{\"mode\":\"capture\",\"error\":\"socket_open\",\"rc\":%d,"
+               "\"errno\":%d,\"detail\":\"%.100s\"}\n", rc, sock.last_error,
+               err);
+        fflush(stdout);
+        kn_log_on_failure("session.capture", "E_CAPTURE_SOCKET",
+                          "UDP socket open/bind failed", err);
+        kn_log_shutdown();
+        return 1;
+    }
+    fp = fopen(out_path, "wb");
+    if (!fp) {
+        printf("{\"mode\":\"capture\",\"error\":\"out_unwritable\","
+               "\"path\":\"%.300s\"}\n", out_path);
+        fflush(stdout);
+        kn_sock_udp_close(&sock);
+        kn_log_on_failure("session.capture", "E_CAPTURE_OUT",
+                          "capture output file cannot be opened", out_path);
+        kn_log_shutdown();
+        return 1;
+    }
+    ring_ok = (kn_ring_init(&ring, 64u * 1024u, 1312) == 0);  /* §7.10 note:
+        max_record 1312 => ~48 records at packetSize 1280; larger datagrams
+        are truncated+flagged in the MIRROR only — the file record is full */
+
+    {
+        kn_lctx b;
+        char iptext[16];
+        kn_lctx_init(&b, KN_CH_TRANSPORT, KN_INFO, "capture_begin");
+        kn_lctx_str(&b, "bind", kn_sock_ipv4_text(sock.local_addr, iptext));
+        kn_lctx_i64(&b, "port", (long long)kn_sock_udp_port(&sock));
+        kn_lctx_i64(&b, "seconds", (long long)seconds);
+        kn_lctx_i64(&b, "rcvbuf_req", (long long)sock.rcvbuf_requested);
+        kn_lctx_i64(&b, "rcvbuf_act", (long long)sock.rcvbuf_actual);
+        kn_lctx_str(&b, "out", out_path);
+        kn_log_emit(&b);
+    }
+
+    t_start_ms = kn_sock_now_ms();
+    t_last_flush_us = kn_sock_now_us();
+    while (!g_knv_stop) {
+        uint64_t now_ms = kn_sock_now_ms();
+        if (seconds > 0 && now_ms - t_start_ms >= (uint64_t)seconds * 1000u) {
+            stop_reason = "time";
+            break;
+        }
+        plen = 0;
+        rc = kn_sock_udp_recv(&sock, pkt, sizeof pkt,
+                              KN_SOCK_POLL_INTERVAL_MS, &plen, NULL);
+        if (rc == 1) {
+            size_t llen;
+            now_us = kn_sock_now_us();
+            datagrams++;
+            bytes += (unsigned long long)plen;
+            if (plen > max_len) max_len = (uint32_t)plen;
+            if (ring_ok)
+                kn_ring_append(&ring, now_us, knv_rtp_seq_meta(pkt, plen),
+                               pkt, plen);
+            if (cap_build_line(line, sizeof line, now_us,
+                               knv_rtp_seq_meta(pkt, plen), 0u, pkt, plen,
+                               &llen) == 0) {
+                if (fwrite(line, 1, llen, fp) != llen) file_errors++;
+            } else {
+                file_errors++;
+            }
+            since_flush++;
+            now_us = kn_sock_now_us();
+            if (since_flush >= CAP_FLUSH_EVERY ||
+                now_us - t_last_flush_us >= 100000u) {
+                if (fflush(fp) != 0) file_errors++;
+                else flushes++;
+                since_flush = 0;
+                t_last_flush_us = now_us;
+            }
+        } else if (rc < 0 && rc != KN_SOCK_ERR_MSGSIZE) {
+            /* socket dead: stop with what we have (the file is flushed) */
+            printf("{\"mode\":\"capture\",\"error\":\"recv\",\"rc\":%d,"
+                   "\"errno\":%d}\n", rc, sock.last_error);
+            fflush(stdout);
+            stop_reason = "socket_error";
+            break;
+        }
+        /* rc == 0: the 10 ms poll tick (nvst.rs:246 cadence) */
+    }
+    if (g_knv_stop) stop_reason = "signal";
+    if (fflush(fp) != 0) file_errors++;
+    else flushes++;
+    {
+        int fc = fclose(fp);
+        fp = NULL;
+        if (fc != 0) file_errors++;
+    }
+
+    exit_code = (datagrams > 0 && file_errors == 0 &&
+                 strcmp(stop_reason, "socket_error") != 0) ? 0 : 1;
+
+    printf("{\"mode\":\"capture\",\"summary\":{\"bind\":\"%s\",\"port\":%u,"
+           "\"seconds_budget\":%ld,\"stop_reason\":\"%s\","
+           "\"datagrams\":%llu,\"bytes\":%llu,\"max_len\":%u,"
+           "\"rcvbuf_requested\":%u,\"rcvbuf_actual\":%u,"
+           "\"recv_timeouts\":%llu,\"recv_errors\":%llu,"
+           "\"ring_records\":%llu,\"ring_dropped\":%llu,\"ring_ok\":%d,"
+           "\"file_errors\":%llu,\"flushes\":%llu,\"out\":\"%.300s\"}}\n",
+           bind_ip && bind_ip[0] ? bind_ip : "0.0.0.0",
+           (unsigned)kn_sock_udp_port(&sock), seconds, stop_reason,
+           datagrams % 10000000000ull, bytes % 10000000000000ull,
+           max_len % 100000000u, sock.rcvbuf_requested, sock.rcvbuf_actual,
+           (unsigned long long)(sock.recv_timeouts % 10000000000ull),
+           (unsigned long long)(sock.recv_errors % 1000000000ull),
+           ring_ok ? (unsigned long long)(kn_ring_count(&ring) % 1000000ull)
+                   : 0ull,
+           ring_ok ? (unsigned long long)(ring.dropped % 1000000000ull) : 0ull,
+           ring_ok ? 1 : 0,
+           file_errors % 1000000000ull, flushes % 1000000000ull, out_path);
+    fflush(stdout);
+
+    if (exit_code != 0) {
+        /* §7.10: the ring mirror rides into the auto-bundle as a .log so
+         * the logs/ enumeration picks it up */
+        if (ring_ok &&
+            snprintf(ringpath, sizeof ringpath, "%s/wire_capture.log",
+                     log_dir) < (int)sizeof ringpath)
+            (void)kn_ring_dump(&ring, ringpath);
+        kn_log_on_failure("session.capture",
+                          datagrams == 0 ? "E_CAPTURE_EMPTY"
+                                         : "E_CAPTURE_IO",
+                          datagrams == 0
+                              ? "no datagrams arrived within the budget "
+                                "(wrong port? sender down? firewall?)"
+                              : "capture file I/O errors or socket failure",
+                          "check the summary JSON; the wire mirror is in the "
+                          "log dir; rerun the sender (tools/send_rx_capture.py)");
+    } else {
+        kn_lctx e;
+        kn_lctx_init(&e, KN_CH_TRANSPORT, KN_INFO, "capture_end");
+        kn_lctx_i64(&e, "datagrams", (long long)(datagrams % 10000000000ll));
+        kn_lctx_i64(&e, "bytes", (long long)(bytes % 10000000000000ll));
+        kn_lctx_str(&e, "out", out_path);
+        kn_log_emit(&e);
+    }
+    if (ring_ok) kn_ring_free(&ring);
+    kn_sock_udp_close(&sock);
+    kn_log_shutdown();
+    return exit_code;
+}
+
+/* ------------------------------------------------------------ decode mode
+ * knvstd --decode — the stage-2 LIVE receive path: real UDP socket -> real
+ * monotonic clock -> the FULL kn_rx pipeline (SRTP when material is given,
+ * reorder, FEC repair, AU assembly, RFI/NACK logic) -> a capacity-2 encoded
+ * frame queue (analiza/04 §2.4: overflow = desync = clear the reference
+ * chain + request a keyframe) -> the persistent kn_decode stream session.
+ *
+ * SINGLE-THREADED by design (documented decision, docs/SOCK.md): recv with
+ * the reference's 10 ms poll cadence (nvst.rs:246), drain the AU queue
+ * inline after every process/poll. The 8 MiB SO_RCVBUF (nvst.rs:232)
+ * absorbs decode stalls (~16 ms worst frame at 720p on the E5500 =
+ * ~500 datagrams of headroom at 30 fps). The stage-1 loopback ran the same
+ * shape at 30.000 fps for 600 s (G1). If live G2 measurements ever show
+ * recv backlog during decode stalls, the receive side moves to a thread —
+ * the queue semantics below are already the thread-ready ones.
+ *
+ * The summary line is deliberately FIELD-COMPATIBLE with the replay-mode
+ * summary plus make_rx_capture.py --verify's counter contract (it carries
+ * "frames" as an alias of "aus"), so the SAME manifest verification runs
+ * against a live socket session as against an offline replay.
+ *
+ * stdout: one JSON line per AU (fi/len/sha1/kf/contig/ts + decode result),
+ * one per significant rx event (capped), one kf_request line per keyframe
+ * flag (the control channel that would SEND it is stage 3 — until then the
+ * request is recorded, never silently dropped), and a final summary.
+ */
+#define DEC_AU_CAP      KN_GS_DEFAULT_MAX_ACCESS_UNIT   /* 2 MiB per slot */
+#define DEC_QUEUE_CAP   2u          /* analiza/04 §2.4: keep 2 (max 3) */
+#define DEC_EVENT_LINES 1000u       /* stdout cap; counters stay exact */
+
+typedef struct dec_q_slot {
+    size_t   len;
+    uint32_t ts, fi;
+    int      kf, contig;
+} dec_q_slot;
+
+typedef struct dec_ctx {
+    kn_rx_video *v;
+    uint64_t     now_ms;          /* set before every pipeline call */
+    /* encoded-frame queue (single-threaded: no locks needed) */
+    uint8_t     *qbytes[DEC_QUEUE_CAP];
+    dec_q_slot   qslot[DEC_QUEUE_CAP];
+    unsigned     q_head, q_count;
+    unsigned long long q_overflows, q_pushed;
+    /* decode session */
+    kn_decode_stream *stream;
+    int          decode_available;
+    int          decode_aborted;
+    unsigned long long frames_out, decode_errors, aus_undecoded;
+    int          last_w, last_h;
+    long long    worst_decode_ms;
+    /* reporting */
+    const char  *au_dir;
+    unsigned long long aus, key_aus, au_write_errors, event_lines,
+                       event_lines_capped, kf_request_lines;
+    unsigned long long rx_events_logged;
+} dec_ctx;
+
+static uint8_t g_dec_qbytes[DEC_QUEUE_CAP][DEC_AU_CAP];
+
+/* kn_rx frame callback: runs INSIDE process_datagram/poll — copy the AU
+ * (f->bytes aliases the assembler buffer) into the queue; overflow policy
+ * per analiza/04 §5 "encoded queue overflow" row. */
+static void dec_frame_in_cb(const kn_rx_frame *f, void *ud)
+{
+    dec_ctx *c = (dec_ctx *)ud;
+    unsigned tail;
+
+    if (f->bytes_len > DEC_AU_CAP) {          /* cannot happen: the pipeline
+                                                 enforces max_access_unit */
+        c->q_overflows++;
+        return;
+    }
+    if (c->q_count == DEC_QUEUE_CAP) {
+        /* DESYNC: the decoder never saw a frame that later packets
+         * reference -> invalidate the chain (RFI owns recovery when frame
+         * types are known) and request a keyframe when it does not. */
+        c->q_overflows++;
+        if (!kn_rx_inval_lose(&c->v->inval, c->now_ms))
+            kn_rx_video_request_keyframe(c->v);
+        return;                                /* drop the NEW AU */
+    }
+    tail = (c->q_head + c->q_count) % DEC_QUEUE_CAP;
+    memcpy(c->qbytes[tail], f->bytes, f->bytes_len);
+    c->qslot[tail].len = f->bytes_len;
+    c->qslot[tail].ts = f->timestamp;
+    c->qslot[tail].fi = f->frame_index;
+    c->qslot[tail].kf = f->keyframe;
+    c->qslot[tail].contig = f->contiguous;
+    c->q_count++;
+    c->q_pushed++;
+}
+
+/* decoded-frame callback (kn_decode stream session) */
+static int dec_frame_out_cb(const uint8_t *data, int w, int h, int sy,
+                            int suv, int is_nv12, long long idx, void *ud)
+{
+    dec_ctx *c = (dec_ctx *)ud;
+    (void)data; (void)sy; (void)suv; (void)is_nv12; (void)idx;
+    c->frames_out++;
+    c->last_w = w;
+    c->last_h = h;
+    return 0;
+}
+
+static const char *dec_ev_name(int type)
+{
+    switch (type) {
+    case KN_RX_EV_DROPPED:          return "dropped";
+    case KN_RX_EV_RECOVERY_GAP:     return "recovery_gap";
+    case KN_RX_EV_RECOVERY_TIMEOUT: return "recovery_timeout";
+    case KN_RX_EV_LIFECYCLE:        return "lifecycle";
+    case KN_RX_EV_PROGRESS_RESUMED: return "progress_resumed";
+    case KN_RX_EV_PROGRESS_STALL:   return "progress_stall";
+    case KN_RX_EV_PROGRESS_RECOVERY:return "progress_recovery";
+    default:                        return "none";
+    }
+}
+
+static void dec_drain_events(dec_ctx *c)
+{
+    uint32_t n = 0, i;
+    const kn_rx_event *ev = kn_rx_video_events(c->v, &n);
+    for (i = 0; i < n; ++i) {
+        int significant = ev[i].type != KN_RX_EV_DROPPED &&
+                          ev[i].type != KN_RX_EV_NONE;
+        if (c->event_lines < DEC_EVENT_LINES) {
+            c->event_lines++;
+            printf("{\"mode\":\"decode\",\"event\":\"rx\",\"type\":\"%s\","
+                   "\"drop_reason\":%d,\"detail\":%d,"
+                   "\"index\":%llu,\"gap_first\":%llu,\"gap_last\":%llu,"
+                   "\"idle_ms\":%llu,\"new_state\":%d}\n",
+                   dec_ev_name(ev[i].type), ev[i].drop_reason, ev[i].detail,
+                   (unsigned long long)(ev[i].index % 10000000000ull),
+                   (unsigned long long)(ev[i].gap_first % 10000000000ull),
+                   (unsigned long long)(ev[i].gap_last % 10000000000ull),
+                   (unsigned long long)(ev[i].idle_ms % 1000000000ull),
+                   ev[i].new_state);
+        } else {
+            c->event_lines_capped++;
+        }
+        if (significant && c->rx_events_logged < 100) {
+            kn_lctx b;
+            c->rx_events_logged++;
+            kn_lctx_init(&b, KN_CH_TRANSPORT, KN_INFO, "rx_event");
+            kn_lctx_str(&b, "type", dec_ev_name(ev[i].type));
+            kn_lctx_i64(&b, "detail", (long long)ev[i].detail);
+            kn_log_emit(&b);
+        }
+    }
+}
+
+static void dec_take_kf(dec_ctx *c)
+{
+    if (kn_rx_video_take_keyframe_request(c->v)) {
+        c->kf_request_lines++;
+        printf("{\"mode\":\"decode\",\"event\":\"kf_request\","
+               "\"sent\":false,\"note\":\"control channel is stage 3\"}\n");
+        if (c->kf_request_lines <= 20) {
+            kn_lctx b;
+            kn_lctx_init(&b, KN_CH_TRANSPORT, KN_INFO, "keyframe_request");
+            kn_lctx_i64(&b, "n", (long long)(c->kf_request_lines % 1000000));
+            kn_lctx_str(&b, "transport", "unsent (stage-3 control channel)");
+            kn_log_emit(&b);
+        }
+    }
+}
+
+/* Drain the encoded queue into the decoder (+ optional AU dump). */
+static void dec_drain_queue(dec_ctx *c)
+{
+    while (c->q_count) {
+        unsigned head = c->q_head;
+        const dec_q_slot *s = &c->qslot[head];
+        const uint8_t *bytes = c->qbytes[head];
+        uint8_t dig[KN_SHA1_DIGEST_LEN];
+        char hex[2 * KN_SHA1_DIGEST_LEN + 1];
+        int i, drc = 0;
+
+        c->q_head = (head + 1) % DEC_QUEUE_CAP;
+        c->q_count--;
+
+        kn_sha1(bytes, s->len, dig);
+        for (i = 0; i < KN_SHA1_DIGEST_LEN; ++i)
+            sprintf(hex + 2 * i, "%02x", (unsigned)dig[i]);
+
+        if (c->stream && !c->decode_aborted) {
+            drc = kn_decode_stream_push(c->stream, bytes, s->len, s->ts,
+                                        dec_frame_out_cb, c);
+            if (drc == -4) c->decode_aborted = 1;
+            else if (drc < 0) c->decode_errors++;
+        } else {
+            c->aus_undecoded++;
+        }
+
+        printf("{\"mode\":\"decode\",\"event\":\"au\",\"fi\":%u,\"len\":%lu,"
+               "\"sha1\":\"%s\",\"keyframe\":%d,\"contiguous\":%d,"
+               "\"ts\":%u,\"decode_rc\":%d,\"frames_out\":%llu}\n",
+               (unsigned)(s->fi % 100000000u),
+               (unsigned long)(s->len % 100000000ul), hex,
+               s->kf ? 1 : 0, s->contig ? 1 : 0,
+               (unsigned)(s->ts % 100000000u), drc,
+               (unsigned long long)(c->frames_out % 10000000000ull));
+
+        c->aus++;
+        if (s->kf) c->key_aus++;
+        if (c->au_dir && c->au_dir[0]) {
+            char path[1200];
+            FILE *fp;
+            int n = snprintf(path, sizeof path, "%s/au_%05u_%c.264",
+                             c->au_dir, (unsigned)(s->fi % 100000u),
+                             s->kf ? 'k' : 'p');
+            if (n <= 0 || (size_t)n >= sizeof path) { c->au_write_errors++; }
+            else {
+                fp = fopen(path, "wb");
+                if (!fp) c->au_write_errors++;
+                else {
+                    if (s->len && fwrite(bytes, 1, s->len, fp) != s->len)
+                        c->au_write_errors++;
+                    fclose(fp);
+                }
+            }
+        }
+    }
+}
+
+static int run_decode(uint16_t port, const char *bind_ip, long seconds,
+                      const char *srtp_spec, long vps_arg,
+                      const char *au_dir, long expect_frames,
+                      const char *log_dir)
+{
+    static uint8_t pkt[KN_SOCK_RECV_BUF];
+    static dec_ctx c;
+    kn_rx_video v;
+    kn_rx_mem mem;
+    kn_rx_video_config cfg;
+    kn_rx_srtp_session sess;
+    kn_sock_udp sock;
+    kn_ring ring;
+    uint8_t *arena = NULL;
+    char err[128], ringpath[640], decerr[128];
+    uint32_t vps, shard_len, pkt_cap, scratch_len, slots;
+    size_t arena_need, off;
+    uint64_t t_start_ms, next_poll_ms, now_ms, t_last_stats_ms;
+    unsigned long long datagrams = 0;
+    unsigned consecutive_errors = 0;
+    int profile = KN_RX_SRTP_NONE, ring_ok, rc, exit_code, have_sess = 0;
+    size_t tag_len = 0, key_len = 0, salt_len = 0;
+    uint8_t key[32], salt[14];
+    const char *stop_reason = "time";
+    kn_log_config lcfg;
+
+    knv_stop_install();
+    memset(&c, 0, sizeof c);
+    c.au_dir = au_dir;
+    for (slots = 0; slots < DEC_QUEUE_CAP; ++slots)
+        c.qbytes[slots] = g_dec_qbytes[slots];
+    if (au_dir && au_dir[0]) {
+#ifdef _WIN32
+        (void)_mkdir(au_dir);
+#else
+        (void)mkdir(au_dir, 0777);
+#endif
+    }
+    memset(&lcfg, 0, sizeof lcfg);
+    lcfg.log_dir = log_dir;
+    (void)kn_log_init(&lcfg);
+    kn_diag_set_selftest_provider(kn_selftest_render_relevant);
+    (void)kn_diag_install(log_dir);
+
+    if (srtp_spec && srtp_spec[0]) {
+        if (rp_parse_srtp(srtp_spec, &profile, &tag_len, key, &key_len,
+                          salt, &salt_len) != 0) {
+            printf("{\"mode\":\"decode\",\"error\":\"bad_srtp_spec\"}\n");
+            fflush(stdout);
+            kn_log_shutdown();
+            return 2;
+        }
+    }
+
+    /* --- socket --- */
+    err[0] = '\0';
+    rc = kn_sock_udp_open(&sock, bind_ip, port, KN_SOCK_RCVBUF_DEFAULT,
+                          err, sizeof err);
+    if (rc != KN_SOCK_OK) {
+        printf("{\"mode\":\"decode\",\"error\":\"socket_open\",\"rc\":%d,"
+               "\"errno\":%d,\"detail\":\"%.100s\"}\n", rc, sock.last_error,
+               err);
+        fflush(stdout);
+        kn_log_on_failure("session.decode", "E_DECODE_SOCKET",
+                          "UDP socket open/bind failed", err);
+        kn_log_shutdown();
+        return 1;
+    }
+    ring_ok = (kn_ring_init(&ring, 64u * 1024u, 1312) == 0);
+
+    /* --- pipeline arena (replay's sizing with the LIVE vps; the capture
+     * scan does not exist here — vps comes from the SDP/session, default
+     * 1280 = nvst.rs:216) --- */
+    vps = vps_arg > 0 ? (uint32_t)vps_arg : KN_RX_DEFAULT_VIDEO_PACKET_SIZE;
+    if (vps < KN_RX_MIN_VIDEO_PACKET_SIZE) vps = KN_RX_MIN_VIDEO_PACKET_SIZE;
+    if (vps > KN_RX_MAX_VIDEO_PACKET_SIZE) vps = KN_RX_MAX_VIDEO_PACKET_SIZE;
+    shard_len = vps + KN_RX_FEC_HEADER_ALLOWANCE;
+    pkt_cap = shard_len + 64u;               /* wire datagrams carry the
+                                                SRTP tag; unprotect works
+                                                in place on this buffer */
+    pkt_cap = (pkt_cap + 7u) & ~7u;          /* 8-byte arena alignment */
+
+    memset(&cfg, 0, sizeof cfg);
+    cfg.codec = KN_GS_CODEC_H264;
+    cfg.reorder_window_packets = KN_RX_DEFAULT_REORDER_WINDOW;
+    cfg.max_access_unit_bytes = KN_GS_DEFAULT_MAX_ACCESS_UNIT;
+    cfg.video_packet_size = vps;
+    cfg.timeout_ms = KN_RX_DEFAULT_TIMEOUT_MS;   /* LIVE: the real 5 s */
+    memset(&mem, 0, sizeof mem);
+    {
+        uint32_t fec_blocks = 32u, fec_shards = 64u;
+        size_t pool_budget = 32u * 1024u * 1024u;   /* 2 GB machine (R11) */
+        slots = cfg.reorder_window_packets + 1u + fec_blocks * fec_shards +
+                16u;
+        if ((size_t)slots * pkt_cap > pool_budget) {
+            uint32_t fit = (uint32_t)(pool_budget / (pkt_cap ? pkt_cap : 1));
+            if (fit < cfg.reorder_window_packets + 2u) {
+                printf("{\"mode\":\"decode\",\"error\":\"pool_budget\","
+                       "\"pkt_cap\":%u}\n", (unsigned)pkt_cap);
+                fflush(stdout);
+                if (ring_ok) kn_ring_free(&ring);
+                kn_sock_udp_close(&sock);
+                kn_log_shutdown();
+                return 3;
+            }
+            slots = fit;
+        }
+        scratch_len = ((uint32_t)kn_fec_scratch_bytes(fec_shards,
+                                                      shard_len) +
+                       4096u + 7u) & ~7u;
+        arena_need = (size_t)slots * sizeof(kn_rx_pkt)
+                   + (size_t)slots * pkt_cap
+                   + (size_t)(cfg.reorder_window_packets + 1u) *
+                         sizeof(kn_rx_reorder_entry)
+                   + (size_t)fec_blocks * sizeof(kn_rx_fec_block)
+                   + (size_t)fec_blocks * fec_shards * sizeof(uint32_t)
+                   + scratch_len
+                   + (size_t)KN_RX_NACK_MAX_PENDING * sizeof(kn_rx_nack_entry)
+                   + cfg.max_access_unit_bytes
+                   + 16u * sizeof(kn_rx_event);
+        arena = (uint8_t *)malloc(arena_need);
+        if (!arena) {
+            printf("{\"mode\":\"decode\",\"error\":\"arena_alloc\","
+                   "\"need\":%lu}\n",
+                   (unsigned long)(arena_need % 1000000000ul));
+            fflush(stdout);
+            if (ring_ok) kn_ring_free(&ring);
+            kn_sock_udp_close(&sock);
+            kn_log_shutdown();
+            return 3;
+        }
+        off = 0;
+        mem.pool_meta = (kn_rx_pkt *)(void *)(arena + off);
+        off += (size_t)slots * sizeof(kn_rx_pkt);
+        mem.pool_bytes = arena + off;
+        off += (size_t)slots * pkt_cap;
+        mem.pool_slots = slots;
+        mem.pool_pkt_cap = pkt_cap;
+        mem.reorder_map = (kn_rx_reorder_entry *)(void *)(arena + off);
+        off += (size_t)(cfg.reorder_window_packets + 1u) *
+               sizeof(kn_rx_reorder_entry);
+        mem.fec_blocks = (kn_rx_fec_block *)(void *)(arena + off);
+        off += (size_t)fec_blocks * sizeof(kn_rx_fec_block);
+        mem.fec_shard_arena = (uint32_t *)(void *)(arena + off);
+        off += (size_t)fec_blocks * fec_shards * sizeof(uint32_t);
+        mem.fec_max_blocks = fec_blocks;
+        mem.fec_max_shards = fec_shards;
+        mem.fec_scratch = arena + off;
+        off += scratch_len;
+        mem.fec_scratch_len = scratch_len;
+        mem.nack_table = (kn_rx_nack_entry *)(void *)(arena + off);
+        off += (size_t)KN_RX_NACK_MAX_PENDING * sizeof(kn_rx_nack_entry);
+        mem.nack_capacity = KN_RX_NACK_MAX_PENDING;
+        mem.au_buffer = arena + off;
+        off += cfg.max_access_unit_bytes;
+        mem.au_buffer_capacity = cfg.max_access_unit_bytes;
+        mem.events = (kn_rx_event *)(void *)(arena + off);
+        mem.events_capacity = 16;
+    }
+
+    now_ms = kn_sock_now_ms();
+    if (kn_rx_video_init(&v, &cfg, &mem, now_ms) != KN_RX_OK) {
+        printf("{\"mode\":\"decode\",\"error\":\"pipeline_init\"}\n");
+        fflush(stdout);
+        free(arena);
+        if (ring_ok) kn_ring_free(&ring);
+        kn_sock_udp_close(&sock);
+        kn_log_shutdown();
+        return 3;
+    }
+    c.v = &v;
+    rc = kn_rx_srtp_session_init(&sess, profile, key_len ? key : NULL,
+                                 key_len, salt_len ? salt : NULL, salt_len,
+                                 tag_len);
+    if (rc != KN_RX_OK) {
+        printf("{\"mode\":\"decode\",\"error\":\"srtp_session\",\"rc\":%d,"
+               "\"backend_gcm\":%d,\"backend_256\":%d}\n", rc,
+               kn_srtp_backend_gcm(), kn_srtp_backend_256());
+        fflush(stdout);
+        free(arena);
+        if (ring_ok) kn_ring_free(&ring);
+        kn_sock_udp_close(&sock);
+        kn_log_shutdown();
+        return 3;
+    }
+    kn_rx_video_set_srtp(&v, &sess);
+    have_sess = 1;
+    (void)have_sess;
+
+    /* --- decoder session (stub builds run pipeline-only, honestly) --- */
+    c.decode_available = kn_decode_available();
+    decerr[0] = '\0';
+    if (c.decode_available) {
+        c.stream = kn_decode_stream_open(1, decerr, sizeof decerr);
+        if (!c.stream) c.decode_available = 0;   /* fall back, report why */
+    }
+
+    {
+        kn_lctx b;
+        char iptext[16];
+        kn_lctx_init(&b, KN_CH_TRANSPORT, KN_INFO, "decode_begin");
+        kn_lctx_str(&b, "bind", kn_sock_ipv4_text(sock.local_addr, iptext));
+        kn_lctx_i64(&b, "port", (long long)kn_sock_udp_port(&sock));
+        kn_lctx_i64(&b, "seconds", (long long)seconds);
+        kn_lctx_i64(&b, "vps", (long long)vps);
+        kn_lctx_i64(&b, "srtp_profile", (long long)profile);
+        kn_lctx_i64(&b, "rcvbuf_act", (long long)sock.rcvbuf_actual);
+        kn_lctx_str(&b, "decoder", c.stream ? kn_decode_backend()
+                                            : (decerr[0] ? decerr
+                                                         : "unavailable"));
+        kn_log_emit(&b);
+    }
+    printf("{\"mode\":\"decode\",\"event\":\"begin\",\"port\":%u,\"vps\":%u,"
+           "\"srtp_profile\":%d,\"rcvbuf_actual\":%u,\"decoder\":\"%.96s\"}\n",
+           (unsigned)kn_sock_udp_port(&sock), (unsigned)vps, profile,
+           sock.rcvbuf_actual,
+           c.stream ? kn_decode_backend() : "pipeline-only");
+    fflush(stdout);
+
+    /* --- receive loop --- */
+    t_start_ms = kn_sock_now_ms();
+    t_last_stats_ms = t_start_ms;
+    next_poll_ms = t_start_ms;
+    while (!g_knv_stop) {
+        size_t plen = 0;
+        now_ms = kn_sock_now_ms();
+        if (seconds > 0 && now_ms - t_start_ms >= (uint64_t)seconds * 1000u) {
+            stop_reason = "time";
+            break;
+        }
+        if (expect_frames > 0 &&
+            (long long)((c.stream && !c.decode_aborted) ? c.frames_out
+                                                        : c.aus) >=
+                expect_frames) {
+            stop_reason = "expect_frames";
+            break;
+        }
+        rc = kn_sock_udp_recv(&sock, pkt, sizeof pkt,
+                              KN_SOCK_POLL_INTERVAL_MS, &plen, NULL);
+        c.now_ms = kn_sock_now_ms();
+        if (rc == 1) {
+            consecutive_errors = 0;
+            datagrams++;
+            if (ring_ok)
+                kn_ring_append(&ring, kn_sock_now_us(),
+                               knv_rtp_seq_meta(pkt, plen), pkt, plen);
+            (void)kn_rx_video_process_datagram(&v, pkt, plen, c.now_ms,
+                                               dec_frame_in_cb, &c);
+            dec_drain_events(&c);
+            dec_take_kf(&c);
+            dec_drain_queue(&c);
+        } else if (rc < 0) {
+            consecutive_errors++;
+            if (consecutive_errors <= 5) {
+                printf("{\"mode\":\"decode\",\"error\":\"recv\",\"rc\":%d,"
+                       "\"errno\":%d}\n", rc, sock.last_error);
+                fflush(stdout);
+            }
+            if (consecutive_errors >= 100u) {
+                stop_reason = "socket_error";
+                break;
+            }
+        }
+        now_ms = kn_sock_now_ms();
+        if (now_ms >= next_poll_ms) {
+            c.now_ms = now_ms;
+            (void)kn_rx_video_poll(&v, now_ms, dec_frame_in_cb, &c);
+            dec_drain_events(&c);
+            dec_take_kf(&c);
+            dec_drain_queue(&c);
+            next_poll_ms = now_ms + KN_SOCK_POLL_INTERVAL_MS;
+        }
+        if (now_ms - t_last_stats_ms >= 1000u) {
+            kn_lctx p;
+            t_last_stats_ms = now_ms;
+            kn_lctx_init(&p, KN_CH_TRANSPORT, KN_INFO, "decode_stats");
+            kn_lctx_i64(&p, "datagrams", (long long)(datagrams % 10000000000ll));
+            kn_lctx_i64(&p, "aus", (long long)(c.aus % 1000000000ll));
+            kn_lctx_i64(&p, "frames_out",
+                        (long long)(c.frames_out % 1000000000ll));
+            kn_lctx_i64(&p, "fec_repaired",
+                        (long long)(v.fec_repaired_packets % 1000000000ll));
+            kn_lctx_i64(&p, "gaps",
+                        (long long)(v.packet_gap_recoveries % 1000000000ll));
+            kn_lctx_i64(&p, "withheld",
+                        (long long)(v.withheld_frames % 1000000000ll));
+            kn_lctx_i64(&p, "q_depth", (long long)c.q_count);
+            kn_lctx_i64(&p, "q_overflows",
+                        (long long)(c.q_overflows % 1000000000ll));
+            kn_log_emit(&p);
+        }
+    }
+    if (g_knv_stop) stop_reason = "signal";
+
+    /* --- end-of-stream decoder drain + summary --- */
+    if (c.stream && !c.decode_aborted) {
+        rc = kn_decode_stream_flush(c.stream, dec_frame_out_cb, &c);
+        if (rc < 0 && rc != -4) c.decode_errors++;
+    }
+    {
+        kn_decode_stats dst;
+        char drops[512];
+        size_t doff = 0;
+        int d;
+        kn_decode_stream_stats(c.stream, &dst);
+        if (dst.decode_ms_max > c.worst_decode_ms)
+            c.worst_decode_ms = dst.decode_ms_max;
+        for (d = 1; d < 24; ++d) {
+            if (!v.drop_counters[d]) continue;
+            if (doff + 48 < sizeof drops)
+                doff += (size_t)snprintf(drops + doff, sizeof drops - doff,
+                                         "%s\"%d\":%llu", doff ? "," : "",
+                                         d,
+                                         (unsigned long long)
+                                         (v.drop_counters[d] %
+                                          1000000000ull));
+        }
+        if (doff >= sizeof drops) doff = sizeof drops - 1;
+        drops[doff] = '\0';
+        printf("{\"mode\":\"decode\",\"summary\":{\"port\":%u,"
+               "\"seconds_budget\":%ld,\"stop_reason\":\"%s\","
+               "\"datagrams\":%llu,\"authenticated\":%llu,"
+               "\"aus\":%llu,\"frames\":%llu,\"keyframes\":%llu,"
+               "\"frames_decoded\":%llu,\"frames_failed\":%d,"
+               "\"decode_errors\":%llu,\"aus_undecoded\":%llu,"
+               "\"decode_aborted\":%d,\"worst_decode_ms\":%lld,"
+               "\"q_overflows\":%llu,\"fec_repaired\":%llu,\"stale\":%llu,"
+               "\"gaps\":%llu,\"withheld\":%llu,\"kf_requests\":%llu,"
+               "\"retransmits\":%llu,\"replay_rejected\":%llu,"
+               "\"recv_timeouts\":%llu,\"recv_errors\":%llu,"
+               "\"ev_overflow\":%u,\"event_lines_capped\":%llu,"
+               "\"au_write_errors\":%llu,\"vps\":%u,\"srtp_profile\":%d,"
+               "\"rx_state\":%d,\"decoder\":\"%.64s\",\"video\":\"%dx%d\","
+               "\"wall_ms\":%llu,\"drops\":{%s}}}\n",
+               (unsigned)kn_sock_udp_port(&sock), seconds, stop_reason,
+               datagrams % 10000000000ull,
+               (unsigned long long)(v.authenticated_packets % 10000000000ull),
+               c.aus % 10000000000ull, c.aus % 10000000000ull,
+               c.key_aus % 10000000000ull,
+               c.frames_out % 10000000000ull, dst.frames_failed,
+               c.decode_errors % 1000000000ull,
+               c.aus_undecoded % 1000000000ull,
+               c.decode_aborted, c.worst_decode_ms % 1000000ll,
+               c.q_overflows % 1000000000ull,
+               (unsigned long long)(v.fec_repaired_packets % 1000000000ull),
+               (unsigned long long)(v.stale_packets % 1000000000ull),
+               (unsigned long long)(v.packet_gap_recoveries % 1000000000ull),
+               (unsigned long long)(v.withheld_frames % 1000000000ull),
+               (unsigned long long)(v.keyframe_requests % 1000000000ull),
+               (unsigned long long)(v.recovered_retransmissions % 1000000000ull),
+               (unsigned long long)(v.replay_rejections % 1000000000ull),
+               (unsigned long long)(sock.recv_timeouts % 10000000000ull),
+               (unsigned long long)(sock.recv_errors % 1000000000ull),
+               (unsigned)(v.ev_overflow % 1000000u),
+               c.event_lines_capped % 1000000000ull,
+               c.au_write_errors % 1000000000ull,
+               (unsigned)(vps % 100000000u), profile, v.state,
+               c.stream ? kn_decode_backend() : "pipeline-only",
+               c.last_w % 100000, c.last_h % 100000,
+               (unsigned long long)((kn_sock_now_ms() - t_start_ms) %
+                                    1000000000ull),
+               drops);
+        fflush(stdout);
+    }
+
+    {
+        long long produced = (c.stream && !c.decode_aborted)
+                                 ? (long long)c.frames_out
+                                 : (long long)c.aus;
+        exit_code = (produced > 0 && c.au_write_errors == 0 &&
+                     strcmp(stop_reason, "socket_error") != 0) ? 0 : 1;
+        if (expect_frames > 0 && produced < expect_frames)
+            exit_code = 1;
+    }
+    if (exit_code != 0) {
+        if (ring_ok &&
+            snprintf(ringpath, sizeof ringpath, "%s/wire_decode.log",
+                     log_dir) < (int)sizeof ringpath)
+            (void)kn_ring_dump(&ring, ringpath);
+        kn_log_on_failure("session.decode",
+                          datagrams == 0 ? "E_DECODE_NO_DATA"
+                                         : "E_DECODE_NO_FRAMES",
+                          datagrams == 0
+                              ? "no datagrams arrived (wrong port? sender "
+                                "down? firewall?)"
+                              : "datagrams arrived but no access unit "
+                                "completed (check the drops map + rx events)",
+                          "inspect the summary JSON and the rx event lines; "
+                          "the wire mirror is in the log dir; rerun with "
+                          "tools/send_rx_capture.py for a known-good source");
+    } else {
+        kn_lctx e;
+        kn_lctx_init(&e, KN_CH_TRANSPORT, KN_INFO, "decode_end");
+        kn_lctx_i64(&e, "datagrams", (long long)(datagrams % 10000000000ll));
+        kn_lctx_i64(&e, "aus", (long long)(c.aus % 10000000000ll));
+        kn_lctx_i64(&e, "frames_out",
+                    (long long)(c.frames_out % 10000000000ll));
+        kn_lctx_str(&e, "stop_reason", stop_reason);
+        kn_log_emit(&e);
+    }
+
+    kn_decode_stream_close(c.stream);
+    c.stream = NULL;
+    if (ring_ok) kn_ring_free(&ring);
+    kn_sock_udp_close(&sock);
+    free(arena);
+    kn_log_shutdown();
+    return exit_code;
+}
+
 static int print_version(void)
 {
     static char build[4096];
@@ -1172,6 +2068,13 @@ int main(int argc, char **argv)
     long replay_vps = 0;
     int loopback_seconds = 600;           /* G1 default: 10 minutes */
     int no_audio = 0;
+    int capture = 0, decode = 0;
+    long cap_port = 4798, dec_port = 4798;
+    long cap_seconds = 30, dec_seconds = 30;
+    long dec_vps = 0, dec_expect = 0;
+    const char *cap_bind = NULL, *dec_bind = NULL;
+    const char *cap_out = "gs_capture.hex", *dec_au_dir = NULL;
+    const char *dec_srtp = NULL;
     int diagnostics = 0, version = 0, list = 0, i;
 
     for (i = 1; i < argc; ++i) {
@@ -1193,11 +2096,40 @@ int main(int argc, char **argv)
             if (v < 1 || v > 86400) { usage(); return 2; }
             loopback_seconds = (int)v;
         }
+        else if (strcmp(a, "--capture") == 0) capture = 1;
+        else if (strncmp(a, "--capture-port=", 15) == 0)
+            cap_port = strtol(a + 15, NULL, 10);
+        else if (strncmp(a, "--capture-bind=", 15) == 0) cap_bind = a + 15;
+        else if (strncmp(a, "--capture-out=", 14) == 0) cap_out = a + 14;
+        else if (strncmp(a, "--capture-seconds=", 18) == 0)
+            cap_seconds = strtol(a + 18, NULL, 10);
+        else if (strcmp(a, "--decode") == 0) decode = 1;
+        else if (strncmp(a, "--decode-port=", 14) == 0)
+            dec_port = strtol(a + 14, NULL, 10);
+        else if (strncmp(a, "--decode-bind=", 14) == 0) dec_bind = a + 14;
+        else if (strncmp(a, "--decode-seconds=", 17) == 0)
+            dec_seconds = strtol(a + 17, NULL, 10);
+        else if (strncmp(a, "--decode-srtp=", 14) == 0) dec_srtp = a + 14;
+        else if (strncmp(a, "--decode-vps=", 13) == 0)
+            dec_vps = strtol(a + 13, NULL, 10);
+        else if (strncmp(a, "--decode-au-dir=", 16) == 0)
+            dec_au_dir = a + 16;
+        else if (strncmp(a, "--decode-expect-frames=", 23) == 0)
+            dec_expect = strtol(a + 23, NULL, 10);
         else if (strcmp(a, "--diagnostics") == 0) diagnostics = 1;
         else if (strcmp(a, "--version") == 0) version = 1;
         else if (strcmp(a, "--list-selftests") == 0) list = 1;
         else if (strncmp(a, "--log-dir=", 10) == 0) log_dir = a + 10;
         else { usage(); return 2; }
+    }
+
+    if (capture || decode) {
+        if (cap_port < 1 || cap_port > 65535 ||
+            dec_port < 1 || dec_port > 65535 ||
+            cap_seconds < 0 || cap_seconds > 86400 ||
+            dec_seconds < 0 || dec_seconds > 86400 ||
+            dec_vps < 0 || dec_vps > 65519 ||
+            dec_expect < 0 || dec_expect > 100000000) { usage(); return 2; }
     }
 
     if (list) return print_registry();
@@ -1208,6 +2140,13 @@ int main(int argc, char **argv)
                           log_dir);
     if (loopback) return run_loopback(loopback, loopback_seconds, no_audio,
                                       log_dir);
+    if (capture)
+        return run_capture((uint16_t)cap_port, cap_bind, cap_out,
+                           cap_seconds, log_dir);
+    if (decode)
+        return run_decode((uint16_t)dec_port, dec_bind, dec_seconds,
+                          dec_srtp, dec_vps, dec_au_dir, dec_expect,
+                          log_dir);
     if (diagnostics) return run_diagnostics(log_dir);
     usage();
     return 2;

@@ -670,6 +670,13 @@ const kn_rx_event *kn_rx_video_events(const kn_rx_video *v, uint32_t *n);
  * when it emits IDR 0x0302 / RTCP PLI). */
 int kn_rx_video_take_keyframe_request(kn_rx_video *v);
 
+/* SET the keyframe-request flag from outside the pipeline (stage-2 decode
+ * glue: encoded-queue overflow => the decoder never saw a frame later
+ * packets reference => request an IDR; analiza/04 §5 queue-overflow row).
+ * Same flag/counter discipline as the internal loss paths; consumed by
+ * kn_rx_video_take_keyframe_request. NULL-safe no-op. */
+void kn_rx_video_request_keyframe(kn_rx_video *v);
+
 /* Reset media state only (reset_media_state, nvst.rs:4946-4961) — the
  * lifecycle calls use it; exposed for capture-mode stream switches. */
 void kn_rx_video_reset_media(kn_rx_video *v, uint64_t now_ms);

@@ -27,6 +27,7 @@
 #include "kn/kn_gs.h"
 #include "kn/kn_net.h"
 #include "kn/kn_sha1.h"
+#include "kn/kn_sock.h"
 #include "kn/knfec.h"
 #include "kn/knsrtp.h"
 
@@ -1292,6 +1293,96 @@ static void st_net_skip_posix(kn_st_result *r, const char *what)
     snprintf(r->evidence, sizeof r->evidence, "{\"platform\":\"posix-host\"}");
 }
 
+/* sock.loopback — the stage-2 UDP layer, proven from the SHIPPED binary
+ * (round XVII). Portable on purpose: Win32 winsock and POSIX both run the
+ * real battery, so the sandbox rehearsal and the target evidence are the
+ * same code path shape; a target-only failure is a Winsock finding.
+ * Gated: without loopback UDP, stage 2 cannot run at all.
+ * Bounded: a 64-datagram burst + one 50 ms timeout — worst case << 1 s. */
+static int st_sock_loopback(kn_st_result *r)
+{
+    st_tally t;
+    kn_sock_udp a, b;
+    static uint8_t pkt[512], in[2048];
+    char err[128];
+    size_t n = 0;
+    int i, rc, got = 0, mismatch = 0, both_open = 0;
+    uint64_t t0;
+    long burst_ms = 0, to_ms = 0;
+
+    memset(&t, 0, sizeof t);
+    memset(&a, 0, sizeof a);
+    memset(&b, 0, sizeof b);
+    err[0] = '\0';
+    rc = kn_sock_udp_open(&a, "127.0.0.1", 0, 256u * 1024u, err, sizeof err);
+    STV(t, rc == KN_SOCK_OK, "socket A opens (loopback, ephemeral)");
+    rc = kn_sock_udp_open(&b, "127.0.0.1", 0, 0, err, sizeof err);
+    STV(t, rc == KN_SOCK_OK, "socket B opens");
+    both_open = a.is_open && b.is_open;
+    if (both_open) {
+        STV(t, kn_sock_udp_port(&a) != 0 && kn_sock_udp_port(&b) != 0,
+            "ephemeral ports assigned");
+        STV(t, a.rcvbuf_actual >= 64u * 1024u,
+            "SO_RCVBUF applied (readback >= 64 KiB)");
+
+        t0 = kn_sock_now_ms();
+        for (i = 0; i < 64; ++i) {
+            size_t len = 1u + (size_t)(i * 13) % 512u, j;
+            for (j = 0; j < len; ++j) pkt[j] = (uint8_t)(i + j * 7u);
+            rc = kn_sock_udp_sendto(&b, 0x0100007Fu, kn_sock_udp_port(&a),
+                                    pkt, len);
+            if (rc != KN_SOCK_OK) { mismatch++; continue; }
+            rc = kn_sock_udp_recv(&a, in, sizeof in, 200, &n, NULL);
+            if (rc != 1 || n != len || memcmp(pkt, in, n) != 0) mismatch++;
+            else got++;
+        }
+        burst_ms = (long)(kn_sock_now_ms() - t0);
+        STV(t, got == 64 && mismatch == 0, "64-datagram burst byte-exact");
+        STV(t, a.recv_datagrams == 64 && b.send_datagrams == 64,
+            "socket counters exact");
+
+        t0 = kn_sock_now_ms();
+        rc = kn_sock_udp_recv(&a, in, sizeof in, 50, &n, NULL);
+        to_ms = (long)(kn_sock_now_ms() - t0);
+        STV(t, rc == 0 && n == 0, "idle recv times out honestly (rc 0)");
+        STV(t, to_ms >= 40 && to_ms <= 2000, "timeout honours the 50 ms wait");
+    }
+    kn_sock_udp_close(&a);
+    kn_sock_udp_close(&b);
+    rc = kn_sock_udp_recv(&a, in, sizeof in, 0, &n, NULL);
+    STV(t, rc == KN_SOCK_ERR_STATE, "closed socket refuses recv (ERR_STATE)");
+
+    r->checks = t.checks;
+    r->failures = t.failures;
+    if (t.failures == 0) {
+        r->status = KN_ST_OK;
+        snprintf(r->reason, sizeof r->reason,
+                 "UDP loopback OK: %d/64 datagrams byte-exact (burst %ld ms),"
+                 " timeout %ld ms, rcvbuf %u B applied (req %u B)",
+                 got % 1000, burst_ms % 100000, to_ms % 100000,
+                 (unsigned)(a.rcvbuf_actual % 100000000u),
+                 (unsigned)(a.rcvbuf_requested % 100000000u));
+    } else {
+        r->status = KN_ST_FAILED;
+        snprintf(r->reason, sizeof r->reason,
+                 "UDP loopback FAILED %d/%d checks (first: %.64s) — stage-2 "
+                 "transport is blocked", t.failures, t.checks, t.first_fail);
+    }
+    snprintf(r->evidence, sizeof r->evidence,
+             "{\"checks\":%d,\"failures\":%d,\"first_failure\":\"%.96s\","
+             "\"burst_got\":%d,\"burst_mismatch\":%d,\"burst_ms\":%ld,"
+             "\"timeout_ms\":%ld,\"rcvbuf_req\":%u,\"rcvbuf_act\":%u,"
+             "\"port_a\":%u,\"port_b\":%u}",
+             t.checks % 1000000, t.failures % 1000000, t.first_fail,
+             got % 1000, mismatch % 1000, burst_ms % 100000,
+             to_ms % 100000,
+             (unsigned)(a.rcvbuf_requested % 100000000u),
+             (unsigned)(a.rcvbuf_actual % 100000000u),
+             (unsigned)(a.local_port % 100000u),
+             (unsigned)(b.local_port % 100000u));
+    return 0;
+}
+
 static int st_net_dns(kn_st_result *r)
 {
     kn_net_dns d[K_NET_NVIDIA_N + 1];
@@ -1679,6 +1770,7 @@ static const struct {
     { "decode.synthetic", st_decode_synthetic },
     { "gs.parse",         st_gs_parse },
     { "rx.vectors",       st_rx_vectors },
+    { "sock.loopback",    st_sock_loopback },
     /* phase C — network, target machine only (REAL measurements; skipped
      * honestly on posix hosts). Implemented (round XV): no stubs remain. */
     { "net.dns",          st_net_dns },
@@ -1845,7 +1937,7 @@ size_t kn_selftest_render_relevant(const char *op, const char *code,
     kn_st_result results[K_REGISTRY_N];
     int n = 0, ran = 0;
     int want_fec = 0, want_srtp = 0, want_net = 0, want_clock = 0, want_console = 0;
-    int want_video = 0;
+    int want_video = 0, want_sock = 0;
 
     /* lowercase concat of op+code (bounded) */
     for (i = 0; op && op[i] && hn + 1 < sizeof hay; ++i)
@@ -1875,6 +1967,11 @@ size_t kn_selftest_render_relevant(const char *op, const char *code,
     if (hay_has(hay, "dns") || hay_has(hay, "tcp") || hay_has(hay, "tls") ||
         hay_has(hay, "net") || hay_has(hay, "http") || hay_has(hay, "wss"))
         want_net = 1;
+    /* stage-2 socket failures (session.capture/session.decode carry
+     * E_*_SOCKET / E_*_NO_DATA codes) re-prove the UDP layer itself */
+    if (hay_has(hay, "socket") || hay_has(hay, "udp") || hay_has(hay, "recv") ||
+        hay_has(hay, "bind") || hay_has(hay, "capture") || hay_has(hay, "decode"))
+        want_sock = 1;
     if (hay_has(hay, "clock") || hay_has(hay, "timer") || hay_has(hay, "jitter") ||
         hay_has(hay, "pacing"))
         want_clock = 1;
@@ -1882,7 +1979,7 @@ size_t kn_selftest_render_relevant(const char *op, const char *code,
         hay_has(hay, "ansi"))
         want_console = 1;
     if (!want_fec && !want_srtp && !want_net && !want_clock && !want_console &&
-        !want_video) {
+        !want_video && !want_sock) {
         want_fec = 1;             /* default: the two cheap offline proofs */
         want_srtp = 1;
     }
@@ -1900,6 +1997,7 @@ size_t kn_selftest_render_relevant(const char *op, const char *code,
             take = 1;
         if (want_net && (strncmp(nm, "net.", 4) == 0 || strcmp(nm, "tls.chain") == 0))
             take = 1;
+        if (want_sock && strcmp(nm, "sock.loopback") == 0) take = 1;
         if (want_clock && strcmp(nm, "clock.resolution") == 0) take = 1;
         if (want_console && strcmp(nm, "console.host") == 0) take = 1;
         if (take && kn_selftest_run(nm, &results[n]) == 0) { ++n; ++ran; }

@@ -858,6 +858,28 @@ static void test_error_paths(void)
         CHECK(kn_rx_video_events(NULL, &n) == NULL && n == 0,
               "events NULL video");
     }
+
+    /* round XVII: the external keyframe-request API (--decode's encoded
+     * queue overflow calls it; same flag/counter discipline as the
+     * internal loss paths — analiza/04 §5 queue-overflow row). */
+    {
+        uint64_t reqs0 = v.keyframe_requests;
+        CHECK(kn_rx_video_take_keyframe_request(&v) == 0,
+              "fresh pipeline has no pending keyframe request");
+        kn_rx_video_request_keyframe(&v);
+        CHECK(kn_rx_video_take_keyframe_request(&v) == 1,
+              "request_keyframe sets the flag (take returns 1)");
+        CHECK(kn_rx_video_take_keyframe_request(&v) == 0,
+              "take-and-clear contract (second take returns 0)");
+        kn_rx_video_request_keyframe(&v);
+        kn_rx_video_request_keyframe(&v);
+        CHECK(kn_rx_video_take_keyframe_request(&v) == 1,
+              "repeated requests collapse into one flag");
+        CHECK(v.keyframe_requests == reqs0 + 2,
+              "counter counts SETS, not repeats (internal discipline)");
+        kn_rx_video_request_keyframe(NULL);
+        CHECK(1, "request_keyframe(NULL) survives");
+    }
 }
 
 /* --------------------------------------------------------------- main */

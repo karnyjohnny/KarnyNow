@@ -2557,3 +2557,13 @@ int kn_rx_video_take_keyframe_request(kn_rx_video *v)
     v->keyframe_needed = 0;
     return had;
 }
+
+void kn_rx_video_request_keyframe(kn_rx_video *v)
+{
+    /* Public wrapper over the internal loss-path helper (same flag, same
+     * counter discipline): the stage-2 decode glue calls it when the
+     * encoded-frame queue overflows — analiza/04 §5 "encoded queue
+     * overflow -> clear the reference chain, request a keyframe". */
+    if (!v) return;
+    request_keyframe(v);
+}

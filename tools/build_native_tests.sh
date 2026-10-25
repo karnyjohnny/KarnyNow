@@ -17,7 +17,7 @@ KNCORE="streamer/src/knlog.c streamer/src/knring.c streamer/src/knfec.c \
     streamer/src/kn_diag.c streamer/src/kn_selftest.c \
     streamer/src/kn_decode.c streamer/src/kn_d3d.c streamer/src/kn_gs.c \
     streamer/src/kn_perf.c streamer/src/kn_audio.c streamer/src/kn_net.c \
-    streamer/src/kn_rx.c \
+    streamer/src/kn_rx.c streamer/src/kn_sock.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
 $CC $CFLAGS $KNCORE streamer/tests/test_knlog.c -o build/test_knlog -pthread -lm
 $CC $CFLAGS $KNCORE streamer/tests/test_knring.c -o build/test_knring -pthread -lm
@@ -33,6 +33,7 @@ $CC $CFLAGS streamer/src/kn_rx.c streamer/src/kn_gs.c streamer/src/knfec.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c \
     streamer/tests/test_knrx.c -o build/test_knrx
 $CC $CFLAGS streamer/src/kn_audio.c streamer/tests/test_knaudio.c -o build/test_knaudio -lm
+$CC $CFLAGS streamer/src/kn_sock.c streamer/tests/test_knsock.c -o build/test_knsock
 $CC $CFLAGS $KNCORE streamer/src/knvstd_main.c -o build/knvstd -pthread -lm
 
 echo "== kn_decode.c/kn_selftest.c against REAL FFmpeg headers (compile-only) =="
@@ -81,6 +82,10 @@ echo "== run test_knaudio =="
 rc12=0
 ./build/test_knaudio || rc12=$?
 
+echo "== run test_knsock =="
+rc14=0
+./build/test_knsock || rc14=$?
+
 echo "== knvstd smoke: --list-selftests + --selftest=fec.vectors =="
 rc9=0
 ./build/knvstd --list-selftests > knvstd_list.json || rc9=$?
@@ -115,10 +120,10 @@ rm -rf testlogs testlogs2 testring_dump.txt testdiag testst knvstd_testlogs \
 if [ $rc1 -eq 0 ] && [ $rc2 -eq 0 ] && [ $rc3 -eq 0 ] && [ $rc4 -eq 0 ] && \
    [ $rc5 -eq 0 ] && [ $rc6 -eq 0 ] && [ $rc7 -eq 0 ] && [ $rc8 -eq 0 ] && \
    [ $rc9 -eq 0 ] && [ $rc10 -eq 0 ] && [ $rcff -eq 0 ] && [ $rc11 -eq 0 ] && \
-   [ $rc12 -eq 0 ] && [ $rc13 -eq 0 ]; then
+   [ $rc12 -eq 0 ] && [ $rc13 -eq 0 ] && [ $rc14 -eq 0 ]; then
     echo "NATIVE TESTS PASS"
 else
-    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13)"
+    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14)"
     exit 1
 fi
 

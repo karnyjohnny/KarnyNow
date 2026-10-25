@@ -8,7 +8,8 @@
  *   - non-interactive and bounded in time (worst case ~1 s each; SHA-1 TEST3
  *                           hashes 1M bytes, clock.resolution sleeps ~50 ms)
  *
- * The §7.9 names plus the stage-2 addition (rx.vectors), by phase:
+ * The §7.9 names plus the stage-2 additions (rx.vectors, sock.loopback),
+ * by phase:
  *   A (offline, host-testable — IMPLEMENTED):
  *     fec.vectors     Cauchy RS encode/reconstruct against KAT vectors
  *                     (separates: our matrix vs a Vandermonde mistake)
@@ -32,6 +33,10 @@
  *                       pipeline scenarios re-run from the shipped binary
  *                       (separates: transport-pipeline bugs vs wire-format
  *                       bugs vs decoder bugs)
+ *     sock.loopback     stage-2 UDP layer (portable — REAL on Win32 and
+ *                       POSIX): loopback bind/burst/timeout/SO_RCVBUF
+ *                       (separates: socket-layer bugs vs pipeline bugs vs
+ *                       cloud-side problems)
  *   C (network, target machine only — IMPLEMENTED, round XV):
  *     net.dns / net.tcp443   resolution + egress to the real GFN endpoints
  *                            (+ one non-NVIDIA baseline per layer, so

@@ -86,6 +86,51 @@ int kn_decode_h264_mem(const uint8_t *data, size_t len, int to_nv12,
                        kn_decode_frame_fn cb, void *userdata,
                        kn_decode_stats *stats);
 
+/* ------------------------------------------- persistent stream session
+ * Stage-2 --decode glue: kn_rx delivers ONE COMPLETE Annex-B access unit
+ * at a time, but kn_decode_h264_mem is one-shot (parser + codec context
+ * per call) — feeding live AUs through it would destroy inter-frame
+ * references (every P-frame after a session restart is undecodable).
+ * A stream session keeps the AVCodecContext alive across pushes.
+ *
+ * Contract:
+ *   - each push carries exactly one AU, start codes included (what the
+ *     kn_rx frame callback hands over); NO parser is involved, so the
+ *     round-IX parser-flush landmine does not exist on this path — the
+ *     end-of-stream decoder drain is kn_decode_stream_flush().
+ *   - a corrupt AU increments stats.frames_failed and the session
+ *     CONTINUES (a live stream has garbage in it; the h264 decoder is
+ *     error-resilient — same contract as the one-shot path).
+ *   - the frame callback semantics are identical (NV12 or Y-plane,
+ *     valid only during the call, non-zero return aborts the session).
+ * Heap-based by design (kn_decode is NOT a zero-allocation module — the
+ * FFmpeg objects own their memory): open returns NULL on failure. */
+typedef struct kn_decode_stream kn_decode_stream;
+
+kn_decode_stream *kn_decode_stream_open(int to_nv12, char *err, size_t errsz);
+
+/* Push one AU. rtp_ts: the 90 kHz RTP timestamp (becomes pkt pts/dts;
+ * 0 is legal — nothing downstream consumes pts yet). Returns the number
+ * of frames delivered by this push (>= 0), or:
+ *   -1 bad args / stub build        -2 AU larger than KN_DECODE_MAX_FILE
+ *   -3 session fatal (allocation)   -4 callback aborted (sticky: later
+ * pushes keep returning -4 without decoding; stats stay readable) */
+int kn_decode_stream_push(kn_decode_stream *s, const uint8_t *au, size_t len,
+                          uint32_t rtp_ts, kn_decode_frame_fn cb, void *ud);
+
+/* End-of-stream decoder drain (releases frames held for reorder). Returns
+ * frames delivered (>= 0) or the same negative codes as push. Idempotent:
+ * a second flush delivers 0. */
+int kn_decode_stream_flush(kn_decode_stream *s, kn_decode_frame_fn cb,
+                           void *ud);
+
+/* Cumulative stats since open (same struct as the one-shot path; wall_ms
+ * and cpu_ms measure the WHOLE session so far, decode_ms_max the worst
+ * single frame delivery). NULL-safe (zeroes out). */
+void kn_decode_stream_stats(const kn_decode_stream *s, kn_decode_stats *out);
+
+void kn_decode_stream_close(kn_decode_stream *s);   /* NULL-safe */
+
 #ifdef __cplusplus
 }
 #endif

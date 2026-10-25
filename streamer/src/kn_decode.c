@@ -379,6 +379,153 @@ int kn_decode_h264_file(const char *path, int to_nv12,
     return rc;
 }
 
+/* ------------------------------------------- persistent stream session */
+
+struct kn_decode_stream {
+    AVCodecContext *ctx;
+    AVFrame        *frame;
+    AVPacket       *pkt;
+    kd_ctx          k;          /* cb/sws/nv12 state (shared with kd_run) */
+    uint8_t        *inbuf;      /* padded AU staging, grow-only */
+    size_t          inbuf_cap;  /* usable bytes (excl. padding) */
+    int             to_nv12;
+    int             aborted;    /* callback asked to stop (sticky -4) */
+    int             fatal;      /* allocation failure (sticky -3) */
+    long long       t0, cpu0, worst;
+    kn_decode_stats stats;      /* cumulative; wall/cpu filled on query */
+};
+
+static void kd_stream_err(char *err, size_t errsz, const char *msg)
+{
+    if (err && errsz) snprintf(err, errsz, "%s", msg);
+}
+
+kn_decode_stream *kn_decode_stream_open(int to_nv12, char *err, size_t errsz)
+{
+    kn_decode_stream *s;
+    const AVCodec *codec;
+
+    s = (kn_decode_stream *)calloc(1, sizeof *s);
+    if (!s) { kd_stream_err(err, errsz, "calloc failed"); return NULL; }
+    s->to_nv12 = to_nv12;
+    av_log_set_callback(kd_av_log);
+    codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    if (!codec) { kd_stream_err(err, errsz, "no h264 decoder"); goto fail; }
+    s->ctx = avcodec_alloc_context3(codec);
+    if (!s->ctx) { kd_stream_err(err, errsz, "ctx alloc failed"); goto fail; }
+    s->ctx->thread_count = 1;            /* D4: measured faster on 2C Merom */
+    s->ctx->thread_type = 0;             /* no frame/slice threading */
+    if (avcodec_open2(s->ctx, codec, NULL) < 0) {
+        kd_stream_err(err, errsz, "avcodec_open2 failed");
+        goto fail;
+    }
+    s->frame = av_frame_alloc();
+    s->pkt   = av_packet_alloc();
+    s->k.nv  = av_frame_alloc();
+    if (!s->frame || !s->pkt || !s->k.nv) {
+        kd_stream_err(err, errsz, "frame/pkt alloc failed");
+        goto fail;
+    }
+    s->t0   = kd_mono_ms();
+    s->cpu0 = kd_cpu_ms();
+    return s;
+
+fail:
+    kn_decode_stream_close(s);
+    return NULL;
+}
+
+/* Ensure inbuf holds len usable bytes + the FFmpeg padding. Grow-only. */
+static int kd_stream_reserve(kn_decode_stream *s, size_t len)
+{
+    uint8_t *nb;
+    if (len <= s->inbuf_cap) return 0;
+    nb = (uint8_t *)av_realloc(s->inbuf, len + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!nb) return -1;
+    s->inbuf = nb;
+    s->inbuf_cap = len;
+    return 0;
+}
+
+int kn_decode_stream_push(kn_decode_stream *s, const uint8_t *au, size_t len,
+                          uint32_t rtp_ts, kn_decode_frame_fn cb, void *ud)
+{
+    int before;
+
+    if (!s || !au || len == 0) return -1;
+    if (s->aborted) return -4;
+    if (s->fatal) return -3;
+    if (len > KN_DECODE_MAX_FILE) return -2;
+    if (kd_stream_reserve(s, len) != 0) { s->fatal = 1; return -3; }
+
+    memcpy(s->inbuf, au, len);
+    memset(s->inbuf + len, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    s->pkt->data = s->inbuf;
+    s->pkt->size = (int)len;
+    s->pkt->pts  = (int64_t)rtp_ts;      /* 90 kHz; nobody consumes pts yet */
+    s->pkt->dts  = (int64_t)rtp_ts;
+    s->k.cb = cb;
+    s->k.ud = ud;
+
+    before = s->stats.frames_decoded;
+    if (kd_send_drain(s->ctx, s->pkt, s->frame, &s->k, s->to_nv12,
+                      &s->stats, &s->worst)) {
+        s->aborted = 1;
+        return -4;
+    }
+    return s->stats.frames_decoded - before;
+}
+
+int kn_decode_stream_flush(kn_decode_stream *s, kn_decode_frame_fn cb, void *ud)
+{
+    int before;
+    if (!s) return -1;
+    if (s->aborted) return -4;
+    if (s->fatal) return -3;
+    s->k.cb = cb;
+    s->k.ud = ud;
+    before = s->stats.frames_decoded;
+    if (kd_send_drain(s->ctx, NULL, s->frame, &s->k, s->to_nv12,
+                      &s->stats, &s->worst)) {
+        s->aborted = 1;
+        return -4;
+    }
+    return s->stats.frames_decoded - before;
+}
+
+void kn_decode_stream_stats(const kn_decode_stream *s, kn_decode_stats *out)
+{
+    if (!out) return;
+    if (!s) { memset(out, 0, sizeof *out); return; }
+    *out = s->stats;
+    out->wall_ms = kd_mono_ms() - s->t0;
+    out->cpu_ms  = kd_cpu_ms() - s->cpu0;
+    out->decode_ms_max = s->worst;
+    if (out->wall_ms > 0) {
+        out->fps = (double)out->frames_decoded * 1000.0 /
+                   (double)out->wall_ms;
+        out->cpu_pct_of_core = (double)out->cpu_ms * 100.0 /
+                               (double)out->wall_ms;
+    }
+}
+
+void kn_decode_stream_close(kn_decode_stream *s)
+{
+    if (!s) return;
+    if (s->k.sws) sws_freeContext(s->k.sws);
+    if (s->k.nv) av_frame_free(&s->k.nv);
+    if (s->k.nvbuf) av_free(s->k.nvbuf);   /* LSan round XVII: the NV12
+                                              conversion buffer belongs to
+                                              kd_deliver's cache — kd_run
+                                              frees it, the stream close
+                                              must too */
+    if (s->inbuf) av_free(s->inbuf);
+    if (s->pkt) av_packet_free(&s->pkt);
+    if (s->frame) av_frame_free(&s->frame);
+    if (s->ctx) avcodec_free_context(&s->ctx);
+    free(s);
+}
+
 /* =========================================================== stub build */
 
 #else /* !KN_HAVE_FFMPEG */
@@ -405,5 +552,37 @@ int kn_decode_h264_mem(const uint8_t *data, size_t len, int to_nv12,
     (void)data; (void)len; (void)to_nv12; (void)cb; (void)userdata; (void)stats;
     return -1;
 }
+
+/* stream session stubs — honest failures, same as the one-shot path */
+struct kn_decode_stream { int unused; };
+
+kn_decode_stream *kn_decode_stream_open(int to_nv12, char *err, size_t errsz)
+{
+    (void)to_nv12;
+    if (err && errsz)
+        snprintf(err, errsz, "built without FFmpeg (stub decode)");
+    return NULL;
+}
+
+int kn_decode_stream_push(kn_decode_stream *s, const uint8_t *au, size_t len,
+                          uint32_t rtp_ts, kn_decode_frame_fn cb, void *ud)
+{
+    (void)s; (void)au; (void)len; (void)rtp_ts; (void)cb; (void)ud;
+    return -1;
+}
+
+int kn_decode_stream_flush(kn_decode_stream *s, kn_decode_frame_fn cb, void *ud)
+{
+    (void)s; (void)cb; (void)ud;
+    return -1;
+}
+
+void kn_decode_stream_stats(const kn_decode_stream *s, kn_decode_stats *out)
+{
+    (void)s;
+    if (out) memset(out, 0, sizeof *out);
+}
+
+void kn_decode_stream_close(kn_decode_stream *s) { (void)s; }
 
 #endif /* KN_HAVE_FFMPEG */
