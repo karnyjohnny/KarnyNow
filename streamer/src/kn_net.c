@@ -16,6 +16,8 @@
  */
 #include "kn/kn_net.h"
 
+#include <stdio.h>    /* unconditional: the round-XXI TLS-stream
+                         stubs format error text on every platform */
 #include <string.h>
 
 #if defined(KN_TLS_BACKEND_MBEDTLS)
@@ -609,3 +611,44 @@ int kn_net_chain_dump(const char *host, kn_net_chain *out)
 
 #endif /* _WIN32 */
 #endif /* KN_TLS_BACKEND_MBEDTLS */
+
+/* ------------------------------------------------- TLS stream (round XXI)
+ * Honest stubs for every build WITHOUT the Win32+mbedTLS backend (the
+ * real implementation lives in kn_net_mbedtls.c; the POSIX/mbedTLS build
+ * gets its stubs from that file's else-section — the guards here are the
+ * exact complement, so every configuration links exactly one set).
+ * Callers must check kn_net_tls_stream_available() and fail loudly;
+ * there is NO plaintext fallback (working agreement: never bypass TLS). */
+#if !defined(KN_TLS_BACKEND_MBEDTLS)
+
+int kn_net_tls_stream_available(void) { return 0; }
+
+kn_net_tls_stream *kn_net_tls_stream_open(const char *host, uint16_t port,
+                                          uint32_t timeout_ms,
+                                          char *err, size_t errsz)
+{
+    (void)host; (void)port; (void)timeout_ms;
+    if (err && errsz)
+        snprintf(err, errsz,
+                 "TLS stream needs the Win32+mbedTLS build "
+                 "(KN_TLS_BACKEND=mbedtls)");
+    return NULL;
+}
+
+int kn_net_tls_stream_send(kn_net_tls_stream *s, const uint8_t *buf,
+                           size_t len)
+{
+    (void)s; (void)buf; (void)len;
+    return -1;
+}
+
+int kn_net_tls_stream_recv(kn_net_tls_stream *s, uint8_t *buf, size_t cap,
+                           uint32_t timeout_ms)
+{
+    (void)s; (void)buf; (void)cap; (void)timeout_ms;
+    return -1;
+}
+
+void kn_net_tls_stream_close(kn_net_tls_stream *s) { (void)s; }
+
+#endif /* !KN_TLS_BACKEND_MBEDTLS */

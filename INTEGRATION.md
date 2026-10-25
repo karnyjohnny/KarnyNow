@@ -1,4 +1,84 @@
-# INTEGRATION NOTES — Round XX delta, rev 11 (STAGE 2 SIGNALING CORES: kn_ws + kn_rtsp)
+# INTEGRATION NOTES — Round XXII delta, rev 12b (T10 r16 build-fix + gate hardening)
+
+> **Rev 12b (round XXII):** target T10 r16 caught a round-XXI uncounted-
+> replace edit in `kn_net_mbedtls.c` (port snippet landed in the DNS
+> lookup; the Win32 body had never been sandbox-compiled). Fixed (DNS
+> literal restored) + a second latent bug fixed (missing `<stdlib.h>` —
+> i686-only) + **`cross_check.sh` now cross-compiles kn_net_mbedtls.c on
+> both arches whenever third_party/mbedtls exists** (the permanent gap
+> closure). All gates re-run green; target expects T10 r17 ALL PASS 72.
+> Full story: PROJECT-STATE.md round-XXII log, artifacts/T10-round16/.
+
+---
+
+# Round XXI delta, rev 12 (STAGE 2 PRODUCTION PATH: TLS stream + kn_cm/kn_http/kn_json + fake-rig E2E + knvstd --session)
+
+> **Rev 12 supersedes rev 1-11.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/RTSP.md` §9** (round-XXI status + deviations
+> D-s1/D-cm1..3) and **`docs/AUTH.md`** (the OAuth device-flow research,
+> login implementation = stage 4).
+>
+> **Round XXI headline: the stage-2 production signaling path is BUILT
+> end-to-end — CloudMatch (POST v2/session + poll + session extraction)
+> over a persistent verified TLS-1.2 stream, RTSPS-over-WSS with the
+> round-XX cores, the SRTP/peer handoff into kn_rx, and `knvstd
+> --session` glue with the connected-UDP media loop — proven against an
+> independent Python rig over real loopback sockets (36 checks) before
+> any target run.** The only remaining unknowns are cloud-side (R7) and
+> documented as D-s1/D-cm1/D-cm2.
+>
+> ## New files (round XXI)
+> 1. `streamer/{include/kn,src}/kn_json.*` — minimal zero-alloc JSON
+>    reader (1024-node pool, depth 32, raw spans, unescape incl.
+>    surrogate pairs, int64-exact).
+> 2. `streamer/{include/kn,src}/kn_http.*` — HTTP/1.1 one-shot client on
+>    a stream seam (CL/chunked/read-to-EOF, resumable chunk parser,
+>    injected clock).
+> 3. `streamer/{include/kn,src}/kn_cm.*` — CloudMatch: the create body
+>    (field-for-field with build_create_body), GFNJWT + nv-client header
+>    set (Content-Type text/plain quirk), create/poll, and the
+>    session_info extraction subset (rtspsEndpoints DERIVATION from
+>    connectionInfo usage 16/14+alp{1,6}, media usage 2|17, queue
+>    4-source fallback, ready/resumable, phase table).
+> 4. `streamer/tests/test_kncm.c` — the THIRTEENTH suite (91 checks:
+>    json/http/cm sections, fixtures per cloudmatch.rs:4073-4085).
+> 5. `tools/fake_rig.py` — the independent Python rig (HTTP + WS server,
+>    own RFC 6455 framing; asserts the ANNOUNCE key echo + PLAY count).
+> 6. `tools/sandbox_session_e2e.c` — sandbox-only E2E harness (36
+>    checks) driving kn_cm→kn_ws→kn_rtsp→handoff→connected UDP against
+>    the rig over real sockets.
+> 7. `docs/AUTH.md` — OAuth device-flow research record (endpoints,
+>    forms, headers, token semantics; implementation = stage 4).
+>
+> ## Changed files (round XXI)
+> 1. `streamer/include/kn/kn_net.h` + `src/kn_net_mbedtls.c` +
+>    `src/kn_net.c` — the persistent TLS-1.2 stream API
+>    (`kn_net_tls_stream_*`, Win32+mbedTLS only; complementary honest
+>    stubs elsewhere; kn_tcp_open gained a port parameter for 322).
+> 2. `streamer/{include/kn,src}/kn_sock.*` — `kn_sock_udp_connect`
+>    (kernel peer filter + getsockname local-address refresh);
+>    test_knsock 70→82 checks.
+> 3. `streamer/src/knvstd_main.c` — `--session` mode (phases A-E per
+>    docs/RTSP.md §9; token length-only logging; D-s1 placeholder ICE
+>    identity; TEARDOWN on exit) + usage/dispatch.
+> 4. Build wiring: CMakeLists + both shell gates + T10 (13 suites;
+>    target r16 expects 72 checks) + .gitignore unchanged.
+>
+> ## Verification (round XXI, sandbox)
+> native 13 suites 1309 PASS · cross x64+i686 -Werror PASS · knvstd
+> =2-paranoid clean (host -O1, mingw -O2) · CMake 0 warnings + ctest
+> 15/15 x2 backends · T13 ALL PASS 51/51(sanitized)/63(mbedTLS) ·
+> sandbox_session_e2e 36/36 · T10 dry 61. Self-review/KAT catches:
+> the chunked-parser stranded cursor (1-byte KAT), the json root-index
+> confusion (cleaned pre-ship), kn_net.c's missing top-level stdio
+> (POSIX stubs), hex math in the E2E expectations (1194884=0x123B84).
+> NOT target-compiled yet: the Win32 body of kn_net_tls_stream_* and
+> --session's Win32 sleep path (T10 r16 is their first compile; both
+> mirror verified patterns line-for-line).
+
+---
+
+## Round XX (rev 11, superseded — detail below)
 
 > **Rev 11 supersedes rev 1-10b.** Canonical state: `PROJECT-STATE.md`.
 > Design record: **`docs/RTSP.md`** — §1-5 are the wire specification

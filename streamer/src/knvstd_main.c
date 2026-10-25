@@ -21,21 +21,36 @@
  * streamer; the self-test dispatch stays exactly as specified in §7.9
  * ("every self-test must be runnable standalone").
  */
+/* Feature macro before EVERY system include (nanosleep in sess_sleep,
+ * round XXI — the kn_sock.c landmine, third sighting). */
+#if !defined(_WIN32) && (!defined(_POSIX_C_SOURCE) || (_POSIX_C_SOURCE < 200809L))
+#  undef _POSIX_C_SOURCE
+#  define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "kn/kn_audio.h"
+#include "kn/kn_cm.h"
 #include "kn/kn_d3d.h"
 #include "kn/kn_decode.h"
 #include "kn/kn_diag.h"
 #include "kn/knfec.h"
+#include "kn/kn_http.h"
+#include "kn/kn_net.h"
 #include "kn/kn_perf.h"
+#include "kn/kn_rtsp.h"
 #include "kn/kn_rx.h"
 #include "kn/kn_selftest.h"
 #include "kn/kn_sha1.h"
 #include "kn/kn_sock.h"
+#include "kn/kn_ws.h"
 #include "kn/knlog.h"
 #include "kn/knring.h"
 
 #include <signal.h>
 #include <stdio.h>
+#ifndef _WIN32
+#  include <time.h>     /* sess_sleep: nanosleep (round XXI) */
+#endif
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
@@ -67,6 +82,10 @@ static void usage(void)
            "  knvstd --decode [--decode-port=N] [--decode-bind=IP]\n"
            "         [--decode-seconds=N] [--decode-srtp=SPEC] [--decode-vps=N]\n"
            "         [--decode-au-dir=DIR] [--decode-expect-frames=N]\n"
+           "  knvstd --session --session-token=TOK --session-app=N\n"
+           "         [--session-title=S] [--session-device=S] [--cm-host=HOST]\n"
+           "         [--session-seconds=N] [--session-queue-timeout=N]\n"
+           "         [--session-expect-frames=N] [--session-au-dir=DIR]\n"
            "       [--log-dir=DIR]   (WASAPI synthetic PCM unless --no-audio)\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
            "  knvstd --list-selftests\n"
@@ -2079,6 +2098,927 @@ static int run_decode(uint16_t port, const char *bind_ip, long seconds,
     return exit_code;
 }
 
+/* ------------------------------------------------------------ session mode
+ * knvstd --session — the stage-2 PRODUCTION signaling path (round XXI):
+ *
+ *   CloudMatch (TLS stream -> kn_http/kn_cm): POST v2/session + poll until
+ *     ready (status 2|3 + rtsps endpoint) — the R7 measurement gate.
+ *   RTSPS-over-WSS (second TLS stream -> kn_ws -> kn_rtsp): the full
+ *     OPTIONS->DESCRIBE->SETUP->ANNOUNCE->PLAY sequence (docs/RTSP.md).
+ *   Handoff (docs/RTSP.md §4): SRTP key/salt/profile + the SETUP video
+ *     peer -> kn_rx session + a CONNECTED UDP socket (kernel peer filter)
+ *     -> the round-XVII media loop (same dec_* machinery as --decode:
+ *     capacity-2 queue, overflow policy, JSONL contract — so
+ *     make_rx_capture.py --verify and the T13-style checks apply to a
+ *     real session's stdout unchanged).
+ *
+ * SECURITY: TLS-only. kn_net_tls_stream_available()==0 (POSIX/schannel
+ * builds) is an honest refusal — NO plaintext fallback exists anywhere on
+ * this path. The token is used for the Authorization header only and is
+ * logged as LENGTH + PRESENCE (§7). SRTP key material is never logged
+ * (lengths only).
+ *
+ * DEVIATION D-s1 (documented, UNVERIFIED until the first real session):
+ * the ANNOUNCE carries LOCALLY GENERATED ICE ufrag/pwd and a random
+ * 32-byte placeholder DTLS fingerprint — the real bundle identity needs
+ * the stage-3 DTLS certificate (R3 spike). The Mjolnir video flow
+ * (SRTP/UDP) is independent of the bundle DTLS, so stage-2 video should
+ * flow; the rig's bundle side will fail its DTLS and that is expected
+ * until stage 3. The first real rig is the measurement (R32's rule).
+ *
+ * The media loop below deliberately DUPLICATES run_decode's loop instead
+ * of refactoring the T13-verified function (churn discipline); unification
+ * is planned once --session has its own target evidence.
+ */
+
+typedef struct {
+    kn_net_tls_stream *s;
+} tls_ctx;
+
+static int tls_send(void *c, const uint8_t *b, size_t n)
+{
+    return kn_net_tls_stream_send(((tls_ctx *)c)->s, b, n);
+}
+
+static int tls_recv(void *c, uint8_t *b, size_t cap, uint32_t t)
+{
+    return kn_net_tls_stream_recv(((tls_ctx *)c)->s, b, cap, t);
+}
+
+static int sess_ws_send_text(void *c, const char *t, size_t n)
+{
+    return kn_ws_send_text((kn_ws_client *)c, t, n);
+}
+
+static int sess_ws_recv_text(void *c, char *buf, size_t cap, uint32_t t,
+                             size_t *out)
+{
+    kn_ws_client *w = (kn_ws_client *)c;
+    int op = 0;
+    size_t n = 0;
+    int rc = kn_ws_recv_msg(w, t, &op, &n);
+    if (rc == KN_WS_ERR_TIMEOUT) return KN_RTSP_ERR_TIMEOUT;
+    if (rc != KN_WS_OK) return KN_RTSP_ERR_IO;
+    if (op != KN_WS_OP_TEXT || n + 1 > cap) return KN_RTSP_ERR_IO;
+    memcpy(buf, w->msg, n);
+    buf[n] = '\0';
+    *out = n;
+    return KN_RTSP_OK;
+}
+
+static uint64_t sess_now(void *c) { (void)c; return kn_sock_now_ms(); }
+static void sess_sleep(uint32_t ms, void *c)
+{
+    (void)c;
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    {
+        struct timespec ts;
+        ts.tv_sec = ms / 1000u;
+        ts.tv_nsec = (long)(ms % 1000u) * 1000000L;
+        (void)nanosleep(&ts, NULL);
+    }
+#endif
+}
+
+/* "rtsps://host:port" -> host text + port (bounded, no allocation) */
+static int sess_parse_rtsps(const char *url, char *host, size_t hostsz,
+                            uint16_t *port)
+{
+    const char *h, *colon, *end;
+    size_t n;
+    if (!url || strncmp(url, "rtsps://", 8) != 0) return -1;
+    h = url + 8;
+    end = h + strcspn(h, "/?#");
+    colon = end;
+    while (colon > h && *colon != ':') colon--;
+    if (colon == h || colon >= end) return -1;
+    n = (size_t)(colon - h);
+    if (n == 0 || n + 1 > hostsz) return -1;
+    memcpy(host, h, n);
+    host[n] = '\0';
+    {
+        long p = strtol(colon + 1, NULL, 10);
+        if (p < 1 || p > 65535) return -1;
+        *port = (uint16_t)p;
+    }
+    return 0;
+}
+
+/* SRTP profile string -> kn_rx profile + tag + key/salt sizes */
+static int sess_profile_map(const char *name, int *profile, size_t *tag,
+                            int *key_len, int *salt_len)
+{
+    if (strcmp(name, "AEAD_AES_128_GCM_8") == 0)
+        { *profile = KN_RX_SRTP_GCM128; *tag = 8;  *key_len = 16; *salt_len = 12; }
+    else if (strcmp(name, "AEAD_AES_256_GCM_8") == 0)
+        { *profile = KN_RX_SRTP_GCM256; *tag = 8;  *key_len = 32; *salt_len = 12; }
+    else if (strcmp(name, "AEAD_AES_128_GCM") == 0)
+        { *profile = KN_RX_SRTP_GCM128; *tag = 16; *key_len = 16; *salt_len = 12; }
+    else if (strcmp(name, "AEAD_AES_256_GCM") == 0)
+        { *profile = KN_RX_SRTP_GCM256; *tag = 16; *key_len = 32; *salt_len = 12; }
+    else if (strcmp(name, "AES_CM_128_HMAC_SHA1_32") == 0)
+        { *profile = KN_RX_SRTP_CM128_HMAC_SHA1; *tag = 4;  *key_len = 16; *salt_len = 14; }
+    else if (strcmp(name, "AES_CM_128_HMAC_SHA1_80") == 0)
+        { *profile = KN_RX_SRTP_CM128_HMAC_SHA1; *tag = 10; *key_len = 16; *salt_len = 14; }
+    else if (strcmp(name, "AES_CM_256_HMAC_SHA1_32") == 0)
+        { *profile = KN_RX_SRTP_CM256_HMAC_SHA1; *tag = 4;  *key_len = 32; *salt_len = 14; }
+    else if (strcmp(name, "AES_CM_256_HMAC_SHA1_80") == 0)
+        { *profile = KN_RX_SRTP_CM256_HMAC_SHA1; *tag = 10; *key_len = 32; *salt_len = 14; }
+    else return -1;
+    return 0;
+}
+
+static void sess_hex_upper(const uint8_t *b, size_t n, char *out)
+{
+    static const char hx[] = "0123456789ABCDEF";
+    size_t i;
+    for (i = 0; i < n; ++i) {
+        out[2 * i]     = hx[b[i] >> 4];
+        out[2 * i + 1] = hx[b[i] & 0x0Fu];
+    }
+    out[2 * n] = '\0';
+}
+
+/* the D-s1 placeholder bundle identity: random ufrag/pwd (base64-ish hex)
+ * + a random 32-byte fingerprint in colon-hex. Syntactically valid,
+ * cryptographically inert until stage 3. */
+static void sess_local_identity(char *ufrag, size_t ufsz, char *pwd,
+                                size_t pwsz, char *fp, size_t fpsz)
+{
+    uint8_t raw[32];
+    if (kn_ws_rand(raw, sizeof raw) != 0) {
+        /* the CSPRNG refusing is fatal for the session anyway; fill
+         * deterministic placeholders so the SDP stays well-formed and the
+         * failure surfaces at the handshake, not as garbage */
+        memset(raw, 0x5A, sizeof raw);
+    }
+    sess_hex_upper(raw, 8, ufrag);        (void)ufsz;   /* 16 hex chars */
+    sess_hex_upper(raw + 8, 12, pwd);     (void)pwsz;   /* 24 hex chars */
+    {
+        size_t i, o = 0;
+        for (i = 0; i < 32 && o + 3 < fpsz; ++i) {
+            static const char hx[] = "0123456789ABCDEF";
+            if (i) fp[o++] = ':';
+            fp[o++] = hx[raw[i] >> 4];
+            fp[o++] = hx[raw[i] & 0x0Fu];
+        }
+        fp[o] = '\0';
+    }
+}
+
+#define SESS_JSON_CAP  (128u * 1024u)
+#define SESS_RTSP_BUF  (KN_RTSP_MAX_RESPONSE + 4096u)
+
+static int run_session(const char *token, const char *device_id,
+                       long long app_id, const char *title,
+                       const char *cm_host, long seconds,
+                       long queue_timeout, long expect_frames,
+                       const char *au_dir, const char *log_dir)
+{
+    static uint8_t cm_rxb[64 * 1024];
+    static char cm_json[SESS_JSON_CAP];
+    static char rtsp_buf[SESS_RTSP_BUF];
+    static uint8_t ws_msg[KN_RTSP_MAX_RESPONSE + 8192];
+    static uint8_t pkt[KN_SOCK_RECV_BUF];
+    static dec_ctx c;
+    static char ann[16384], neg[16384], hostbuf[256];
+
+    kn_cm_settings st;
+    kn_cm_session sess;
+    kn_net_tls_stream *cm_tls = NULL, *sig_tls = NULL;
+    kn_ws_client wsc;
+    kn_rtsp_client rtc;
+    kn_rtsp_response resp;
+    kn_rtsp_describe desc;
+    kn_rtsp_setup_result setup;
+    kn_sock_udp sock;
+    kn_ring ring;
+    kn_rx_video v;
+    kn_rx_mem mem;
+    kn_rx_video_config cfg;
+    kn_rx_srtp_session srtp_sess;
+    uint8_t *arena = NULL;
+    tls_ctx cm_io_ctx, sig_io_ctx;
+    kn_http_io hio;
+    kn_ws_io wio;
+    kn_rtsp_msg_io rio;
+    kn_rtsp_header common[3];
+    char err[192], line[512];
+    char ufrag[24], pwd[32], fp[128];
+    char key_hex[65], salt_hex[25];
+    uint8_t key_bin[32], salt_bin[14];
+    uint32_t key_id = 0;
+    int profile = KN_RX_SRTP_NONE, key_len = 32, salt_len = 12, have_sess = 0;
+    size_t tag_len = 8;
+    const char *profile_name;
+    int rc, http_status = 0, ring_ok, exit_code = 1, i;
+    uint16_t ws_port = 0;
+    uint64_t t_start, next_poll_ms, now_ms, t_last_stats;
+    unsigned long long datagrams = 0;
+    unsigned consecutive_errors = 0;
+    const char *stop_reason = "time";
+    kn_log_config lcfg;
+
+    memset(&desc, 0, sizeof desc);
+    memset(&sess, 0, sizeof sess);
+    memset(&setup, 0, sizeof setup);
+    knv_stop_install();
+    memset(&c, 0, sizeof c);
+    for (i = 0; i < (int)DEC_QUEUE_CAP; ++i)
+        c.qbytes[i] = g_dec_qbytes[i];
+    if (au_dir && au_dir[0]) {
+#ifdef _WIN32
+        (void)_mkdir(au_dir);
+#else
+        (void)mkdir(au_dir, 0777);
+#endif
+    }
+    memset(&lcfg, 0, sizeof lcfg);
+    lcfg.log_dir = log_dir;
+    (void)kn_log_init(&lcfg);
+    kn_diag_set_selftest_provider(kn_selftest_render_relevant);
+    (void)kn_diag_install(log_dir);
+    c.au_dir = au_dir;
+
+    if (!kn_net_tls_stream_available()) {
+        printf("{\"mode\":\"session\",\"error\":\"tls_stream_unavailable\","
+               "\"note\":\"the production signaling path needs the Win32 "
+               "mbedTLS build (KN_TLS_BACKEND=mbedtls)\"}\n");
+        fflush(stdout);
+        kn_log_shutdown();
+        return 3;
+    }
+
+    /* ---------------- phase A: CloudMatch ---------------- */
+    memset(&st, 0, sizeof st);
+    st.token = token;
+    st.device_id = device_id;
+    st.app_id = app_id;
+    st.title = title;
+    st.width = 1280; st.height = 720; st.fps = 30;      /* D14 */
+    st.timezone_offset_ms = 0;                          /* UTC-neutral */
+
+    {
+        kn_lctx b;
+        kn_lctx_init(&b, KN_CH_HTTP, KN_INFO, "cm_begin");
+        kn_lctx_str(&b, "host", cm_host);
+        kn_lctx_i64(&b, "app_id", app_id);
+        kn_lctx_i64(&b, "token_len", (long long)strlen(token));
+        kn_lctx_str(&b, "token", "redacted");
+        kn_log_emit(&b);
+    }
+    cm_tls = kn_net_tls_stream_open(cm_host, 443, 15000, err, sizeof err);
+    if (!cm_tls) {
+        printf("{\"mode\":\"session\",\"error\":\"cm_tls\",\"detail\":\"%.150s\"}\n",
+               err);
+        fflush(stdout);
+        kn_log_on_failure("session.cm", "E_SESSION_CM_TLS",
+                          "CloudMatch TLS stream failed to open", err);
+        kn_log_shutdown();
+        return 1;
+    }
+    cm_io_ctx.s = cm_tls;
+    hio.send = tls_send; hio.recv = tls_recv; hio.ctx = &cm_io_ctx;
+    rc = kn_cm_create(hio, cm_host, "/", &st, 20000, sess_now, NULL,
+                      cm_rxb, sizeof cm_rxb, cm_json, sizeof cm_json,
+                      &http_status, &sess);
+    kn_net_tls_stream_close(cm_tls);
+    cm_tls = NULL;
+    if (rc != KN_HTTP_OK || http_status != 200) {
+        printf("{\"mode\":\"session\",\"error\":\"cm_create\",\"rc\":%d,"
+               "\"http_status\":%d}\n", rc, http_status);
+        fflush(stdout);
+        kn_log_on_failure("session.cm", "E_SESSION_CM_CREATE",
+                          "POST v2/session did not return a usable session",
+                          "check the account/token/entitlements; the raw "
+                          "status is in this log (R7 measurement)");
+        kn_log_shutdown();
+        return 1;
+    }
+    printf("{\"mode\":\"session\",\"event\":\"cm_created\",\"session_id\":"
+           "\"%.64s\",\"status\":%lld,\"phase\":\"%s\"}\n",
+           sess.session_id, (long long)sess.status, sess.phase);
+    fflush(stdout);
+
+    /* poll until ready (one fresh TLS connection per poll — Connection:
+     * close semantics; 2 s cadence, bounded by queue_timeout) */
+    t_start = kn_sock_now_ms();
+    while (!sess.ready && !g_knv_stop) {
+        if (queue_timeout > 0 &&
+            kn_sock_now_ms() - t_start >= (uint64_t)queue_timeout * 1000u) {
+            stop_reason = "queue_timeout";
+            break;
+        }
+        if (sess.status == 7) { stop_reason = "terminated"; break; }
+        sess_sleep(2000, NULL);
+        cm_tls = kn_net_tls_stream_open(cm_host, 443, 15000, err,
+                                        sizeof err);
+        if (!cm_tls) { stop_reason = "cm_tls_retry"; break; }
+        cm_io_ctx.s = cm_tls;
+        rc = kn_cm_poll(hio, cm_host, "/", &st, sess.session_id, 20000,
+                        sess_now, NULL, cm_rxb, sizeof cm_rxb, cm_json,
+                        sizeof cm_json, &http_status, &sess);
+        kn_net_tls_stream_close(cm_tls);
+        cm_tls = NULL;
+        if (rc != KN_HTTP_OK || http_status != 200) {
+            stop_reason = "cm_poll_failed";
+            break;
+        }
+        printf("{\"mode\":\"session\",\"event\":\"queue\",\"status\":%lld,"
+               "\"phase\":\"%s\",\"queue_position\":%lld,\"have_queue\":%d,"
+               "\"seat_step\":%lld,\"ready\":%d}\n",
+               (long long)sess.status, sess.phase,
+               (long long)sess.queue_position, sess.have_queue,
+               (long long)sess.seat_setup_step, sess.ready);
+        fflush(stdout);
+    }
+    if (!sess.ready) {
+        printf("{\"mode\":\"session\",\"error\":\"not_ready\","
+               "\"stop_reason\":\"%s\",\"status\":%lld}\n", stop_reason,
+               (long long)sess.status);
+        fflush(stdout);
+        kn_log_on_failure("session.cm", "E_SESSION_NOT_READY",
+                          "the session never reached ready state",
+                          "queue position/seat step lines above show where "
+                          "it stalled; entitlements/queue are server-side");
+        kn_log_shutdown();
+        return 1;
+    }
+    {
+        char esc[300];
+        lb_json_path(esc, sizeof esc, sess.rtsps_endpoint);
+        printf("{\"mode\":\"session\",\"event\":\"ready\",\"rtsps\":\"%s\","
+               "\"media_peer\":\"%.64s:%u\"}\n", esc, sess.media_ip,
+               (unsigned)sess.media_port);
+        fflush(stdout);
+    }
+
+    /* ---------------- phase B: RTSPS over WSS ---------------- */
+    if (sess_parse_rtsps(sess.rtsps_endpoint, hostbuf, sizeof hostbuf,
+                         &ws_port) != 0) {
+        printf("{\"mode\":\"session\",\"error\":\"bad_rtsps_endpoint\"}\n");
+        fflush(stdout);
+        kn_log_shutdown();
+        return 1;
+    }
+    sig_tls = kn_net_tls_stream_open(hostbuf, ws_port, 15000, err,
+                                     sizeof err);
+    if (!sig_tls) {
+        char esc[200];
+        lb_json_path(esc, sizeof esc, err);
+        printf("{\"mode\":\"session\",\"error\":\"sig_tls\","
+               "\"detail\":\"%.150s\"}\n", esc);
+        fflush(stdout);
+        kn_log_on_failure("session.rtsp", "E_SESSION_SIG_TLS",
+                          "the signaling TLS stream failed to open", err);
+        kn_log_shutdown();
+        return 1;
+    }
+    sig_io_ctx.s = sig_tls;
+    wio.send = tls_send; wio.recv = tls_recv; wio.ctx = &sig_io_ctx;
+    snprintf(line, sizeof line,
+             "x-nv-sessionid: %s\r\ncontent-length: 0\r\n", sess.session_id);
+    rc = kn_ws_client_open(&wsc, wio, hostbuf, ws_port, "/rtsp", line,
+                           15000, ws_msg, sizeof ws_msg, err, sizeof err);
+    if (rc != KN_WS_OK) {
+        printf("{\"mode\":\"session\",\"error\":\"ws_open\",\"rc\":%d,"
+               "\"detail\":\"%.120s\"}\n", rc, err);
+        fflush(stdout);
+        kn_log_on_failure("session.rtsp", "E_SESSION_WS",
+                          "the RTSPS WebSocket handshake failed", err);
+        kn_net_tls_stream_close(sig_tls);
+        kn_log_shutdown();
+        return 1;
+    }
+    rio.send_text = sess_ws_send_text;
+    rio.recv_text = sess_ws_recv_text;
+    rio.ctx = &wsc;
+    (void)kn_rtsp_client_init(&rtc, rio, rtsp_buf, sizeof rtsp_buf,
+                              KN_RTSP_TIMEOUT_MS, sess_now, NULL,
+                              sess_sleep, NULL);
+
+    common[0].name = "X-GS-Version";   common[0].value = "14.2";
+    common[1].name = "Host";           common[1].value = hostbuf;
+    common[2].name = "x-nv-sessionid"; common[2].value = sess.session_id;
+
+    rc = kn_rtsp_request(&rtc, "OPTIONS", sess.rtsps_endpoint, common, 3,
+                         NULL, 0, 0, &resp);
+    printf("{\"mode\":\"session\",\"event\":\"rtsp\",\"step\":\"OPTIONS\","
+           "\"rc\":%d,\"status\":%d}\n", rc, rc == KN_RTSP_OK ? resp.status : 0);
+    fflush(stdout);
+    if (rc != KN_RTSP_OK || resp.status != 200) goto teardown;
+    {
+        kn_rtsp_header dh[5];
+        dh[0] = common[0]; dh[1] = common[1]; dh[2] = common[2];
+        dh[3].name = "Accept"; dh[3].value = "application/sdp";
+        dh[4].name = "x-nv-abtesting"; dh[4].value = "2";
+        rc = kn_rtsp_request(&rtc, "DESCRIBE", sess.rtsps_endpoint, dh, 5,
+                             NULL, 0, 0, &resp);
+    }
+    printf("{\"mode\":\"session\",\"event\":\"rtsp\",\"step\":\"DESCRIBE\","
+           "\"rc\":%d,\"status\":%d}\n", rc, rc == KN_RTSP_OK ? resp.status : 0);
+    fflush(stdout);
+    if (rc != KN_RTSP_OK || resp.status != 200) goto teardown;
+    if (kn_rtsp_extract_describe(&resp, &desc) != KN_RTSP_OK) {
+        printf("{\"mode\":\"session\",\"error\":\"describe_extract\"}\n");
+        fflush(stdout);
+        goto teardown;
+    }
+    if (!desc.native_bundle) {
+        printf("{\"mode\":\"session\",\"error\":\"legacy_transport\","
+               "\"note\":\"nativeRtcOnBundlePort!=1 — retired multi-socket "
+               "transport refused (:1141)\"}\n");
+        fflush(stdout);
+        goto teardown;
+    }
+    {   /* the DESCRIBE SDP is the negotiate input later — copy it now
+         * (resp.body aliases the rtsp buffer) */
+        static char describe_sdp[64 * 1024];
+        size_t dl = resp.body_len < sizeof describe_sdp - 1
+                       ? resp.body_len : sizeof describe_sdp - 1;
+        kn_rtsp_header ah[5];
+        kn_rtsp_announce_params ap;
+        size_t alen = 0, nlen = 0;
+        memcpy(describe_sdp, resp.body, dl);
+        describe_sdp[dl] = '\0';
+
+        /* ---------------- phase C: socket + SETUP + ANNOUNCE + PLAY --- */
+        err[0] = '\0';
+        rc = kn_sock_udp_open(&sock, NULL, 0, KN_SOCK_RCVBUF_DEFAULT,
+                              err, sizeof err);
+        if (rc != KN_SOCK_OK) {
+            printf("{\"mode\":\"session\",\"error\":\"media_socket\","
+                   "\"detail\":\"%.120s\"}\n", err);
+            fflush(stdout);
+            goto teardown;
+        }
+        rc = kn_rtsp_setup_video(&rtc, desc.video_control,
+                                 sess.rtsps_endpoint, desc.session,
+                                 desc.ping_version,
+                                 kn_sock_udp_port(&sock), common, 3,
+                                 sess.have_media ? sess.media_ip : NULL,
+                                 sess.have_media ? sess.media_port : 0,
+                                 &setup);
+        printf("{\"mode\":\"session\",\"event\":\"rtsp\",\"step\":\"SETUP\","
+               "\"rc\":%d,\"status\":%d,\"peer\":\"%.64s:%u\",\"bundle_fb\":%d,"
+               "\"rounds\":%u}\n", rc, setup.status, setup.peer_ip,
+               (unsigned)setup.peer_port, setup.bundle_fallback,
+               setup.rounds_slept);
+        fflush(stdout);
+        if (rc != KN_RTSP_OK) goto teardown_sock;
+
+        /* SRTP material (docs/RTSP.md §2): DESCRIBE runtime key or a
+         * locally generated one; salt = {key_id:024X} */
+        if (desc.have_runtime_key) {
+            snprintf(key_hex, sizeof key_hex, "%s", desc.runtime_key);
+            key_id = desc.key_id;
+        } else {
+            uint8_t raw[32];
+            if (kn_ws_rand(raw, sizeof raw) != 0) {
+                printf("{\"mode\":\"session\",\"error\":\"csprng\"}\n");
+                fflush(stdout);
+                goto teardown_sock;
+            }
+            sess_hex_upper(raw, 32, key_hex);
+            key_id = (uint32_t)(kn_sock_now_us() & 0xFFFFFFFFu) | 1u;
+        }
+        kn_rtsp_salt_from_key_id(key_id, salt_hex);
+        profile_name = kn_rtsp_srtp_profile(NULL, describe_sdp);
+        if (sess_profile_map(profile_name, &profile, &tag_len, &key_len,
+                             &salt_len) != 0) {
+            printf("{\"mode\":\"session\",\"error\":\"unknown_profile\","
+                   "\"profile\":\"%.40s\"}\n", profile_name);
+            fflush(stdout);
+            goto teardown_sock;
+        }
+        {   /* hex -> binary (validated: runtime_key guarantees 64 hex) */
+            int k;
+            for (k = 0; k < key_len; ++k) {
+                unsigned bv;
+                if (sscanf(key_hex + 2 * k, "%2x", &bv) != 1) bv = 0;
+                key_bin[k] = (uint8_t)bv;
+            }
+            for (k = 0; k < 12; ++k) {
+                unsigned bv;
+                if (sscanf(salt_hex + 2 * k, "%2x", &bv) != 1) bv = 0;
+                salt_bin[k] = (uint8_t)bv;
+            }
+            /* CM profiles want a 14-byte salt: the 12-byte runtime salt
+             * zero-extends (the KDF consumes it as the master salt; the
+             * reference's material derivation is the authority — kn_rx
+             * validates lengths and refuses honestly) */
+            if (salt_len > 12) {
+                salt_bin[12] = 0;
+                salt_bin[13] = 0;
+            }
+        }
+
+        /* connect the media socket to the SETUP peer BEFORE announcing:
+         * the kernel picks the route's source address and getsockname
+         * (inside kn_sock_udp_connect) exposes it — the ANNOUNCE then
+         * carries the REAL local address like the reference's reserved
+         * bundle socket does */
+        {
+            uint32_t peer_ip = 0;
+            if (kn_sock_ipv4_parse(setup.peer_ip, &peer_ip) != 0) {
+                printf("{\"mode\":\"session\",\"error\":\"peer_not_ipv4\","
+                       "\"note\":\"IPv6 peers need kn_sock v6 (stage 5)\"}\n");
+                fflush(stdout);
+                goto teardown_sock;
+            }
+            if (kn_sock_udp_connect(&sock, peer_ip, setup.peer_port) !=
+                KN_SOCK_OK) {
+                printf("{\"mode\":\"session\",\"error\":\"media_connect\"}\n");
+                fflush(stdout);
+                goto teardown_sock;
+            }
+        }
+
+        sess_local_identity(ufrag, sizeof ufrag, pwd, sizeof pwd,
+                            fp, sizeof fp);
+        memset(&ap, 0, sizeof ap);
+        ap.width = 1280; ap.height = 720; ap.fps = 30;         /* D14 */
+        ap.bitrate_kbps = 5000;          /* stage-5 will cap 3-6 Mbps */
+        ap.bitstream_format = 0;         /* H264 (D3/D6 decode path) */
+        ap.bit_depth = 0; ap.chroma_format = 1;
+        ap.hdr = 0;
+        snprintf(ap.key_hex, sizeof ap.key_hex, "%s", key_hex);
+        ap.key_id = key_id;
+        ap.bundle_port = kn_sock_udp_port(&sock);
+        {
+            char iptext[16];
+            if (sock.local_addr == 0)
+                snprintf(iptext, sizeof iptext, "127.0.0.1");
+            else
+                (void)kn_sock_ipv4_text(sock.local_addr, iptext);
+            snprintf(ap.local_address, sizeof ap.local_address, "%s",
+                     iptext);
+        }
+        snprintf(ap.ufrag, sizeof ap.ufrag, "%s", ufrag);
+        snprintf(ap.password, sizeof ap.password, "%s", pwd);
+        snprintf(ap.fingerprint, sizeof ap.fingerprint, "%s", fp);
+        ap.video_port = setup.peer_port;
+        ap.video_packet_size = KN_RX_DEFAULT_VIDEO_PACKET_SIZE;
+        ap.rtcp_on_sctp = desc.rtcp_on_sctp;
+        ap.unified_socket = desc.unified_socket;
+        ap.qos_timings_v5 = 0;
+        ap.dynamic_streaming_mode = 0;
+        ap.adjust_res_and_fps = 0;
+        if (kn_rtsp_build_announce(&ap, ann, sizeof ann, &alen) !=
+            KN_RTSP_OK) {
+            printf("{\"mode\":\"session\",\"error\":\"announce_build\"}\n");
+            fflush(stdout);
+            goto teardown_sock;
+        }
+        if (kn_rtsp_negotiate_announce(ann, describe_sdp, neg, sizeof neg,
+                                       &nlen, NULL) != KN_RTSP_OK) {
+            printf("{\"mode\":\"session\",\"error\":\"announce_negotiate\"}\n");
+            fflush(stdout);
+            goto teardown_sock;
+        }
+        ah[0] = common[0]; ah[1] = common[1]; ah[2] = common[2];
+        ah[3].name = "Session"; ah[3].value = desc.session;
+        ah[4].name = "Content-Type"; ah[4].value = "application/sdp";
+        rc = kn_rtsp_request(&rtc, "ANNOUNCE", sess.rtsps_endpoint, ah, 5,
+                             neg, nlen, 0, &resp);
+        printf("{\"mode\":\"session\",\"event\":\"rtsp\",\"step\":\"ANNOUNCE\","
+               "\"rc\":%d,\"status\":%d,\"sdp_bytes\":%lu}\n", rc,
+               rc == KN_RTSP_OK ? resp.status : 0,
+               (unsigned long)(nlen % 1000000ul));
+        fflush(stdout);
+        if (rc != KN_RTSP_OK || resp.status != 200) goto teardown_sock;
+        if (!desc.disable_play) {
+            rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint, ah, 4,
+                                 NULL, 0, 0, &resp);
+            printf("{\"mode\":\"session\",\"event\":\"rtsp\",\"step\":\"PLAY\","
+                   "\"rc\":%d,\"status\":%d}\n", rc,
+                   rc == KN_RTSP_OK ? resp.status : 0);
+            fflush(stdout);
+            if (rc != KN_RTSP_OK || resp.status != 200) goto teardown_sock;
+        }
+        /* the handoff line — shapes and LENGTHS only, never key material
+         * (docs/RTSP.md §4 logging rule) */
+        printf("{\"mode\":\"session\",\"event\":\"handoff\","
+               "\"video_peer\":\"%.64s:%u\",\"packet_size\":%u,"
+               "\"srtp_profile\":\"%.24s\",\"tag_len\":%lu,"
+               "\"key_len\":%d,\"key_id\":%u,\"key_source\":\"%s\","
+               "\"rtcp_on_sctp\":%d,\"unified_socket\":%d,"
+               "\"ping_version\":%u}\n",
+               setup.peer_ip, (unsigned)setup.peer_port,
+               (unsigned)ap.video_packet_size, profile_name,
+               (unsigned long)tag_len, key_len, (unsigned)key_id,
+               desc.have_runtime_key ? "describe" : "local",
+               desc.rtcp_on_sctp, desc.unified_socket,
+               (unsigned)setup.ping_version);
+        fflush(stdout);
+
+        /* ---------------- phase D: the media pipeline ---------------- */
+        rc = kn_rx_srtp_session_init(&srtp_sess, profile, key_bin,
+                                     (size_t)key_len, salt_bin,
+                                     (size_t)salt_len, tag_len);
+        if (rc != KN_RX_OK) {
+            printf("{\"mode\":\"session\",\"error\":\"srtp_session\","
+                   "\"rc\":%d,\"backend_gcm\":%d,\"backend_256\":%d}\n",
+                   rc, kn_srtp_backend_gcm(), kn_srtp_backend_256());
+            fflush(stdout);
+            goto teardown_sock;
+        }
+        {   /* arena: same sizing discipline as run_decode (vps 1280) */
+            uint32_t vps = KN_RX_DEFAULT_VIDEO_PACKET_SIZE;
+            uint32_t shard_len = vps + KN_RX_FEC_HEADER_ALLOWANCE;
+            uint32_t pkt_cap = (shard_len + 64u + 7u) & ~7u;
+            uint32_t slots, scratch_len, fec_blocks = 32u, fec_shards = 64u;
+            size_t arena_need, off;
+            size_t pool_budget = 32u * 1024u * 1024u;
+            memset(&cfg, 0, sizeof cfg);
+            cfg.codec = KN_GS_CODEC_H264;
+            cfg.reorder_window_packets = KN_RX_DEFAULT_REORDER_WINDOW;
+            cfg.max_access_unit_bytes = KN_GS_DEFAULT_MAX_ACCESS_UNIT;
+            cfg.video_packet_size = vps;
+            cfg.timeout_ms = KN_RX_DEFAULT_TIMEOUT_MS;
+            slots = cfg.reorder_window_packets + 1u +
+                    fec_blocks * fec_shards + 16u;
+            if ((size_t)slots * pkt_cap > pool_budget)
+                slots = (uint32_t)(pool_budget / pkt_cap);
+            scratch_len = ((uint32_t)kn_fec_scratch_bytes(fec_shards,
+                                                          shard_len) +
+                           4096u + 7u) & ~7u;
+            arena_need = (size_t)slots * sizeof(kn_rx_pkt)
+                       + (size_t)slots * pkt_cap
+                       + (size_t)(cfg.reorder_window_packets + 1u) *
+                             sizeof(kn_rx_reorder_entry)
+                       + (size_t)fec_blocks * sizeof(kn_rx_fec_block)
+                       + (size_t)fec_blocks * fec_shards * sizeof(uint32_t)
+                       + scratch_len
+                       + (size_t)KN_RX_NACK_MAX_PENDING *
+                             sizeof(kn_rx_nack_entry)
+                       + cfg.max_access_unit_bytes
+                       + 16u * sizeof(kn_rx_event);
+            arena = (uint8_t *)malloc(arena_need);
+            if (!arena) {
+                printf("{\"mode\":\"session\",\"error\":\"arena_alloc\"}\n");
+                fflush(stdout);
+                goto teardown_sock;
+            }
+            memset(&mem, 0, sizeof mem);
+            off = 0;
+            mem.pool_meta = (kn_rx_pkt *)(void *)(arena + off);
+            off += (size_t)slots * sizeof(kn_rx_pkt);
+            mem.pool_bytes = arena + off;
+            off += (size_t)slots * pkt_cap;
+            mem.pool_slots = slots;
+            mem.pool_pkt_cap = pkt_cap;
+            mem.reorder_map = (kn_rx_reorder_entry *)(void *)(arena + off);
+            off += (size_t)(cfg.reorder_window_packets + 1u) *
+                   sizeof(kn_rx_reorder_entry);
+            mem.fec_blocks = (kn_rx_fec_block *)(void *)(arena + off);
+            off += (size_t)fec_blocks * sizeof(kn_rx_fec_block);
+            mem.fec_shard_arena = (uint32_t *)(void *)(arena + off);
+            off += (size_t)fec_blocks * fec_shards * sizeof(uint32_t);
+            mem.fec_max_blocks = fec_blocks;
+            mem.fec_max_shards = fec_shards;
+            mem.fec_scratch = arena + off;
+            off += scratch_len;
+            mem.fec_scratch_len = scratch_len;
+            mem.nack_table = (kn_rx_nack_entry *)(void *)(arena + off);
+            off += (size_t)KN_RX_NACK_MAX_PENDING * sizeof(kn_rx_nack_entry);
+            mem.nack_capacity = KN_RX_NACK_MAX_PENDING;
+            mem.au_buffer = arena + off;
+            off += cfg.max_access_unit_bytes;
+            mem.au_buffer_capacity = cfg.max_access_unit_bytes;
+            mem.events = (kn_rx_event *)(void *)(arena + off);
+            mem.events_capacity = 16;
+        }
+        if (kn_rx_video_init(&v, &cfg, &mem, kn_sock_now_ms()) !=
+            KN_RX_OK) {
+            printf("{\"mode\":\"session\",\"error\":\"pipeline_init\"}\n");
+            fflush(stdout);
+            free(arena);
+            arena = NULL;
+            goto teardown_sock;
+        }
+        kn_rx_video_set_srtp(&v, &srtp_sess);
+        have_sess = 1;
+        c.v = &v;
+        c.decode_available = kn_decode_available();
+        if (c.decode_available) {
+            char derr[128];
+            c.stream = kn_decode_stream_open(1, derr, sizeof derr);
+            if (!c.stream) c.decode_available = 0;
+        }
+        ring_ok = (kn_ring_init(&ring, 64u * 1024u, 1312) == 0);
+
+        /* ---------------- phase E: the media loop (run_decode shape) --- */
+        t_start = kn_sock_now_ms();
+        t_last_stats = t_start;
+        next_poll_ms = t_start;
+        stop_reason = "time";
+        while (!g_knv_stop) {
+            size_t plen = 0;
+            now_ms = kn_sock_now_ms();
+            if (seconds > 0 &&
+                now_ms - t_start >= (uint64_t)seconds * 1000u) {
+                stop_reason = "time";
+                break;
+            }
+            if (expect_frames > 0 &&
+                (long long)((c.stream && !c.decode_aborted) ? c.frames_out
+                                                            : c.aus) >=
+                    expect_frames) {
+                stop_reason = "expect_frames";
+                break;
+            }
+            rc = kn_sock_udp_recv(&sock, pkt, sizeof pkt,
+                                  KN_SOCK_POLL_INTERVAL_MS, &plen, NULL);
+            c.now_ms = kn_sock_now_ms();
+            if (rc == 1) {
+                consecutive_errors = 0;
+                datagrams++;
+                if (ring_ok)
+                    kn_ring_append(&ring, kn_sock_now_us(),
+                                   knv_rtp_seq_meta(pkt, plen), pkt, plen);
+                (void)kn_rx_video_process_datagram(&v, pkt, plen, c.now_ms,
+                                                   dec_frame_in_cb, &c);
+                dec_drain_events(&c);
+                dec_take_kf(&c);
+                dec_drain_queue(&c);
+            } else if (rc < 0) {
+                consecutive_errors++;
+                if (consecutive_errors <= 5) {
+                    printf("{\"mode\":\"session\",\"error\":\"recv\","
+                           "\"rc\":%d,\"errno\":%d}\n", rc,
+                           sock.last_error);
+                    fflush(stdout);
+                }
+                if (consecutive_errors >= 100u) {
+                    stop_reason = "socket_error";
+                    break;
+                }
+            }
+            now_ms = kn_sock_now_ms();
+            if (now_ms >= next_poll_ms) {
+                c.now_ms = now_ms;
+                (void)kn_rx_video_poll(&v, now_ms, dec_frame_in_cb, &c);
+                dec_drain_events(&c);
+                dec_take_kf(&c);
+                dec_drain_queue(&c);
+                next_poll_ms = now_ms + KN_SOCK_POLL_INTERVAL_MS;
+            }
+            if (now_ms - t_last_stats >= 1000u) {
+                kn_lctx p;
+                t_last_stats = now_ms;
+                kn_lctx_init(&p, KN_CH_TRANSPORT, KN_INFO, "session_stats");
+                kn_lctx_i64(&p, "datagrams",
+                            (long long)(datagrams % 10000000000ll));
+                kn_lctx_i64(&p, "aus", (long long)(c.aus % 1000000000ll));
+                kn_lctx_i64(&p, "frames_out",
+                            (long long)(c.frames_out % 1000000000ll));
+                kn_lctx_i64(&p, "fec_repaired",
+                            (long long)(v.fec_repaired_packets % 1000000000ll));
+                kn_lctx_i64(&p, "gaps",
+                            (long long)(v.packet_gap_recoveries % 1000000000ll));
+                kn_lctx_i64(&p, "withheld",
+                            (long long)(v.withheld_frames % 1000000000ll));
+                kn_lctx_i64(&p, "q_depth", (long long)c.q_count);
+                kn_log_emit(&p);
+            }
+        }
+        if (g_knv_stop) stop_reason = "signal";
+
+        if (c.stream && !c.decode_aborted)
+            (void)kn_decode_stream_flush(c.stream, dec_frame_out_cb, &c);
+        {   /* summary — field-compatible with the decode/replay contract
+             * (make_rx_capture.py --verify consumes it unchanged) */
+            char drops[512];
+            kn_decode_stats dst;
+            size_t doff = 0;
+            int d;
+            kn_decode_stream_stats(c.stream, &dst);
+            for (d = 1; d < 24; ++d) {
+                if (!v.drop_counters[d]) continue;
+                if (doff + 48 < sizeof drops)
+                    doff += (size_t)snprintf(drops + doff,
+                                             sizeof drops - doff,
+                                             "%s\"%d\":%llu",
+                                             doff ? "," : "", d,
+                                             (unsigned long long)
+                                             (v.drop_counters[d] %
+                                              1000000000ull));
+            }
+            if (doff >= sizeof drops) doff = sizeof drops - 1;
+            drops[doff] = '\0';
+            printf("{\"mode\":\"session\",\"summary\":{\"stop_reason\":\"%s\","
+                   "\"session_id\":\"%.64s\",\"datagrams\":%llu,"
+                   "\"authenticated\":%llu,\"aus\":%llu,\"frames\":%llu,"
+                   "\"keyframes\":%llu,\"frames_decoded\":%llu,"
+                   "\"frames_failed\":%d,\"decode_errors\":%llu,"
+                   "\"q_overflows\":%llu,\"fec_repaired\":%llu,"
+                   "\"stale\":%llu,\"gaps\":%llu,\"withheld\":%llu,"
+                   "\"kf_requests\":%llu,\"recv_timeouts\":%llu,"
+                   "\"recv_errors\":%llu,\"event_lines_capped\":%llu,"
+                   "\"au_write_errors\":%llu,\"srtp_profile\":\"%.24s\","
+                   "\"rx_state\":%d,\"decoder\":\"%.64s\",\"video\":\"%dx%d\","
+                   "\"wall_ms\":%llu,\"drops\":{%s}}}\n",
+                   stop_reason, sess.session_id,
+                   datagrams % 10000000000ull,
+                   (unsigned long long)(v.authenticated_packets %
+                                        10000000000ull),
+                   c.aus % 10000000000ull, c.aus % 10000000000ull,
+                   c.key_aus % 10000000000ull,
+                   c.frames_out % 10000000000ull,
+                   dst.frames_failed, c.decode_errors % 1000000000ull,
+                   c.q_overflows % 1000000000ull,
+                   (unsigned long long)(v.fec_repaired_packets %
+                                        1000000000ull),
+                   (unsigned long long)(v.stale_packets % 1000000000ull),
+                   (unsigned long long)(v.packet_gap_recoveries %
+                                        1000000000ull),
+                   (unsigned long long)(v.withheld_frames % 1000000000ull),
+                   (unsigned long long)(v.keyframe_requests %
+                                        1000000000ull),
+                   (unsigned long long)(sock.recv_timeouts %
+                                        10000000000ull),
+                   (unsigned long long)(sock.recv_errors % 1000000000ull),
+                   c.event_lines_capped % 1000000000ull,
+                   c.au_write_errors % 1000000000ull,
+                   profile_name, v.state,
+                   c.stream ? kn_decode_backend() : "pipeline-only",
+                   c.last_w % 100000, c.last_h % 100000,
+                   (unsigned long long)((kn_sock_now_ms() - t_start) %
+                                        1000000000ull),
+                   drops);
+            fflush(stdout);
+        }
+        {
+            long long produced = (c.stream && !c.decode_aborted)
+                                     ? (long long)c.frames_out
+                                     : (long long)c.aus;
+            exit_code = (datagrams > 0 && produced > 0 &&
+                         c.au_write_errors == 0 &&
+                         strcmp(stop_reason, "socket_error") != 0) ? 0 : 1;
+            if (expect_frames > 0 && produced < expect_frames)
+                exit_code = 1;
+        }
+        if (ring_ok) {
+            if (exit_code != 0) {
+                char ringpath[640];
+                if (snprintf(ringpath, sizeof ringpath,
+                             "%s/wire_session.log", log_dir) <
+                    (int)sizeof ringpath)
+                    (void)kn_ring_dump(&ring, ringpath);
+            }
+            kn_ring_free(&ring);
+        }
+        if (exit_code != 0) {
+            kn_log_on_failure("session.media",
+                              datagrams == 0 ? "E_SESSION_NO_MEDIA"
+                                             : "E_SESSION_NO_FRAMES",
+                              datagrams == 0
+                                  ? "PLAY succeeded but no media datagrams "
+                                    "arrived (firewall? peer routing? R34)"
+                                  : "media arrived but no access unit "
+                                    "completed (SRTP material? vps? drops "
+                                    "map tells)",
+                              "the handoff line + drops map + wire mirror "
+                              "in the log dir are the R7/R32 evidence");
+        }
+        kn_decode_stream_close(c.stream);
+        c.stream = NULL;
+        free(arena);
+        arena = NULL;
+        kn_sock_udp_close(&sock);
+        goto teardown;
+
+    teardown_sock:
+        kn_sock_udp_close(&sock);
+    }
+teardown:
+    /* best-effort TEARDOWN (the reference's Drop path: 1 s, errors
+     * ignored, sequence mismatches skipped) then close everything */
+    {
+        kn_rtsp_header th[4];
+        kn_rtsp_response tresp;
+        th[0] = common[0]; th[1] = common[1]; th[2] = common[2];
+        th[3].name = "Session";
+        th[3].value = desc.session[0] ? desc.session : sess.session_id;
+        rtc.timeout_ms = 1000;
+        (void)kn_rtsp_request(&rtc, "TEARDOWN", sess.rtsps_endpoint, th, 4,
+                              NULL, 0, 1, &tresp);
+    }
+    kn_ws_send_close(&wsc, 1000);
+    kn_net_tls_stream_close(sig_tls);
+    if (cm_tls) kn_net_tls_stream_close(cm_tls);
+    if (exit_code != 0 && !have_sess)
+        kn_log_on_failure("session.rtsp", "E_SESSION_RTSP",
+                          "the RTSPS sequence did not complete",
+                          "the rtsp step lines above show where it stopped; "
+                          "401/403 = token, 503 = service, timeouts = rig");
+    kn_log_shutdown();
+    return exit_code;
+}
+
 static int print_version(void)
 {
     static char build[4096];
@@ -2106,7 +3046,12 @@ int main(int argc, char **argv)
     long replay_vps = 0;
     int loopback_seconds = 600;           /* G1 default: 10 minutes */
     int no_audio = 0;
-    int capture = 0, decode = 0;
+    int capture = 0, decode = 0, session = 0;
+    const char *sess_token = NULL, *sess_device = "karnynow-win7-e5500";
+    const char *sess_title = "KarnyNow session", *sess_cm_host = NULL;
+    const char *sess_au_dir = NULL;
+    long long sess_app = 0;
+    long sess_seconds = 60, sess_queue_timeout = 180, sess_expect = 0;
     long cap_port = 4798, dec_port = 4798;
     long cap_seconds = 30, dec_seconds = 30;
     long dec_vps = 0, dec_expect = 0;
@@ -2154,6 +3099,24 @@ int main(int argc, char **argv)
             dec_au_dir = a + 16;
         else if (strncmp(a, "--decode-expect-frames=", 23) == 0)
             dec_expect = strtol(a + 23, NULL, 10);
+        else if (strcmp(a, "--session") == 0) session = 1;
+        else if (strncmp(a, "--session-token=", 16) == 0)
+            sess_token = a + 16;
+        else if (strncmp(a, "--session-device=", 17) == 0)
+            sess_device = a + 17;
+        else if (strncmp(a, "--session-title=", 16) == 0)
+            sess_title = a + 16;
+        else if (strncmp(a, "--session-app=", 14) == 0)
+            sess_app = strtoll(a + 14, NULL, 10);
+        else if (strncmp(a, "--cm-host=", 10) == 0) sess_cm_host = a + 10;
+        else if (strncmp(a, "--session-seconds=", 18) == 0)
+            sess_seconds = strtol(a + 18, NULL, 10);
+        else if (strncmp(a, "--session-queue-timeout=", 24) == 0)
+            sess_queue_timeout = strtol(a + 24, NULL, 10);
+        else if (strncmp(a, "--session-expect-frames=", 24) == 0)
+            sess_expect = strtol(a + 24, NULL, 10);
+        else if (strncmp(a, "--session-au-dir=", 17) == 0)
+            sess_au_dir = a + 17;
         else if (strcmp(a, "--diagnostics") == 0) diagnostics = 1;
         else if (strcmp(a, "--version") == 0) version = 1;
         else if (strcmp(a, "--list-selftests") == 0) list = 1;
@@ -2185,6 +3148,20 @@ int main(int argc, char **argv)
         return run_decode((uint16_t)dec_port, dec_bind, dec_seconds,
                           dec_srtp, dec_vps, dec_au_dir, dec_expect,
                           log_dir);
+    if (session) {
+        if (!sess_token || !sess_token[0] || sess_app <= 0 ||
+            sess_seconds < 0 || sess_seconds > 86400 ||
+            sess_queue_timeout < 0 || sess_queue_timeout > 86400 ||
+            sess_expect < 0 || sess_expect > 100000000) {
+            usage();
+            return 2;
+        }
+        return run_session(sess_token, sess_device, sess_app, sess_title,
+                           sess_cm_host && sess_cm_host[0] ? sess_cm_host
+                               : KN_CM_DEFAULT_BASE_HOST,
+                           sess_seconds, sess_queue_timeout, sess_expect,
+                           sess_au_dir, log_dir);
+    }
     if (diagnostics) return run_diagnostics(log_dir);
     usage();
     return 2;

@@ -114,6 +114,11 @@ typedef struct kn_sock_udp {
     uint64_t recv_datagrams, recv_bytes, recv_timeouts, recv_errors,
              recv_msgsize, recv_truncated;
     uint64_t send_datagrams, send_bytes, send_errors;
+    int      connected;         /* kn_sock_udp_connect() applied: the
+                                   kernel filters recv to this peer and
+                                   sendto() uses send() */
+    uint32_t peer_addr;         /* network order (when connected) */
+    uint16_t peer_port;
 #ifdef _WIN32
     uintptr_t fd;               /* SOCKET without a winsock type here
                                    (uintptr_t == UINT_PTR on every Win32
@@ -153,6 +158,14 @@ int  kn_sock_udp_recv(kn_sock_udp *s, uint8_t *buf, size_t cap,
  * loopback tests today and by the stage-2 RTCP/ping senders later. */
 int  kn_sock_udp_sendto(kn_sock_udp *s, uint32_t ipv4, uint16_t port,
                         const uint8_t *data, size_t len);
+
+/* Connect the UDP socket to a fixed peer (stage-2 --session: the media
+ * flow's source is the RTSP SETUP videoPeer — the kernel then DROPS any
+ * datagram from another source, so the live pipeline never sees stray
+ * traffic on the ephemeral port). Also makes sendto()'s destination
+ * implicit (send() is used when connected). A connected socket can be
+ * re-connected to a new peer (stream switch). KN_SOCK_OK / KN_SOCK_ERR_*. */
+int  kn_sock_udp_connect(kn_sock_udp *s, uint32_t ipv4, uint16_t port);
 
 #ifdef __cplusplus
 }

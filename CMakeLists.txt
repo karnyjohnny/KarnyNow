@@ -47,6 +47,9 @@ add_library(kncore STATIC
   streamer/src/kn_sock.c
   streamer/src/kn_ws.c
   streamer/src/kn_rtsp.c
+  streamer/src/kn_json.c
+  streamer/src/kn_http.c
+  streamer/src/kn_cm.c
   third_party/tiny-aes-c/aes.c
   third_party/crypto-algorithms-sha1/sha1.c
 )
@@ -179,7 +182,7 @@ target_compile_definitions(kncore PRIVATE
   KN_DIAG_BUILD_EXTRA="${_kn_ffmpeg}")
 
 enable_testing()
-foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp)
+foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm)
   add_executable(test_${t} streamer/tests/test_${t}.c)
   target_link_libraries(test_${t} PRIVATE kncore)
   # tests include the generated KAT vector headers, which live in src/

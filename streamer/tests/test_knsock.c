@@ -352,6 +352,56 @@ static void test_bad_args(void)
     kn_sock_udp_close(&tx);
 }
 
+static void test_connect(void)
+{
+    kn_sock_udp rx, tx, stray;
+    char err[128];
+    uint8_t in[64];
+    size_t n = 0;
+    int rc, i;
+
+    printf("-- connected UDP (peer filtering, --session media path) --\n");
+    rc  = kn_sock_udp_open(&rx, "127.0.0.1", 0, 1u << 20, err, sizeof err);
+    rc |= kn_sock_udp_open(&tx, "127.0.0.1", 0, 0, err, sizeof err);
+    rc |= kn_sock_udp_open(&stray, "127.0.0.1", 0, 0, err, sizeof err);
+    CHECK(rc == KN_SOCK_OK, "three sockets open");
+    CHECK(kn_sock_udp_connect(&rx, LOOPBACK_IP, kn_sock_udp_port(&tx)) ==
+          KN_SOCK_OK, "connect to the tx peer");
+    CHECK(rx.connected == 1 && rx.peer_port == kn_sock_udp_port(&tx),
+          "connected state recorded");
+    CHECK(kn_sock_udp_sendto(&tx, LOOPBACK_IP, kn_sock_udp_port(&rx),
+                             (const uint8_t *)"from-peer", 9) == KN_SOCK_OK,
+          "peer send accepted");
+    /* a STRAY socket sends to the same port — the kernel must drop it */
+    CHECK(kn_sock_udp_sendto(&stray, LOOPBACK_IP, kn_sock_udp_port(&rx),
+                             (const uint8_t *)"stray!", 6) == KN_SOCK_OK,
+          "stray send accepted at the API level (kernel filters)");
+    rc = kn_sock_udp_recv(&rx, in, sizeof in, 500, &n, NULL);
+    CHECK(rc == 1 && n == 9 && memcmp(in, "from-peer", 9) == 0,
+          "only the connected peer's datagram is delivered");
+    rc = kn_sock_udp_recv(&rx, in, sizeof in, 100, &n, NULL);
+    CHECK(rc == 0, "stray datagram never surfaces (recv times out)");
+    /* connected sendto uses send() — destination is implicit */
+    CHECK(kn_sock_udp_sendto(&rx, 0, 0, (const uint8_t *)"reply", 5) ==
+          KN_SOCK_OK, "connected sendto (implicit destination)");
+    rc = kn_sock_udp_recv(&tx, in, sizeof in, 500, &n, NULL);
+    CHECK(rc == 1 && n == 5 && memcmp(in, "reply", 5) == 0,
+          "reply arrives at the peer");
+    /* re-connect to another peer (stream switch) */
+    CHECK(kn_sock_udp_connect(&rx, LOOPBACK_IP,
+                              kn_sock_udp_port(&stray)) == KN_SOCK_OK,
+          "re-connect (stream switch)");
+    CHECK(kn_sock_udp_sendto(&stray, LOOPBACK_IP, kn_sock_udp_port(&rx),
+                             (const uint8_t *)"now-peer", 8) == KN_SOCK_OK,
+          "new peer sends");
+    rc = kn_sock_udp_recv(&rx, in, sizeof in, 500, &n, NULL);
+    CHECK(rc == 1 && n == 8, "new peer's datagram delivered");
+    (void)i;
+    kn_sock_udp_close(&rx);
+    kn_sock_udp_close(&tx);
+    kn_sock_udp_close(&stray);
+}
+
 int main(void)
 {
     test_clock();
@@ -363,5 +413,6 @@ int main(void)
     test_burst();
     test_truncation();
     test_bad_args();
+    test_connect();
     return kn_test_summary("test_knsock");
 }

@@ -1,0 +1,117 @@
+/* kn_cm.h — CloudMatch session client (stage-2 bring-up subset).
+ *
+ * Provenance: cloudmatch.rs @ a49b124 — POST v2/session (:361-371 body
+ * :1643-1762), headers (:2036-2059), readiness (status 2|3 + non-empty
+ * rtspsEndpoints, :1524-1533), resume statuses (:1505-1512), session_info
+ * (:1946-2103) incl. the rtspsEndpoints DERIVATION from connectionInfo
+ * (:1989-2022 — usage 16, or usage 14 with appLevelProtocol 1|6), the
+ * media/bundle connection (usage 2|17, :1866-1878) and queue_position's
+ * four-source fallback (:1971-1982). Wire facts mirrored in
+ * docs/RTSP.md §5; login/token: docs/AUTH.md.
+ *
+ * DEVIATION (documented, bounded): R22's full 31-field session context is
+ * the stage-4 TUI IPC contract; this struct carries the stage-2 SUBSET
+ * the media path consumes (sessionId/status/phase/queue/seat, the first
+ * rtsps endpoint + its wss transform, serverIp, the bundle peer). The raw
+ * JSON is available to the caller for logging (redacted) and for the
+ * stage-4 upgrade. Fields marked UNVERIFIED in the .c body builder are
+ * measured at R7 (the first real POST) — that gate exists precisely
+ * because no captured cloud traffic backs them yet (R32's rule).
+ */
+#ifndef KN_CM_H
+#define KN_CM_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "kn/kn_http.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Identity constants (transcribed; NOT secrets — they ship in the
+ * reference binary): docs/AUTH.md §1 + cloudmatch.rs:16-17. */
+#define KN_CM_LCARS_CLIENT_ID  "ec7e38d4-03af-4b58-b131-cfb0495903ab"
+#define KN_CM_CLIENT_VERSION   "2.0.87.131"
+#define KN_CM_DEFAULT_BASE_HOST "prod.cloudmatchbeta.nvidiagrid.net"
+
+typedef struct kn_cm_settings {
+    const char *token;         /* GFNJWT service token (id_token) — the
+                                  logging layer must never see it (§7) */
+    const char *device_id;     /* deviceHashId + x-device-id */
+    long long   app_id;        /* numeric GFN appId */
+    const char *title;         /* internalTitle */
+    uint32_t    width, height, fps;
+    long        timezone_offset_ms;   /* clientTimezoneOffset */
+} kn_cm_settings;
+
+/* session_phase mapping (cloudmatch.rs:2698-2707). */
+const char *kn_cm_phase(long long status);
+
+typedef struct kn_cm_session {
+    char      session_id[64];
+    long long status;
+    const char *phase;         /* static string from kn_cm_phase */
+    long long queue_position;  int have_queue;   /* first >0 of the four
+                                                    sources (:1971-1982) */
+    long long seat_setup_step; int have_seat;    /* seatSetupInfo.seatSetupStep */
+    char      rtsps_endpoint[256]; int have_rtsps;  /* first derived */
+    char      signaling_url[256];   /* rtsps:// -> wss:// (:2046-2048) */
+    char      server_ip[64];        /* signaling conn ip, else
+                                       sessionControlInfo.ip (:1966-1969) */
+    char      media_ip[64];         /* bundle peer (usage 2|17) */
+    uint16_t  media_port;
+    int       have_media;
+    int       resumable;            /* status 2..5 (:1505-1512) */
+    int       ready;                /* status 2|3 AND have_rtsps */
+} kn_cm_session;
+
+/* Build the POST v2/session body ({"sessionRequestData":{...}}) —
+ * field-for-field with build_create_body for the H264/8-bit/no-HDR
+ * envelope (codec is client-selected and never sent; the reference's
+ * alliance-WebRTC variant is out of scope). Returns 0 / negative.
+ * networkTestSessionId is sent as null (bring-up deviation D-cm1: the
+ * reference tolerates "not_requested"; R7 measures whether the cloud
+ * accepts it for this account/zone). */
+int kn_cm_build_create_body(const kn_cm_settings *s, char *out,
+                            size_t outsz, size_t *out_len);
+
+/* The Authorization header value ("GFNJWT <token>") — the token itself
+ * is NEVER logged; this buffer is for the request only. */
+int kn_cm_auth_header(const kn_cm_settings *s, char *out, size_t outsz);
+
+/* Fixed nv-client / nv-device header set (values transcribed from
+ * cloudmatch_headers + the platform constants; Content-Type text/plain
+ * quirk included). Fills up to `max` entries; returns the count. */
+int kn_cm_fixed_headers(const kn_cm_settings *s, kn_http_header *h, int max);
+
+/* Extract the session subset from a CloudMatch response BODY (the
+ * {"requestStatus":..,"session":{..}} payload). Returns 0 when a
+ * non-empty sessionId was present (the reference's hard requirement,
+ * :1953-1955), -1 otherwise; fields are best-effort filled either way. */
+int kn_cm_extract_session(const char *json_text, kn_cm_session *out);
+
+/* Networked operations (deadline via the injected clock; rxb/jsonbuf are
+ * caller-owned scratch/dest). *http_status receives the raw code.
+ * create: POST {base_path}v2/session. poll: GET {base_path}v2/session/{id}.
+ * base_path ends with '/' ("" = root). Returns KN_HTTP_OK when a
+ * response was parsed (check http_status: 200 = usable body), else the
+ * negative transport code. */
+int kn_cm_create(kn_http_io io, const char *host, const char *base_path,
+                 const kn_cm_settings *s, uint32_t timeout_ms,
+                 uint64_t (*now_ms)(void *), void *now_ctx,
+                 uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
+                 int *http_status, kn_cm_session *out);
+int kn_cm_poll(kn_http_io io, const char *host, const char *base_path,
+               const kn_cm_settings *s, const char *session_id,
+               uint32_t timeout_ms,
+               uint64_t (*now_ms)(void *), void *now_ctx,
+               uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
+               int *http_status, kn_cm_session *out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* KN_CM_H */

@@ -414,3 +414,80 @@ fake-rig E2E (real sockets: WS handshake + the full RTSP sequence against
 `knvstd`), and the `knvstd --session` integration that feeds the handoff
 (§4) into `kn_rx_video_config` + `kn_rx_srtp_session` + the connected UDP
 socket → the existing target-verified `--decode` path.
+
+## 9. Round XXI — the production path is BUILT (status + deviations)
+
+Everything in §6's plan is now implemented and sandbox-proven EXCEPT the
+OAuth login itself (stage 4 per docs/AUTH.md; bring-up uses a pasted
+token) and the real-cloud measurement (R7):
+
+* **`kn_net_tls_stream_*`** (kn_net.h / kn_net_mbedtls.c): the persistent
+  verified TLS-1.2 stream — same policy object as the T12-proven probes
+  (VERIFY_REQUIRED, SNI/hostname, Windows ROOT stores read-only,
+  min=max=TLS 1.2, PSA init), port-parameterized TCP open (RTSPS lives on
+  322, not 443), per-call SO_RCVTIMEO, recv contract >0/0-timeout/-1-err/
+  -2-EOF. Win32+mbedTLS ONLY; every other build gets honest stubs
+  (`available()==0`) and `--session` refuses loudly — NO plaintext
+  fallback exists. The Win32 body compiles first on the target (T10 r16);
+  it mirrors kn_tls_session line-for-line, so the risk is bounded.
+* **`kn_json`** (1024-node pool, depth 32, zero-alloc, raw-span strings
+  with on-demand unescape incl. surrogate pairs, int64-exact re-parse) +
+  **`kn_http`** (HTTP/1.1 one-shot: CL / chunked / read-to-EOF framing,
+  resumable chunk parser — the 1-byte-delivery KAT caught a stranded
+  cursor in the first draft) + **`kn_cm`** (create/poll/extract per §5;
+  the rtspsEndpoints DERIVATION from connectionInfo, media/bundle usage
+  2|17, queue-position 4-source fallback, ready/resumable rules; the
+  POST body field-for-field with build_create_body). **`test_kncm`: 91
+  checks** — fixtures follow the reference's own test shapes (:4073-4085).
+* **`kn_sock_udp_connect`**: the media socket CONNECTS to the SETUP peer
+  (kernel source filter — stray traffic never reaches kn_rx) and refreshes
+  local_addr via getsockname, so the ANNOUNCE carries the REAL route
+  source address like the reference's reserved bundle socket does.
+  `test_knsock` +12 checks (stray-datagram rejection, re-connect).
+* **`tools/fake_rig.py` + `tools/sandbox_session_e2e.c`**: the two-
+  implementations rule at the signaling layer — an independent Python rig
+  (HTTP + WS server with its own RFC 6455 framing) against the C client
+  over REAL loopback sockets: create → poll → WS handshake (x-nv-
+  sessionid) → OPTIONS → DESCRIBE → SETUP → ANNOUNCE(negotiated) → PLAY →
+  handoff (salt/profile/SRTP-session or honest NO_CIPHER) → connected UDP
+  peer. **36 checks PASS.** The rig also asserts the server side (the
+  ANNOUNCE must echo the runtime key; exactly 1 PLAY).
+* **`knvstd --session`** (the §6 stage-5 glue, TLS-only): CloudMatch
+  create + 2 s poll loop with queue JSONL events (status/phase/queue_
+  position/seat — the TUI's stage-4 feed) → signaling TLS + WS + the full
+  RTSP sequence → handoff → kn_rx SRTP session + connected UDP → the
+  round-XVII media loop (SAME dec_* machinery: capacity-2 queue, overflow
+  policy, JSONL contract — so --verify/T13-style checks apply to a real
+  session's stdout unchanged). Token logged as LENGTH ONLY; key material
+  never logged (lengths/handoff shapes only, §4's rule). TEARDOWN on exit
+  (1 s, mismatch-skip). The media loop deliberately DUPLICATES run_decode
+  instead of refactoring the T13-verified function (churn discipline);
+  unification after --session has target evidence.
+
+**New deviations (round XXI):**
+* **D-s1 (UNVERIFIED, measured at R7)**: the ANNOUNCE carries locally
+  generated ICE ufrag/pwd and a RANDOM 32-byte placeholder DTLS
+  fingerprint — the real bundle identity needs the stage-3 DTLS
+  certificate (R3). Mjolnir video (SRTP/UDP) is independent of bundle
+  DTLS, so video should flow; the rig's bundle side failing DTLS is
+  EXPECTED until stage 3.
+* **D-cm1**: `networkTestSessionId: null` (the reference tolerates
+  "not_requested"; whether the cloud wants a real network test for this
+  account/zone is an R7 measurement).
+* **D-cm2**: `SubSessionId` = the device id (the reference sends a fresh
+  random UUID per launch; UUID generation lands with the login work).
+* **D-cm3**: the R22 31-field session context is a SUBSET here (the
+  stage-2 media fields); the full contract is stage-4 TUI IPC.
+
+**Sandbox gates (round XXI):** native **13 suites, 1309 checks PASS**;
+cross x64+i686 `-Werror` PASS; knvstd (incl. --session) clean under
+`-Wformat-truncation=2` at -O1 host / -O2 mingw; CMake 0 warnings +
+ctest **15/15** both backends; T13 ALL PASS **51 (FFmpeg) / 51 (ASan+
+UBSan+LSan) / 63 (mbedTLS+gcm256)**; sandbox_session_e2e **36/36**;
+T10 POSIX dry-run ALL PASS **61**.
+**Target expectations:** T10 r16 → ALL PASS **72** (r15's 71 +
+test_kncm; registry stays 14 — no new self-test this round; the Win32
+TLS-stream implementation compiles for the first time). T13 r3 → ALL
+PASS **61** unchanged. `--session` needs a real token + appId: that is
+the R7 measurement round (docs/AUTH.md §3 explains how to get the token
+manually until stage 4).

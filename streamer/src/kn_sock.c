@@ -294,6 +294,36 @@ int kn_sock_udp_recv(kn_sock_udp *s, uint8_t *buf, size_t cap,
     return 1;
 }
 
+int kn_sock_udp_connect(kn_sock_udp *s, uint32_t ipv4, uint16_t port)
+{
+    struct sockaddr_in to;
+    if (!s) return KN_SOCK_ERR_ARGS;
+    if (!s->is_open || !s->fd_valid) return KN_SOCK_ERR_STATE;
+    memset(&to, 0, sizeof to);
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    memcpy(&to.sin_addr, &ipv4, 4);
+    if (connect(KN_SOCK_FD(s), (const struct sockaddr *)&to,
+                (socklen_t)sizeof to) != 0) {
+        s->last_error = KN_SOCK_ERRNO();
+        return KN_SOCK_ERR_SOCKET;
+    }
+    s->peer_addr = ipv4;
+    s->peer_port = port;
+    s->connected = 1;
+    {   /* the kernel has now chosen the route's SOURCE address — refresh
+         * the local view so callers (the RTSP ANNOUNCE's
+         * clientPorts.localAddress) report the real one */
+        struct sockaddr_in sa;
+        socklen_t sl = (socklen_t)sizeof sa;
+        if (getsockname(KN_SOCK_FD(s), (struct sockaddr *)&sa, &sl) == 0) {
+            s->local_port = ntohs(sa.sin_port);
+            memcpy(&s->local_addr, &sa.sin_addr, 4);
+        }
+    }
+    return KN_SOCK_OK;
+}
+
 int kn_sock_udp_sendto(kn_sock_udp *s, uint32_t ipv4, uint16_t port,
                        const uint8_t *data, size_t len)
 {
@@ -303,12 +333,16 @@ int kn_sock_udp_sendto(kn_sock_udp *s, uint32_t ipv4, uint16_t port,
     if (!s->is_open || !s->fd_valid) return KN_SOCK_ERR_STATE;
     if (len > KN_SOCK_MAX_DATAGRAM) return KN_SOCK_ERR_ARGS;
 
-    memset(&to, 0, sizeof to);
-    to.sin_family = AF_INET;
-    to.sin_port = htons(port);
-    memcpy(&to.sin_addr, &ipv4, 4);
-    n = sendto(KN_SOCK_FD(s), (const char *)data, (int)len, 0,
-               (const struct sockaddr *)&to, (socklen_t)sizeof to);
+    if (s->connected) {
+        n = send(KN_SOCK_FD(s), (const char *)data, (int)len, 0);
+    } else {
+        memset(&to, 0, sizeof to);
+        to.sin_family = AF_INET;
+        to.sin_port = htons(port);
+        memcpy(&to.sin_addr, &ipv4, 4);
+        n = sendto(KN_SOCK_FD(s), (const char *)data, (int)len, 0,
+                   (const struct sockaddr *)&to, (socklen_t)sizeof to);
+    }
     if (n < 0 || (size_t)n != len) {
         s->last_error = KN_SOCK_ERRNO();
         s->send_errors++;

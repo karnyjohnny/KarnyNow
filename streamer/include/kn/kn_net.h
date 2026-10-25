@@ -26,6 +26,7 @@
 #define KN_NET_H
 
 #include <stddef.h>
+#include <stdint.h>   /* round XXI: the TLS-stream API uses fixed types */
 
 #ifdef __cplusplus
 extern "C" {
@@ -98,6 +99,34 @@ typedef struct kn_net_chain {
 } kn_net_chain;
 
 int kn_net_chain_dump(const char *host, kn_net_chain *out);
+
+/* ------------------------------------------------- TLS stream (round XXI)
+ * A PERSISTENT verified TLS-1.2 client stream — the production transport
+ * under kn_ws (RTSP-over-WS to the rig's rtsps/wss endpoint, port 322)
+ * and kn_http/kn_cm (CloudMatch, port 443). Same non-negotiable policy as
+ * the probes: mbedTLS backend, MBEDTLS_SSL_VERIFY_REQUIRED, hostname/SNI
+ * verification against the read-only Windows ROOT stores, min=max=TLS 1.2
+ * (the T12 finding: TLS 1.3's Finished/PSA path fails on Win7 — the cap
+ * is protocol isolation, never a verification bypass).
+ *
+ * Implemented ONLY in Win32+mbedTLS builds (kn_net_mbedtls.c); every
+ * other build gets honest stubs from kn_net.c: available() == 0, open()
+ * == NULL. Callers must check kn_net_tls_stream_available() and fail
+ * loudly — never fall back to plaintext.
+ *
+ * recv contract (matches kn_http_io/kn_ws_io expectations):
+ *   >0 bytes read | 0 timeout (retryable) | -1 error | -2 peer closed. */
+typedef struct kn_net_tls_stream kn_net_tls_stream;
+
+int kn_net_tls_stream_available(void);
+kn_net_tls_stream *kn_net_tls_stream_open(const char *host, uint16_t port,
+                                          uint32_t timeout_ms,
+                                          char *err, size_t errsz);
+int  kn_net_tls_stream_send(kn_net_tls_stream *s, const uint8_t *buf,
+                            size_t len);          /* all-or-error: 0 / -1 */
+int  kn_net_tls_stream_recv(kn_net_tls_stream *s, uint8_t *buf, size_t cap,
+                            uint32_t timeout_ms); /* >0 / 0 / -1 / -2 */
+void kn_net_tls_stream_close(kn_net_tls_stream *s);   /* NULL-safe */
 
 #ifdef __cplusplus
 }

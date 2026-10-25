@@ -1,6 +1,11 @@
 /* kn_net_mbedtls.c — Win32 network probes using the pinned mbedTLS backend. */
 #include "kn/kn_net.h"
 
+#include <stdio.h>    /* unconditional: the POSIX stub section (round XXI
+                         TLS-stream stubs) formats error text too */
+#include <stdlib.h>   /* calloc/free in the stream API — do NOT rely on
+                         transitive includes (i686 mingw round-XXII catch:
+                         x64 headers dragged stdlib in, i686 did not) */
 #include <string.h>
 
 #ifdef _WIN32
@@ -90,8 +95,9 @@ static void kn_json_copy(char *dst, size_t dstsz, const char *src)
     dst[i] = '\0';
 }
 
-static SOCKET kn_tcp_open(const char *host, int *rc, int *wsa_error,
-                          char *peer_ip, size_t peer_ipsz, long *ms_out)
+static SOCKET kn_tcp_open_port(const char *host, uint16_t port, int *rc,
+                               int *wsa_error, char *peer_ip, size_t peer_ipsz,
+                               long *ms_out)
 {
     struct addrinfo hints, *results = NULL, *entry;
     SOCKET connected = INVALID_SOCKET;
@@ -105,7 +111,11 @@ static SOCKET kn_tcp_open(const char *host, int *rc, int *wsa_error,
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
-    gai_rc = getaddrinfo(host, "443", &hints, &results);
+    {
+        char portstr[8];
+        snprintf(portstr, sizeof portstr, "%u", (unsigned)port);
+        gai_rc = getaddrinfo(host, portstr, &hints, &results);
+    }
     if (gai_rc != 0 || !results) {
         *wsa_error = WSAGetLastError();
         if (results) freeaddrinfo(results);
@@ -312,7 +322,7 @@ static int kn_tls_session(const char *host, kn_net_tls *tls,
         return -1;
     }
     wsa_started = 1;
-    sock = kn_tcp_open(host, &tcp_rc, &wsa_error, NULL, 0, &tcp_ms);
+    sock = kn_tcp_open_port(host, 443, &tcp_rc, &wsa_error, NULL, 0, &tcp_ms);
     if (sock == INVALID_SOCKET) {
         if (tls) { tls->rc = -2; tls->sec_status = wsa_error; tls->ms = tcp_ms; }
         if (chain) { chain->rc = -2; chain->sec_status = wsa_error; chain->ms = tcp_ms; }
@@ -487,7 +497,7 @@ int kn_net_tcp_connect443(const char *host, kn_net_tcp *out)
         out->wsa_error = WSAGetLastError();
         return -1;
     }
-    sock = kn_tcp_open(host, &rc, &wsa_error, out->peer_ip,
+    sock = kn_tcp_open_port(host, 443, &rc, &wsa_error, out->peer_ip,
                        sizeof out->peer_ip, &out->ms);
     if (sock != INVALID_SOCKET) {
         closesocket(sock);
@@ -511,6 +521,185 @@ int kn_net_chain_dump(const char *host, kn_net_chain *out)
     if (!host || !out) return -1;
     return kn_tls_session(host, NULL, out);
 }
+
+/* ------------------------------------------------- persistent TLS stream
+ * Round XXI: the production transport under kn_ws (RTSPS/WSS, port 322)
+ * and kn_http/kn_cm (CloudMatch, 443). The TLS policy is IDENTICAL to the
+ * T12-verified probe path: VERIFY_REQUIRED, hostname/SNI, read-only
+ * Windows ROOT stores, min=max=TLS 1.2, PSA initialized before use.
+ * Verification is never disabled; there is no plaintext fallback. */
+
+struct kn_net_tls_stream {
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context drbg;
+    mbedtls_ssl_config config;
+    mbedtls_ssl_context ssl;
+    mbedtls_x509_crt roots;
+    SOCKET sock;
+    int wsa_started;
+    char peer_ip[24];
+    long handshake_ms;
+};
+
+int kn_net_tls_stream_available(void) { return 1; }
+
+kn_net_tls_stream *kn_net_tls_stream_open(const char *host, uint16_t port,
+                                          uint32_t timeout_ms,
+                                          char *err, size_t errsz)
+{
+    kn_net_tls_stream *s;
+    int tcp_rc = 0, wsa_error = 0, ret;
+    long tcp_ms = 0;
+    long long start;
+    DWORD io_timeout;
+
+    if (err && errsz) err[0] = '\0';
+    if (!host || !host[0]) {
+        if (err && errsz) snprintf(err, errsz, "no host");
+        return NULL;
+    }
+    s = (kn_net_tls_stream *)calloc(1, sizeof *s);
+    if (!s) {
+        if (err && errsz) snprintf(err, errsz, "alloc failed");
+        return NULL;
+    }
+    s->sock = INVALID_SOCKET;
+    if (kn_wsa_begin() != 0) {
+        if (err && errsz) snprintf(err, errsz, "WSAStartup failed (%d)",
+                                   WSAGetLastError());
+        free(s);
+        return NULL;
+    }
+    s->wsa_started = 1;
+    s->sock = kn_tcp_open_port(host, port, &tcp_rc, &wsa_error,
+                               s->peer_ip, sizeof s->peer_ip, &tcp_ms);
+    if (s->sock == INVALID_SOCKET) {
+        if (err && errsz) snprintf(err, errsz,
+                                   "TCP connect to %.120s:%u failed "
+                                   "(rc %d, wsa %d)", host,
+                                   (unsigned)port, tcp_rc, wsa_error);
+        kn_net_tls_stream_close(s);
+        return NULL;
+    }
+    io_timeout = timeout_ms ? (DWORD)timeout_ms : (DWORD)KN_NET_IO_TIMEOUT_MS;
+    setsockopt(s->sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&io_timeout,
+               sizeof io_timeout);
+    setsockopt(s->sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&io_timeout,
+               sizeof io_timeout);
+
+    mbedtls_entropy_init(&s->entropy);
+    mbedtls_ctr_drbg_init(&s->drbg);
+    mbedtls_ssl_config_init(&s->config);
+    mbedtls_ssl_init(&s->ssl);
+    mbedtls_x509_crt_init(&s->roots);
+    start = kn_mono_ms();
+
+    {
+        psa_status_t psa_status = psa_crypto_init();
+        if (psa_status != PSA_SUCCESS)
+            ret = MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+        else
+            ret = mbedtls_ctr_drbg_seed(&s->drbg, mbedtls_entropy_func,
+                                        &s->entropy,
+                                        (const unsigned char *)"KarnyNow TLS",
+                                        12);
+    }
+    if (ret == 0) ret = kn_load_root_store(&s->roots);
+    if (ret == 0)
+        ret = mbedtls_ssl_config_defaults(&s->config, MBEDTLS_SSL_IS_CLIENT,
+                                          MBEDTLS_SSL_TRANSPORT_STREAM,
+                                          MBEDTLS_SSL_PRESET_DEFAULT);
+    if (ret == 0) {
+        mbedtls_ssl_conf_authmode(&s->config, MBEDTLS_SSL_VERIFY_REQUIRED);
+        mbedtls_ssl_conf_ca_chain(&s->config, &s->roots, NULL);
+        mbedtls_ssl_conf_rng(&s->config, mbedtls_ctr_drbg_random, &s->drbg);
+        mbedtls_ssl_conf_dbg(&s->config, kn_mbed_debug, NULL);
+        mbedtls_debug_set_threshold(KN_MBEDTLS_DEBUG_LEVEL);
+        mbedtls_ssl_conf_min_tls_version(&s->config,
+                                         MBEDTLS_SSL_VERSION_TLS1_2);
+        mbedtls_ssl_conf_max_tls_version(&s->config,
+                                         MBEDTLS_SSL_VERSION_TLS1_2);
+        ret = mbedtls_ssl_setup(&s->ssl, &s->config);
+    }
+    if (ret == 0) ret = mbedtls_ssl_set_hostname(&s->ssl, host);
+    if (ret == 0) {
+        mbedtls_ssl_set_bio(&s->ssl, &s->sock, kn_ssl_send, kn_ssl_recv,
+                            NULL);
+        ret = mbedtls_ssl_handshake(&s->ssl);
+    }
+    s->handshake_ms = (long)(kn_mono_ms() - start);
+    if (ret != 0) {
+        char why[192];
+        mbedtls_strerror(ret, why, sizeof why);
+        if (err && errsz)
+            snprintf(err, errsz,
+                     "TLS handshake with %.120s:%u failed (-0x%04x: %.100s)",
+                     host, (unsigned)port, (unsigned)(-ret), why);
+        if (kn_log_is_initialized()) {
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                     "tls.stream handshake failed -0x%04x host=%.120s",
+                     (unsigned)(-ret), host);
+            kn_log_simple(KN_CH_DIAG, KN_WARN, NULL, msg);
+        }
+        kn_net_tls_stream_close(s);
+        return NULL;
+    }
+    return s;
+}
+
+int kn_net_tls_stream_send(kn_net_tls_stream *s, const uint8_t *buf,
+                           size_t len)
+{
+    size_t off = 0;
+    if (!s || (!buf && len)) return -1;
+    while (off < len) {
+        int ret = mbedtls_ssl_write(&s->ssl, buf + off, len - off);
+        if (ret > 0) { off += (size_t)ret; continue; }
+        if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        return -1;                       /* timeout/send failure: fatal */
+    }
+    return 0;
+}
+
+int kn_net_tls_stream_recv(kn_net_tls_stream *s, uint8_t *buf, size_t cap,
+                           uint32_t timeout_ms)
+{
+    int ret;
+    DWORD io_timeout;
+    if (!s || !buf || cap == 0) return -1;
+    io_timeout = timeout_ms ? (DWORD)timeout_ms : (DWORD)KN_NET_IO_TIMEOUT_MS;
+    setsockopt(s->sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&io_timeout,
+               sizeof io_timeout);
+    ret = mbedtls_ssl_read(&s->ssl, buf, (int)(cap > INT_MAX ? INT_MAX : cap));
+    if (ret > 0) return ret;
+    if (ret == 0) return -2;                              /* orderly EOF */
+    if (ret == MBEDTLS_ERR_SSL_TIMEOUT || ret == MBEDTLS_ERR_SSL_WANT_READ)
+        return 0;                                         /* retryable */
+    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||
+        ret == MBEDTLS_ERR_NET_CONN_RESET)
+        return -2;                                        /* peer closed */
+    return -1;
+}
+
+void kn_net_tls_stream_close(kn_net_tls_stream *s)
+{
+    if (!s) return;
+    if (s->ssl.MBEDTLS_PRIVATE(state) != 0)
+        (void)mbedtls_ssl_close_notify(&s->ssl);
+    mbedtls_ssl_free(&s->ssl);
+    mbedtls_ssl_config_free(&s->config);
+    mbedtls_x509_crt_free(&s->roots);
+    mbedtls_ctr_drbg_free(&s->drbg);
+    mbedtls_entropy_free(&s->entropy);
+    if (s->sock != INVALID_SOCKET) {
+        closesocket(s->sock);
+        s->sock = INVALID_SOCKET;
+    }
+    if (s->wsa_started) kn_wsa_end();
+    free(s);
+}
+
 
 #else
 
@@ -551,5 +740,37 @@ int kn_net_chain_dump(const char *host, kn_net_chain *out)
     out->rc = -3;
     return -1;
 }
+
+/* TLS stream stubs for POSIX/mbedTLS builds (the Win32 section above has
+ * the real ones; schannel builds get theirs from kn_net.c — exactly one
+ * definition set per build configuration). */
+int kn_net_tls_stream_available(void) { return 0; }
+
+kn_net_tls_stream *kn_net_tls_stream_open(const char *host, uint16_t port,
+                                          uint32_t timeout_ms,
+                                          char *err, size_t errsz)
+{
+    (void)host; (void)port; (void)timeout_ms;
+    if (err && errsz)
+        snprintf(err, errsz,
+                 "TLS stream is Win32+mbedTLS only in this build");
+    return NULL;
+}
+
+int kn_net_tls_stream_send(kn_net_tls_stream *s, const uint8_t *buf,
+                           size_t len)
+{
+    (void)s; (void)buf; (void)len;
+    return -1;
+}
+
+int kn_net_tls_stream_recv(kn_net_tls_stream *s, uint8_t *buf, size_t cap,
+                           uint32_t timeout_ms)
+{
+    (void)s; (void)buf; (void)cap; (void)timeout_ms;
+    return -1;
+}
+
+void kn_net_tls_stream_close(kn_net_tls_stream *s) { (void)s; }
 
 #endif

@@ -368,7 +368,8 @@ def main():
     log("\n=== unit tests (on target) ===")
     suites = ["test_knlog", "test_knring", "test_knfec", "test_knsrtp",
               "test_kndiag", "test_knselftest", "test_kngs", "test_knaudio",
-              "test_knrx", "test_knsock", "test_knws", "test_knrtsp"]
+              "test_knrx", "test_knsock", "test_knws", "test_knrtsp",
+              "test_kncm"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out
