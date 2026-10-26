@@ -203,6 +203,8 @@ int kn_cm_extract_session(const char *json_text, kn_cm_session *out)
     {
         const kn_jnode *rs = kn_json_get(&d, root, "requestStatus");
         (void)jint(kn_json_get(&d, rs, "statusCode"), &out->req_status_code);
+        (void)jint(kn_json_get(&d, rs, "unifiedErrorCode"),
+                   &out->unified_error);
         (void)jstr(&d, kn_json_get(&d, rs, "statusDescription"),
                    out->req_status_desc, sizeof out->req_status_desc);
     }
@@ -210,12 +212,19 @@ int kn_cm_extract_session(const char *json_text, kn_cm_session *out)
     session = kn_json_get(&d, root, "session");
     if (!session) return -1;
 
+    /* status/phase/errorCode are filled BEFORE the hard sessionId gate:
+     * rejected payloads still carry diagnostics there — run 8's 503 body
+     * was a session SKELETON (sessionControlInfo.ip:null) whose deep
+     * fields a bounded excerpt cannot show (round XXVII; the reference's
+     * cloudmatch_http_error likewise surfaces payload fields, :2377). */
+    (void)jint(kn_json_get(&d, session, "status"), &out->status);
+    out->phase = kn_cm_phase(out->status);
+    (void)jint(kn_json_get(&d, session, "errorCode"), &out->error_code);
+
     if (jstr(&d, kn_json_get(&d, session, "sessionId"),
              out->session_id, sizeof out->session_id) != 0 ||
         !out->session_id[0])
         return -1;                       /* the hard requirement (:1953) */
-    (void)jint(kn_json_get(&d, session, "status"), &out->status);
-    out->phase = kn_cm_phase(out->status);
     out->resumable = (out->status >= 2 && out->status <= 5);
 
     /* queue position: the four-source fallback, first value > 0 */

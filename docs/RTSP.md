@@ -816,3 +816,78 @@ media, OR a 503 window with `class:"transient"`, growing `gap_ms` and a
 If the storm outlives queue_timeout: `stop_reason:"queue_timeout"` +
 `cm_cancel`, and the `body` lines tell us whether to extend the budget
 or treat long 503s as a dead record.
+
+## 14. Round XXVII — R7 run 8 (the 503 body SPEAKS: an app-level session skeleton with sessionControlInfo.ip:null) + the T10-r20 warning fix + control-node re-learning
+
+**What was measured (2026-10-26, the round-XXVI tree):** the new policy
+performed exactly as designed — 12 polls of static `queue_position:80,
+seat_step:1`, then the 503 window opened and the client RODE IT: ten
+`class:"transient"` rounds with the D-s4 backoff visible in the evidence
+(`gap_ms` 6000→9000→13500→20000 cap), until the user pressed Ctrl-C at
+~5 minutes (`stop_reason:"interrupted"`) → `cm_cancel` 200. (The
+session then correctly did NOT appear in the web UI — a queue-stage
+session that was DELETEd is gone; run 6's browser-resume worked because
+that session had reached READY and phase-B-E aborts deliberately do not
+cancel. For keep-it-alive experiments there is now `--session-keep`.)
+
+**The 503 body (the round-XXVI excerpt instrumentation paid off):**
+```
+{"session":{"sessionAds":null,"sessionControlInfo":{"protocol":0,
+ "appLevelProtocol":5,"ip":null,"resourcePath":"/v2/session/479ecbcd-…
+```
+This is **CloudMatch's own JSON** (not an nginx/ALB page): a session
+SKELETON whose `sessionControlInfo.ip` is **null** while `resourcePath`
+still echoes the session id. Reading: the front knows the record but
+cannot presently name the node/state that owns it — the seat-transition
+window of §13 from the inside. The record is alive (DELETE answers 200
+in the same window). The deep fields (`status`, `errorCode`,
+`requestStatus.*`) sit PAST the 160-char excerpt — so this round parses
+them.
+
+**Changes (round XXVII):**
+* **The T10-r20 catch fixed + gated permanently:** `consec_transient`
+  was write-only (the transient class has no bound by design) — target
+  GCC 16.2 flags `-Wunused-but-set-variable`, which sandbox GCC 12 does
+  NOT include in `-Wall` (the fifth target-catch incident, R28). The
+  counter is gone and **both gate scripts now run a paranoid knvstd leg**
+  (`-Werror -Wunused-but-set-variable -Wformat-truncation=2`, host +
+  both cross arches) — the class can never reach the target again.
+* **`kn_cm_session` grows `error_code` (session.errorCode) and
+  `unified_error` (requestStatus.unifiedErrorCode, :2343); status/phase/
+  errorCode are now filled BEFORE the hard sessionId gate**, so a
+  rejected payload (the run-8 skeleton) is fully diagnosable. The
+  `cm_poll_error` line gained `unified_error`, `sess_status`,
+  `err_code`, and the body excerpt grew 160→240 chars. Run 9's 503s
+  will carry the cloud's own numbers.
+* **Control-node re-learning (reference fidelity, was a real gap):**
+  the reference re-derives `streamingBaseUrl` from EVERY successful
+  poll's `sessionControlInfo` and `store_active` saves it as the next
+  poll's `control_base` (:1333-1336 + :1966-1984) — a session that
+  MIGRATES nodes mid-queue is followed. knvstd pinned the poll host at
+  create. Now every successful poll re-runs `kn_cm_control_base` (the
+  round-XXIII trust gate; `ip:null` skeletons simply keep the current
+  host) and a change emits a fresh `cm_control` event with
+  `source:"relearned"`.
+* **`--session-keep`**: skips the phase-A cancel on abort (emits
+  `cm_cancel {"skipped":"session-keep"}`), leaving the queued session
+  alive for the GFN web UI's RESUME / R23 experiments. Default unchanged
+  (cancel — the SESSION_LIMIT hygiene the run-7 pair proved).
+
+**Sandbox gates:** native 13 suites PASS (test_kncm 147→**148**: the
+run-8 skeleton fixture — rejected but status/errorCode/unified/desc all
+surface, ip:null → no control host; unifiedErrorCode added to the
+SESSION_LIMIT fixture; errorCode pinned on the run-5 capture fixture) ·
+cross PASS incl. the new paranoid legs (host+x64+i686 .o) · E2E 43/43 ·
+ctest 15/15 ×2, 0 warnings · T10 dry 62.
+
+**Next measurement = R7 run 9:** same command (+ optionally
+`--session-queue-timeout=1200` in peak hours, + `--session-keep` if the
+session should stay resumable). Watch for: the ~2-min mark → EITHER
+`seat_step:3`→ready→the round-XXV pump's first live try
+(`ice_creds`/`ice_preplay`/PLAY attempts) → first media, OR the 503
+window now speaking in parsed fields (`sess_status`, `err_code`,
+`unified_error`, `cloud_status`, `desc`) — and possibly a
+`cm_control source:"relearned"` line if the session migrates. If the
+window outlives the budget, those five numbers are the basis for the
+next decision (extend the budget, treat long 503s as a dead record, or
+re-create).

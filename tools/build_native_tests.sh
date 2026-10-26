@@ -45,6 +45,12 @@ $CC $CFLAGS streamer/src/kn_rtsp.c streamer/tests/test_knrtsp.c -o build/test_kn
 $CC $CFLAGS streamer/src/kn_json.c streamer/src/kn_http.c \
     streamer/src/kn_cm.c streamer/tests/test_kncm.c -o build/test_kncm
 $CC $CFLAGS $KNCORE streamer/src/knvstd_main.c -o build/knvstd -pthread -lm
+# round XXVII permanent gate (the T10-r20 target catch): GCC 16.2 flags
+# -Wunused-but-set-variable which sandbox GCC 12 does NOT put in -Wall;
+# the paranoid knvstd leg pins both target-catch classes every round.
+echo "== knvstd paranoid: -Wunused-but-set-variable + -Wformat-truncation=2 =="
+$CC $CFLAGS -Werror -Wunused-but-set-variable -Wformat-truncation=2 \
+    -c streamer/src/knvstd_main.c -o build/knvstd_paranoid.o
 
 echo "== kn_decode.c/kn_selftest.c against REAL FFmpeg headers (compile-only) =="
 rcff=0

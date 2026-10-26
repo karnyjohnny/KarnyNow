@@ -85,6 +85,8 @@ static void usage(void)
            "  knvstd --session --session-token=TOK --session-app=N\n"
            "         [--session-title=S] [--session-device=S] [--cm-host=HOST]\n"
            "         [--session-seconds=N] [--session-queue-timeout=N]\n"
+           "         [--session-keep]  (leave the cloud session alive on abort\n"
+           "                           so the GFN web UI can RESUME it)\n"
            "         [--session-expect-frames=N] [--session-au-dir=DIR]\n"
            "       [--log-dir=DIR]   (WASAPI synthetic PCM unless --no-audio)\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
@@ -2461,7 +2463,8 @@ static uint32_t sess_poll_gap(unsigned consec_fails)
 static int run_session(const char *token, const char *device_id,
                        long long app_id, const char *title,
                        const char *cm_host, long seconds,
-                       long queue_timeout, long expect_frames,
+                       long queue_timeout, int keep_on_abort,
+                       long expect_frames,
                        const char *au_dir, const char *log_dir)
 {
     static uint8_t cm_rxb[64 * 1024];
@@ -2502,10 +2505,12 @@ static int run_session(const char *token, const char *device_id,
     const char *poll_src;
     uint16_t poll_port = 443;
     unsigned poll_fails = 0;            /* consecutive failed poll rounds */
-    unsigned consec_transient = 0;      /* ...of each failure class (XXVI:
-                                           transient storms are OUTLIVED,
-                                           transport/hard classes bounded) */
-    unsigned consec_transport = 0, consec_hard = 0;
+    unsigned consec_transport = 0, consec_hard = 0;  /* the two BOUNDED
+                                           failure classes (XXVI) — the
+                                           transient class is outlived and
+                                           needs no counter (XXVII: the
+                                           target GCC 16.2 flagged the
+                                           write-only one, T10 r20) */
     /* round XXV: the pre-PLAY ICE burst state (see sess_ice_pump) */
     char ice_remote_ufrag[288];         /* the resolved ladder output */
     char ice_natt[288];                 /* NATT payload: bundle user | PING */
@@ -2696,10 +2701,34 @@ static int run_session(const char *token, const char *device_id,
         }
         if (round_ok) {
             poll_fails = 0;
-            consec_transient = 0;
             consec_transport = 0;
             consec_hard = 0;
             sess = ps;
+            /* the reference RE-LEARNS the control node from every
+             * successful poll (session_info derives streamingBaseUrl from
+             * THIS payload's sessionControlInfo :1966-1984; store_active
+             * saves it as the next poll's control_base :1333-1336) — a
+             * session that migrates nodes mid-queue is followed. The
+             * trust gate + keep-on-fallback are the :1984 semantics (a
+             * run-8-style ip:null keeps the current host). */
+            {
+                char nh[256];
+                uint16_t np = 443;
+                if (kn_cm_control_base(&sess, nh, sizeof nh, &np) &&
+                    (np != poll_port || strcmp(nh, poll_host) != 0)) {
+                    char esc[300];
+                    size_t nl = strlen(nh);
+                    memcpy(poll_host, nh, nl);
+                    poll_host[nl] = '\0';
+                    poll_port = np;
+                    lb_json_path(esc, sizeof esc, poll_host);
+                    printf("{\"mode\":\"session\",\"event\":\"cm_control\","
+                           "\"poll_host\":\"%s\",\"port\":%u,"
+                           "\"source\":\"relearned\"}\n", esc,
+                           (unsigned)poll_port);
+                    fflush(stdout);
+                }
+            }
             printf("{\"mode\":\"session\",\"event\":\"queue\",\"status\":%lld,"
                    "\"phase\":\"%s\",\"queue_position\":%lld,\"have_queue\":%d,"
                    "\"seat_step\":%lld,\"ready\":%d}\n",
@@ -2723,35 +2752,51 @@ static int run_session(const char *token, const char *device_id,
          * through any get_session error. */
         if (rc != KN_HTTP_OK) {
             ++consec_transport;
-            consec_transient = 0;
             consec_hard = 0;
         } else if (cm_status_transient(http_status)) {
-            ++consec_transient;
-            consec_transport = 0;
+            consec_transport = 0;       /* outlived — no bound, no counter */
             consec_hard = 0;
         } else {
             ++consec_hard;
             consec_transport = 0;
-            consec_transient = 0;
         }
         {   /* a failed round is EVIDENCE, not silence: rc (transport),
              * the raw HTTP status, the cloud-side requestStatus (the
              * extract fills it even when the session body is rejected),
-             * a bounded excerpt of THIS round's response body (503
-             * bodies often name their source), the failure class and the
-             * next poll gap */
-            char esc[96], escb[160];
+             * the deep session fields of a JSON error body (run 8's 503
+             * carried a session SKELETON — sessionControlInfo.ip:null —
+             * whose status/errorCode sit PAST any bounded excerpt; the
+             * reference's cloudmatch_http_error likewise reads the
+             * payload, :2377), a body excerpt for unexpected shapes, the
+             * failure class and the next poll gap */
+            char esc[96], escb[240];
+            long long sess_status = 0, err_code = 0, unified = 0;
             const char *cls = rc != KN_HTTP_OK ? "transport"
                             : cm_status_transient(http_status) ? "transient"
                             : "hard";
+            if (rc == KN_HTTP_OK && cm_json[0] == '{') {
+                kn_cm_session dg;
+                memset(&dg, 0, sizeof dg);
+                (void)kn_cm_extract_session(cm_json, &dg);
+                sess_status = dg.status;
+                err_code = dg.error_code;
+                unified = dg.unified_error;
+                if (ps.req_status_code == 0)
+                    ps.req_status_code = dg.req_status_code;
+                if (!ps.req_status_desc[0] && dg.req_status_desc[0])
+                    snprintf(ps.req_status_desc, sizeof ps.req_status_desc,
+                             "%.63s", dg.req_status_desc);
+            }
             lb_json_path(esc, sizeof esc, ps.req_status_desc);
             lb_json_path(escb, sizeof escb, cm_json);
             printf("{\"mode\":\"session\",\"event\":\"cm_poll_error\","
                    "\"rc\":%d,\"http_status\":%d,\"cloud_status\":%lld,"
-                   "\"desc\":\"%s\",\"body\":\"%s\",\"consecutive\":%u,"
-                   "\"class\":\"%s\",\"gap_ms\":%u}\n", rc, http_status,
-                   (long long)ps.req_status_code, esc, escb, poll_fails,
-                   cls, (unsigned)sess_poll_gap(poll_fails));
+                   "\"unified_error\":%lld,\"sess_status\":%lld,"
+                   "\"err_code\":%lld,\"desc\":\"%s\",\"body\":\"%s\","
+                   "\"consecutive\":%u,\"class\":\"%s\",\"gap_ms\":%u}\n",
+                   rc, http_status, (long long)ps.req_status_code,
+                   unified, sess_status, err_code, esc, escb,
+                   poll_fails, cls, (unsigned)sess_poll_gap(poll_fails));
             fflush(stdout);
         }
         if (consec_transport >= 10) {
@@ -2775,7 +2820,15 @@ static int run_session(const char *token, const char *device_id,
          * R7 runs 1-4 each left one behind — no cancel existed then).
          * Skipped for session_not_found (404 = already gone). One
          * attempt, no retry: cleanup, not the mission. */
-        if (sess.session_id[0] &&
+        if (sess.session_id[0] && keep_on_abort &&
+            strcmp(stop_reason, "session_not_found") != 0) {
+            /* --session-keep: leave the queued session alive on the
+             * server (the user's run-6 browser-resume workflow / R23
+             * experiments). Honest evidence line instead of the DELETE. */
+            printf("{\"mode\":\"session\",\"event\":\"cm_cancel\","
+                   "\"skipped\":\"session-keep\"}\n");
+            fflush(stdout);
+        } else if (sess.session_id[0] &&
             strcmp(stop_reason, "session_not_found") != 0) {
             int c_rc = KN_HTTP_ERR_IO, c_status = 0;
             cm_tls = kn_net_tls_stream_open(poll_host, poll_port, 15000,
@@ -3546,7 +3599,7 @@ int main(int argc, char **argv)
     const char *cap_bind = NULL, *dec_bind = NULL;
     const char *cap_out = "gs_capture.hex", *dec_au_dir = NULL;
     const char *dec_srtp = NULL;
-    int diagnostics = 0, version = 0, list = 0, i;
+    int diagnostics = 0, version = 0, list = 0, sess_keep = 0, i;
 
     for (i = 1; i < argc; ++i) {
         const char *a = argv[i];
@@ -3588,6 +3641,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--decode-expect-frames=", 23) == 0)
             dec_expect = strtol(a + 23, NULL, 10);
         else if (strcmp(a, "--session") == 0) session = 1;
+        else if (strcmp(a, "--session-keep") == 0) sess_keep = 1;
         else if (strncmp(a, "--session-token=", 16) == 0)
             sess_token = a + 16;
         else if (strncmp(a, "--session-device=", 17) == 0)
@@ -3647,8 +3701,8 @@ int main(int argc, char **argv)
         return run_session(sess_token, sess_device, sess_app, sess_title,
                            sess_cm_host && sess_cm_host[0] ? sess_cm_host
                                : KN_CM_DEFAULT_BASE_HOST,
-                           sess_seconds, sess_queue_timeout, sess_expect,
-                           sess_au_dir, log_dir);
+                           sess_seconds, sess_queue_timeout, sess_keep,
+                           sess_expect, sess_au_dir, log_dir);
     }
     if (diagnostics) return run_diagnostics(log_dir);
     usage();

@@ -79,6 +79,11 @@ typedef struct kn_cm_session {
      * (e.g. statusCode 11 SESSION_LIMIT). 0/"" = absent. */
     long long req_status_code;
     char      req_status_desc[64];
+    long long unified_error;          /* requestStatus.unifiedErrorCode
+                                         (:2343) — 0 = absent */
+    long long error_code;             /* session.errorCode — 1 while queued
+                                         (run-5 capture); the rejected-payload
+                                         diagnostic (round XXVII) */
 } kn_cm_session;
 
 /* Build the POST v2/session body ({"sessionRequestData":{...}}) —

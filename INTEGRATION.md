@@ -1,4 +1,66 @@
-# INTEGRATION NOTES — Round XXVI delta, rev 16 (R7 run 7: the ~2-minute seat-transition 503 storm — transient statuses are now OUTLIVED (D-s4), hard rejections and transport deaths stay bounded, the 503 body is captured)
+# INTEGRATION NOTES — Round XXVII delta, rev 17 (R7 run 8: the 503 body speaks — an app-level session skeleton with sessionControlInfo.ip:null; the T10-r20 warning fixed + gated permanently; control-node re-learning; --session-keep)
+
+> **Rev 17 supersedes rev 1-16.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/RTSP.md` §14** (run 8 + this round), §13 (the
+> 503-window policy), §12 (the pre-PLAY pump).
+>
+> **Round XXVII headline: run 8 proved the round-XXVI policy end-to-end
+> — the client RODE the 503 window (ten transient rounds, the D-s4
+> backoff visible: gap_ms 6000→9000→13500→20000) until the user's
+> Ctrl-C, then cm_cancel 200. And the body excerpt made the 503 TALK:
+> it is CloudMatch's OWN JSON — a session skeleton with
+> `sessionControlInfo.ip:null` and the resourcePath still echoing the
+> id (the front knows the record but cannot name its owning state — the
+> §13 seat-transition window from the inside; the record is alive, the
+> same-window DELETE answered 200). This round parses the deep fields
+> (status/errorCode/requestStatus incl. unifiedErrorCode — now filled
+> even on rejected payloads) into the cm_poll_error line, fixes the
+> T10-r20 warning (write-only consec_transient — target GCC 16.2's
+> -Wunused-but-set-variable is NOT in sandbox GCC 12's -Wall; the fifth
+> target catch, and both gate scripts now carry a PERMANENT paranoid
+> knvstd leg), closes a real reference-fidelity gap (the control node is
+> RE-LEARNED from every successful poll like store_active :1333-1336 —
+> a mid-queue node migration is followed, ip:null keeps the current
+> host), and adds --session-keep (skip the abort cancel; the user's
+> browser-RESUME workflow).**
+>
+> ## Changed files (round XXVII)
+> 1. `streamer/src/knvstd_main.c` — consec_transient removed (the T10
+>    catch); the cm_poll_error diag-view (parses non-200 JSON bodies:
+>    `unified_error`/`sess_status`/`err_code` + desc fallback; excerpt
+>    160→240); per-poll control-node re-learning (+ `cm_control`
+>    `source:"relearned"` events); `--session-keep` (usage text incl.).
+> 2. `streamer/{include/kn,src}/kn_cm.*` — `kn_cm_session.error_code` +
+>    `.unified_error`; status/phase/errorCode filled BEFORE the
+>    sessionId gate so rejected payloads stay diagnosable.
+> 3. `streamer/tests/test_kncm.c` — the run-8 503-skeleton fixture
+>    (rejected but fully diagnosed; ip:null → no control host),
+>    unifiedErrorCode in the SESSION_LIMIT fixture, errorCode pinned on
+>    the run-5 capture fixture: **147 → 148 checks**.
+> 4. `tools/build_native_tests.sh` + `tools/cross_check.sh` — the
+>    PERMANENT paranoid knvstd leg (`-Werror
+>    -Wunused-but-set-variable -Wformat-truncation=2`; host + both
+>    cross arches) — the round-XXII gate-hardening pattern applied to
+>    the fifth target-catch class.
+> 5. `docs/RTSP.md` §14, this file, `PROJECT-STATE.md`.
+>
+> ## Verification (round XXVII, sandbox)
+> native 13 suites PASS (kncm 148, knrtsp 150, knsock 98) · cross
+> x64+i686 `-Werror` PASS incl. the new paranoid legs (3 .o produced) ·
+> sandbox_session_e2e **43/43** · CMake fresh both backends 0 warnings +
+> ctest **15/15 ×2** · T10 POSIX dry ALL PASS **62**.
+> **Target expectations:** next T10 → ALL PASS **72** with ZERO
+> warnings (the r20 failure was exactly the removed counter). Then
+> **R7 run 9** — the round-XXV PLAY pump is STILL awaiting its first
+> live try; expect either the seat transition → ice_creds/ice_preplay →
+> PLAY(455?)→200 → first media, or a 503 window whose parsed fields
+> (sess_status/err_code/unified_error/cloud_status/desc) name the
+> cloud-side state — and a `relearned` cm_control line if the session
+> migrates nodes.
+
+---
+
+# Round XXVI delta, rev 16 (R7 run 7: the ~2-minute seat-transition 503 storm — transient statuses are now OUTLIVED (D-s4), hard rejections and transport deaths stay bounded, the 503 body is captured)
 
 > **Rev 16 supersedes rev 1-15.** Canonical state: `PROJECT-STATE.md`.
 > Design record: **`docs/RTSP.md` §13** (the run-7 measurement + the

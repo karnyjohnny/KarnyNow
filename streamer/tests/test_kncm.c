@@ -681,9 +681,10 @@ static void test_cm_control(void)
               strcmp(s.phase, "preparing") == 0 &&
               s.have_queue && s.queue_position == 159 &&
               s.have_seat && s.seat_setup_step == 1 && !s.ready &&
-              s.req_status_code == 1 &&
+              s.req_status_code == 1 && s.error_code == 1 &&
               strcmp(s.req_status_desc, "SUCCESS_STATUS") == 0,
-              "R7 capture fixture extracts (queue 159, control np-waw-01)");
+              "R7 capture fixture extracts (queue 159, control np-waw-01, "
+              "errorCode 1 = the queued-state marker)");
         CHECK(kn_cm_control_base(&s, host, sizeof host, &port) == 1 &&
               strcmp(host, "np-waw-01.cloudmatchbeta.nvidiagrid.net") == 0 &&
               port == 443,
@@ -700,10 +701,32 @@ static void test_cm_control(void)
          * (:2337-2352 — e.g. statusCode 11 SESSION_LIMIT, :2354+) */
         static const char fx[] =
             "{\"requestStatus\":{\"statusCode\":11,"
-            "\"statusDescription\":\"SESSION_LIMIT_REACHED\"}}";
+            "\"statusDescription\":\"SESSION_LIMIT_REACHED\","
+            "\"unifiedErrorCode\":4073}}";
         CHECK(kn_cm_extract_session(fx, &s) == -1 && s.req_status_code == 11 &&
+              s.unified_error == 4073 &&
               strcmp(s.req_status_desc, "SESSION_LIMIT_REACHED") == 0,
-              "failed extract keeps requestStatus for diagnostics");
+              "failed extract keeps requestStatus+unifiedErrorCode");
+    }
+    {   /* R7 run 8's 503 body: a session SKELETON — no sessionId and
+         * sessionControlInfo.ip NULL — rejected by the hard gate, yet
+         * every diagnostic field surfaces (round XXVII: the deep fields
+         * a bounded body excerpt cannot show) */
+        static const char fx[] =
+            "{\"requestStatus\":{\"statusCode\":53,"
+            "\"statusDescription\":\"SERVER_UNAVAILABLE\","
+            "\"unifiedErrorCode\":77},\"session\":{\"sessionAds\":null,"
+            "\"sessionControlInfo\":{\"protocol\":0,"
+            "\"appLevelProtocol\":5,\"ip\":null,\"resourcePath\":"
+            "\"/v2/session/479ecbcd\",\"port\":443},\"status\":1,"
+            "\"errorCode\":1}}";
+        CHECK(kn_cm_extract_session(fx, &s) == -1 && s.status == 1 &&
+              s.error_code == 1 && s.req_status_code == 53 &&
+              s.unified_error == 77 &&
+              strcmp(s.req_status_desc, "SERVER_UNAVAILABLE") == 0 &&
+              !s.have_control,
+              "run-8 503 skeleton: rejected but fully diagnosed "
+              "(ip:null -> no control host)");
     }
 }
 

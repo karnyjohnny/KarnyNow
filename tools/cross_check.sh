@@ -109,6 +109,10 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS $KCORE streamer/src/knvstd_main.c \
         $LDFLAGS -o build/cross/knvstd_$arch.exe -lwinmm -ld3d9 -lole32 \
         -lws2_32 -lsecur32 -lcrypt32
+    # round XXVII: the paranoid knvstd leg (target-GCC catch classes —
+    # T10 r20 flagged set-but-unused which sandbox GCC 12 keeps out of -Wall)
+    $CC $CFLAGS -Werror -Wunused-but-set-variable -Wformat-truncation=2 \
+        -c streamer/src/knvstd_main.c -o build/cross/knvstd_paranoid_$arch.o
     ls -la build/cross/*_$arch.exe | awk '{print $5, $9}'
 
     # kn_decode/kn_selftest against the REAL FFmpeg headers (the user's exact
