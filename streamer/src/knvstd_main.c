@@ -2438,6 +2438,26 @@ static int cm_status_transient(int status)
            status == 500 || status == 502 || status == 503 || status == 504;
 }
 
+/* D-s4 (round XXVI — the R7 run-7 lesson): a gentle backoff while poll
+ * rounds keep failing, 4 s → 6 s → 9 s → 13.5 s → capped at 20 s, reset
+ * on any success. Run 7 measured a 503 storm (15 consecutive 503s over
+ * ~30 s, and a same-moment DELETE to the SAME host answered 200 — the
+ * node was up; the GET path for that session record was not) starting at
+ * the ~2-minute step-1 mark where runs 5/6 transitioned to seat_step 3:
+ * transient statuses are OUTLIVED (bounded only by queue_timeout, like
+ * the reference UI which never gives up on a poll error), with
+ * progressively lighter traffic instead of a fixed-rate hammer. */
+static uint32_t sess_poll_gap(unsigned consec_fails)
+{
+    uint32_t gap = SESS_POLL_MS;
+    unsigned i;
+    for (i = 0; i < consec_fails; ++i) {
+        if (gap >= 20000u) break;
+        gap += gap / 2u;
+    }
+    return gap > 20000u ? 20000u : gap;
+}
+
 static int run_session(const char *token, const char *device_id,
                        long long app_id, const char *title,
                        const char *cm_host, long seconds,
@@ -2482,6 +2502,10 @@ static int run_session(const char *token, const char *device_id,
     const char *poll_src;
     uint16_t poll_port = 443;
     unsigned poll_fails = 0;            /* consecutive failed poll rounds */
+    unsigned consec_transient = 0;      /* ...of each failure class (XXVI:
+                                           transient storms are OUTLIVED,
+                                           transport/hard classes bounded) */
+    unsigned consec_transport = 0, consec_hard = 0;
     /* round XXV: the pre-PLAY ICE burst state (see sess_ice_pump) */
     char ice_remote_ufrag[288];         /* the resolved ladder output */
     char ice_natt[288];                 /* NATT payload: bundle user | PING */
@@ -2637,8 +2661,9 @@ static int run_session(const char *token, const char *device_id,
             break;
         }
         if (sess.status == 7) { stop_reason = "terminated"; break; }
-        sess_sleep(SESS_POLL_MS, NULL);
+        sess_sleep(sess_poll_gap(poll_fails), NULL);
         memset(&ps, 0, sizeof ps);
+        cm_json[0] = '\0';   /* the body excerpt below must be THIS round's */
         rc = KN_HTTP_ERR_IO;
         http_status = 0;
         for (attempt = 0; attempt < 3 && !g_knv_stop; ++attempt) {
@@ -2671,6 +2696,9 @@ static int run_session(const char *token, const char *device_id,
         }
         if (round_ok) {
             poll_fails = 0;
+            consec_transient = 0;
+            consec_transport = 0;
+            consec_hard = 0;
             sess = ps;
             printf("{\"mode\":\"session\",\"event\":\"queue\",\"status\":%lld,"
                    "\"phase\":\"%s\",\"queue_position\":%lld,\"have_queue\":%d,"
@@ -2687,19 +2715,51 @@ static int run_session(const char *token, const char *device_id,
         }
         if (g_knv_stop) { stop_reason = "interrupted"; break; }
         ++poll_fails;
+        /* round XXVI failure classes: transport (no HTTP response at all)
+         * is bounded at 10; a non-transient HTTP status or a cloud-side
+         * statusCode != 1 (hard rejection — 401/403/409/SESSION_LIMIT...)
+         * at 5; TRANSIENT statuses (503 storms — run 7) are OUTLIVED
+         * until queue_timeout, like the reference UI which keeps polling
+         * through any get_session error. */
+        if (rc != KN_HTTP_OK) {
+            ++consec_transport;
+            consec_transient = 0;
+            consec_hard = 0;
+        } else if (cm_status_transient(http_status)) {
+            ++consec_transient;
+            consec_transport = 0;
+            consec_hard = 0;
+        } else {
+            ++consec_hard;
+            consec_transport = 0;
+            consec_transient = 0;
+        }
         {   /* a failed round is EVIDENCE, not silence: rc (transport),
-             * the raw HTTP status and the cloud-side requestStatus (the
-             * extract fills it even when the session body is rejected) */
-            char esc[96];
+             * the raw HTTP status, the cloud-side requestStatus (the
+             * extract fills it even when the session body is rejected),
+             * a bounded excerpt of THIS round's response body (503
+             * bodies often name their source), the failure class and the
+             * next poll gap */
+            char esc[96], escb[160];
+            const char *cls = rc != KN_HTTP_OK ? "transport"
+                            : cm_status_transient(http_status) ? "transient"
+                            : "hard";
             lb_json_path(esc, sizeof esc, ps.req_status_desc);
+            lb_json_path(escb, sizeof escb, cm_json);
             printf("{\"mode\":\"session\",\"event\":\"cm_poll_error\","
                    "\"rc\":%d,\"http_status\":%d,\"cloud_status\":%lld,"
-                   "\"desc\":\"%s\",\"consecutive\":%u}\n", rc, http_status,
-                   (long long)ps.req_status_code, esc, poll_fails);
+                   "\"desc\":\"%s\",\"body\":\"%s\",\"consecutive\":%u,"
+                   "\"class\":\"%s\",\"gap_ms\":%u}\n", rc, http_status,
+                   (long long)ps.req_status_code, esc, escb, poll_fails,
+                   cls, (unsigned)sess_poll_gap(poll_fails));
             fflush(stdout);
         }
-        if (poll_fails >= 5) {
+        if (consec_transport >= 10) {
             stop_reason = "cm_poll_failed";
+            break;
+        }
+        if (consec_hard >= 5) {
+            stop_reason = "cm_poll_rejected";
             break;
         }
     }

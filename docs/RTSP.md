@@ -740,3 +740,79 @@ browser-resume of run 6 is the proof that this is the right default).
 answers), PLAY attempt 1 possibly 455 → attempt 2 200, then the handoff
 line + the media loop (first real Mjolnir SRTP → kn_rx → AUs — R32's
 final stage-2 gate).
+
+## 13. Round XXVI — R7 run 7 (the ~2-minute seat-transition window: a 503 storm, and why the wait must OUTLIVE it)
+
+**What was measured (2026-10-25, the round-XXV tree; two attempts, real
+token + appId 107057914):**
+* Attempt 1: cm_control → np-waw-01; **29 polls (~2 min) of static
+  `queue_position:53, seat_step:1`** — the SAME ~29-30-poll step-1
+  duration runs 5 and 6 showed before transitioning to `seat_step:3` —
+  then, instead of the transition: **five consecutive failed rounds,
+  every HTTP attempt `503`** (rc:0 — real parsed responses, 15 HTTP
+  attempts over ~30 s incl. the in-round 250/750 ms retries) →
+  `cm_poll_failed` → **`cm_cancel` http_status:200 — a DELETE to the
+  SAME host, in the SAME window, answered 200 while every GET 503'd.**
+  The user confirmed the session vanished from the GFN web UI (the
+  round-XXIII cancel is target-proven), and the immediate re-create did
+  NOT hit SESSION_LIMIT.
+* Attempt 2 (right after): the identical shape — static step-1 at
+  position 57, then the same 5×503 → cancel 200.
+
+**Analysis (three runs now agree on the clock):** runs 5, 6 and 7 ALL
+spent ~29-30 polls (~2 min) in `seat_step:1`. Runs 5/6 transitioned at
+that mark (`seat_step:3` → ready within ~20 s). Run 7 hit 503s at that
+exact mark, twice, on two different sessions. The consistent reading:
+**the ~2-minute mark is when the seat-assignment machinery acts on the
+record**; when a seat is available the record transitions (runs 5/6);
+when the assignment backend is saturated/timing out (Sunday-evening WAW
+pool), the GET path answers 503 — a classic proxy timeout for an
+overloaded upstream — while the session STORE path (DELETE) stays
+healthy. The session is very likely still alive and resumable through
+the window; we simply stopped asking after ~30 s. Alternative readings
+(a node-wide GET-path outage; an edge/WAF shed) cannot be fully
+excluded from here — which is exactly why the fix also captures the
+503 body excerpt: run 8 will NAME the source (nginx/ALB/JSON error).
+
+**The contract check:** the reference NEVER gives up on a poll error —
+`get_session` retries 408/425/429/5xx three times per call (:1369-1394)
+and returns Err upward, but the UI's poll cadence just continues (only
+404 clears the session, :664-671); the official browser client likewise
+keeps polling through spinner states. Our round-XXIII "5 consecutive
+bad rounds → dead" was a bring-up bound that run 7 proved too eager: it
+killed the wait inside the very window the transition needs.
+
+**Fix (round XXVI — the failure-class policy, deviation D-s4):**
+* **Transient HTTP statuses (408/425/429/500/502/503/504) are OUTLIVED**
+  — they no longer count toward any give-up bound; only `queue_timeout`
+  (default 600 s = 10 min, flag-extendable) or Ctrl-C ends such a wait
+  (both still cancel the session — proven at run 7).
+* **Transport failures** (no HTTP response at all: TLS/DNS/socket) stay
+  bounded: 10 consecutive rounds → `cm_poll_failed`.
+* **Hard HTTP rejections** (any other non-200: 401/403/409… or a 200
+  with requestStatus.statusCode != 1) stay bounded: 5 consecutive →
+  `cm_poll_rejected` (a NEW stop_reason — an auth/entitlement death is
+  not a transient storm and must not burn 10 minutes).
+* **Gentle backoff while failing (D-s4):** the poll gap grows 4 s → 6 s
+  → 9 s → 13.5 s → capped 20 s (`sess_poll_gap`), reset on any success —
+  outlive the window with progressively lighter traffic instead of a
+  fixed-rate hammer.
+* **Evidence upgrade:** `cm_poll_error` now carries `"body"` (a bounded,
+  escaped excerpt of THIS round's response body — 503 bodies usually
+  name their sender), `"class"` (transport/transient/hard) and
+  `"gap_ms"` (the next poll gap). `cm_json` is cleared per round so the
+  excerpt can never be a stale body.
+
+**Sandbox proof:** the policy is knvstd glue (Win32-TLS-gated), so the
+sandbox evidence is: native 13 suites PASS, cross PASS, paranoid
+-Wformat-truncation=2 clean, E2E 43/43 (phase A unchanged there), ctest
+15/15 ×2, T10 dry 62. The policy itself gets its target proof at run 8.
+
+**Next measurement = R7 run 8:** expect the ~2-min static step-1, then
+EITHER the step-3 transition → ready → PLAY (with the round-XXV pump:
+`ice_creds`/`ice_preplay`, attempt 1 maybe 455 → 200) → the first real
+media, OR a 503 window with `class:"transient"`, growing `gap_ms` and a
+`body` excerpt that names the source — ridden out up to 10 minutes.
+If the storm outlives queue_timeout: `stop_reason:"queue_timeout"` +
+`cm_cancel`, and the `body` lines tell us whether to extend the budget
+or treat long 503s as a dead record.

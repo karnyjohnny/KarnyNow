@@ -1,4 +1,52 @@
-# INTEGRATION NOTES — Round XXV delta, rev 15 (R7 run 6: DESCRIBE/SETUP/ANNOUNCE 200 LIVE — PLAY 455 root-caused: the reference's pre-PLAY hole-punch burst was missing → the STUN toolkit + the credential ladder + the pump)
+# INTEGRATION NOTES — Round XXVI delta, rev 16 (R7 run 7: the ~2-minute seat-transition 503 storm — transient statuses are now OUTLIVED (D-s4), hard rejections and transport deaths stay bounded, the 503 body is captured)
+
+> **Rev 16 supersedes rev 1-15.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/RTSP.md` §13** (the run-7 measurement + the
+> failure-class policy), §12 (run 6 + the pre-PLAY pump), §11/§10.
+>
+> **Round XXVI headline: run 7 (two attempts) measured a new cloud-side
+> window — after ~2 minutes of static `seat_step:1` (the SAME duration
+> runs 5/6 spent there before transitioning to step 3), every GET poll
+> started answering 503 while a same-moment DELETE to the same host
+> answered 200 (and the user watched the session disappear from the web
+> UI — the round-XXIII cancel is target-proven; the immediate re-create
+> hit no SESSION_LIMIT). The old policy killed the wait after 5 such
+> rounds (~30 s) — right inside the window the seat transition needs.
+> The reference never gives up on transient poll errors (the UI cadence
+> just continues; only 404 clears). Round XXVI mirrors that with a
+> failure-CLASS policy: transient 4xx/5xx are OUTLIVED until
+> queue_timeout, transport deaths bounded at 10 rounds, hard HTTP/cloud
+> rejections bounded at 5 (new stop_reason `cm_poll_rejected`), a gentle
+> 4→6→9→13.5→20 s backoff while failing (D-s4), and the `cm_poll_error`
+> line now carries the response BODY excerpt + class + next gap — run 8
+> will name the 503's sender.**
+>
+> ## Changed files (round XXVI)
+> 1. `streamer/src/knvstd_main.c` — phase A poll loop only: the
+>    failure-class counters (consec_transient/transport/hard) + the new
+>    give-up bounds, `sess_poll_gap` (the D-s4 backoff), the upgraded
+>    `cm_poll_error` evidence line (body/class/gap_ms; `cm_json` is
+>    cleared per round so the excerpt is always THIS round's), and the
+>    `cm_poll_rejected` stop_reason. No library/API changes; phases B-E
+>    and the round-XXV pump untouched.
+> 2. `docs/RTSP.md` §13, this file, `PROJECT-STATE.md`.
+>
+> ## Verification (round XXVI, sandbox)
+> native 13 suites PASS (knsock 98, knrtsp 150, kncm 147 — unchanged,
+> the delta is knvstd glue) · cross x64+i686 `-Werror` PASS (with the
+> kn_net_mbedtls legs — third_party/mbedtls present) · paranoid
+> `-Wformat-truncation=2` clean on knvstd_main.c (host -O1 + mingw -O2
+> ×2) · sandbox_session_e2e **43/43** · CMake 0 warnings + ctest
+> **15/15 ×2** · T10 POSIX dry ALL PASS **62**. The policy itself is
+> Win32-TLS-gated — its proof is run 8.
+> **Target expectations:** next T10 → ALL PASS **72** (suite count
+> unchanged). Then **R7 run 8** — either the step-3 transition → PLAY →
+> first media, or a ridden-out 503 window whose `body` excerpts name the
+> source; `queue_timeout` (600 s) + `cm_cancel` bound the worst case.
+
+---
+
+# Round XXV delta, rev 15 (R7 run 6: DESCRIBE/SETUP/ANNOUNCE 200 LIVE — PLAY 455 root-caused: the reference's pre-PLAY hole-punch burst was missing → the STUN toolkit + the credential ladder + the pump)
 
 > **Rev 15 supersedes rev 1-14.** Canonical state: `PROJECT-STATE.md`.
 > Design record: **`docs/RTSP.md` §12** (the run-6 measurement + the
