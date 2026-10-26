@@ -1,6 +1,11 @@
 # DTLS.md — the R3 spike: real bundle identity, DTLS + SCTP (promoted to the stage-2 PLAY blocker by R7 run 10)
 
-> Status: PLAN (round XXIX, 2026-10-26). Provenance: nvst.rs @ a49b124
+> Status: **R3-A SHIPPED (round XXX, 2026-10-26** — kn_cert live: real
+> ECDSA P-256 self-signed identity, sandbox-proven 10/10 under
+> ASan+UBSan via the CMake mbedtls backend, cross-compiled for Win32,
+> wired into the knvstd ANNOUNCE with the `identity` evidence line;
+> run 12 is its first live measurement). R3-B/C/D: PLAN as below.
+> Original plan header (round XXIX, 2026-10-26): Provenance: nvst.rs @ a49b124
 > (line refs below), str0m vendored in the reference tree
 > (`native/opennow-streamer/vendor/str0m`), runs 6/9/10 evidence in
 > docs/RTSP.md §12/§15/§16. Language rule D12: English.

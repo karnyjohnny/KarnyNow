@@ -1,4 +1,72 @@
-# INTEGRATION NOTES — Round XXIX delta, rev 19 (R7 run 10: the pump thread live-proven, PLAY went 455→SILENCE → the elimination table is empty except D-s1; R3 (real DTLS) promoted to the stage-2 PLAY blocker — docs/DTLS.md; the official ICE identity shapes mirrored)
+# INTEGRATION NOTES — Round XXX delta, rev 20 (R7 run 11 = the FINAL elimination datum: PLAY refused with a saturated pump + TOTAL WS silence → R3-A SHIPPED: kn_cert, the real ECDSA P-256 self-signed identity replacing D-s1's placeholder fingerprint)
+
+> **Rev 20 supersedes rev 1-19.** Canonical state: `PROJECT-STATE.md`.
+> Design records: **`docs/DTLS.md`** (R3-A now SHIPPED, R3-B/C/D
+> planned), `docs/RTSP.md` §17 (run 11 + R3-A), §16 (the elimination
+> table), §15/§12.
+>
+> **Round XXX headline: run 11 completed the elimination — a third rig
+> (77-111-249-146) took the full chain to ANNOUNCE 200 (4137 B — the
+> new 4/22 identity shapes live on the wire) and then held PLAY in
+> TOTAL silence (timeout; ws_pings_in 0, ws_closes_in 0, frames_out 5
+> vs text 4) while our pump thread saturated the UDP path beside it
+> (pump_ms 20920, 2820+940 sent, 126/126 rig probes answered, 3753 rig
+> successes validated, invalid 0). Three rigs, three refusals, one
+> constant: no real DTLS behind the announced fingerprint. So R3-A
+> SHIPPED: `kn_cert` — the portable-mbedTLS self-signed identity
+> (ECDSA P-256, SHA-256 fingerprint over the exact DER in the
+> announced colon-hex form, fixed 2020-2035 validity, random serial;
+> parsed x509+pk kept for R3-B behind opaque handles; a selfcheck KAT
+> proves SHA-256(der)==fp + byte-identical re-parse + sign/verify
+> through the certificate's public key). The CMake mbedtls backend
+> compiles the REAL body on both platforms → the sandbox ctest runs
+> the real battery (10 checks, ASan+UBSan clean after it caught a
+> double-free in the first test draft); every other build gets the
+> honest stub (4 checks). knvstd announces the real fingerprint when
+> available and logs it: the new `identity` event
+> ({"ufrag_len":4,"pwd_len":22,"fp_len":95,"cert":"real"}).**
+>
+> ## Changed files (round XXX)
+> 1. `streamer/{include/kn,src}/kn_cert.{h,c}` (NEW) — the R3-A module
+>    (real body + honest stub, the kn_net discipline; the header is
+>    mbedTLS-free — R3-B casts the opaque handles back).
+> 2. `streamer/tests/test_kncert.c` (NEW) — the FOURTEENTH suite,
+>    self-adaptive: real battery under the mbedtls backend (10 checks),
+>    stub contract elsewhere (4).
+> 3. `streamer/src/knvstd_main.c` — the identity block: kn_cert
+>    generate → fingerprint → free (R3-A only announces; R3-B keeps it
+>    alive for the handshake), the `identity` evidence line, the
+>    placeholder fallback stays honest.
+> 4. Build wiring: `CMakeLists.txt` (kn_cert.c into kncore; kncert into
+>    the test foreach → ctest 15→**16** both backends),
+>    `tools/build_native_tests.sh` (KNCORE + the stub-mode suite run,
+>    rc18), `tools/cross_check.sh` (the stub -c leg + the REAL-body
+>    cross-compile under the exact target flags whenever
+>    third_party/mbedtls exists — the round-XXII rule — + the suite
+>    link), `tests/T10_build_and_test.py` (suites += test_kncert →
+>    **target expectation 72 → 73**).
+> 5. `docs/RTSP.md` §17, `docs/DTLS.md` (R3-A marked SHIPPED), this
+>    file, `PROJECT-STATE.md`.
+>
+> ## Verification (round XXX, sandbox)
+> **test_kncert real battery 10/10 under ASan+UBSan** (CMake mbedtls
+> backend; it caught the double-free pre-ship) · stub contract 4/4 in
+> the shell gates · native **14 suites** PASS · cross x64+i686 -Werror
+> PASS incl. the kn_cert real-body legs ×2 · paranoid knvstd legs ×3
+> clean · CMake fresh both backends 0 warnings + ctest **16/16 ×2**
+> (mbedtls: real 10/10; schannel: stub 4/4 — the honest split) ·
+> sandbox_session_e2e **43/43** (unchanged; the rig doesn't validate
+> fingerprints yet — an R3-B-era upgrade candidate) · T10 POSIX dry
+> ALL PASS **63** (62 + the new suite).
+> **Target expectations:** next T10 → ALL PASS **73** (suite +1; zero
+> warnings). Then **R7 run 12**: same command — watch the `identity`
+> line (`"cert":"real"`, fp_len 95). If PLAY still refuses (the
+> leading theory: the gate needs the actual handshake), R3-B (kn_dtls
+> on the bundle socket inside the pump thread) is the decisive round.
+
+---
+
+# Round XXIX delta, rev 19 (R7 run 10: the pump thread live-proven, PLAY went 455→SILENCE → the elimination table is empty except D-s1; R3 (real DTLS) promoted to the stage-2 PLAY blocker — docs/DTLS.md; the official ICE identity shapes mirrored)
 
 > **Rev 19 supersedes rev 1-18.** Canonical state: `PROJECT-STATE.md`.
 > Design records: **`docs/DTLS.md`** (NEW — the R3 spike plan),

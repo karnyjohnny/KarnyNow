@@ -55,6 +55,15 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS -c streamer/src/kn_json.c  -o build/cross/kn_json_$arch.o
     $CC $CFLAGS -c streamer/src/kn_http.c  -o build/cross/kn_http_$arch.o
     $CC $CFLAGS -c streamer/src/kn_cm.c    -o build/cross/kn_cm_$arch.o
+    $CC $CFLAGS -c streamer/src/kn_cert.c  -o build/cross/kn_cert_$arch.o
+    # round XXX (R3-A): the kn_cert REAL body must survive the exact target
+    # flag set whenever the mbedTLS tree exists (the round-XXII rule)
+    if [ -d third_party/mbedtls/include/mbedtls ]; then
+        $CC $CFLAGS -DKN_TLS_BACKEND_MBEDTLS=1 -Ithird_party/mbedtls/include \
+            -c streamer/src/kn_cert.c -o build/cross/kn_cert_real_$arch.o
+    else
+        echo "SKIP kn_cert real-body cross-compile (third_party/mbedtls absent)"
+    fi
     $CC $CFLAGS -c third_party/tiny-aes-c/aes.c -o build/cross/tinyaes_$arch.o
     $CC $CFLAGS -c third_party/crypto-algorithms-sha1/sha1.c -o build/cross/sha1_$arch.o
     $CC $CFLAGS streamer/src/knlog.c streamer/src/knring.c streamer/tests/test_knlog.c \
@@ -86,6 +95,8 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS streamer/src/kn_json.c streamer/src/kn_http.c \
         streamer/src/kn_cm.c streamer/tests/test_kncm.c \
         $LDFLAGS -o build/cross/test_kncm_$arch.exe
+    $CC $CFLAGS streamer/src/kn_cert.c streamer/tests/test_kncert.c \
+        $LDFLAGS -o build/cross/test_kncert_$arch.exe
     $CC $CFLAGS streamer/src/kn_aes.c streamer/src/kn_sha1.c streamer/src/knsrtp.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c \
         streamer/tests/test_knsrtp.c $LDFLAGS -o build/cross/test_knsrtp_$arch.exe
@@ -99,6 +110,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_net.c streamer/src/kn_rx.c streamer/src/kn_sock.c \
         streamer/src/kn_ws.c streamer/src/kn_rtsp.c \
         streamer/src/kn_json.c streamer/src/kn_http.c streamer/src/kn_cm.c \
+        streamer/src/kn_cert.c \
         third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
     $CC $CFLAGS $KCORE streamer/tests/test_kndiag.c \
         $LDFLAGS -o build/cross/test_kndiag_$arch.exe -lwinmm -ld3d9 -lole32 \

@@ -1051,3 +1051,65 @@ final elimination datum; the new counters tell us what the rig does on
 WS during the hold. The queue/ICE evidence keeps accumulating for free
 (every run now also stress-tests re-learning + the pump). Then R3-A
 (the real certificate) starts — see docs/DTLS.md.
+
+## 17. Round XXX — R7 run 11 (the FINAL elimination datum: PLAY refused with a saturated pump + total WS silence) + R3-A SHIPPED (kn_cert — the real certificate identity)
+
+**Run 11 (2026-10-26, the round-XXIX tree; T10 ALL PASS 72 confirmed):**
+the queue side is now boring in the best way — 25 re-learns, cap 146
+with real glimpses (28/48/53), zero 503s, clean step 1→3→ready (third
+consecutive run). OPTIONS/DESCRIBE/SETUP/ANNOUNCE 200 on a THIRD rig
+(77-111-249-146; ANNOUNCE 4137 B — the new 4/22 identity shapes on the
+wire). ice_creds identical (all lengths 13). The pump thread saturated
+the window again: `pump_ms 20920`, 2820 STUN + 940 NATT, the rig's 126
+probes ALL answered, 3753 rig successes validated, invalid 0 — and
+**PLAY: timeout, with the new WS counters showing TOTAL control-channel
+silence from the rig** (`ws_pings_in:0, ws_pongs_in:0, ws_closes_in:0,
+ws_frames_out:5` vs `ws_text:4`): it neither answered, nor pinged, nor
+closed. Three rigs, three refusals (455, timeout, timeout), one
+constant: no real DTLS behind the announced fingerprint.
+
+**Verdict: the elimination is FINAL.** Every transport behavior the
+reference exhibits before PLAY is now reproduced live except the DTLS
+layer itself. R3-A shipped this round (docs/DTLS.md phase 1):
+
+* **NEW `kn_cert.{h,c}`** — the portable-mbedTLS self-signed identity:
+  ECDSA P-256 keypair (the str0m provider default), X.509 v3
+  self-signed with SHA-256, a FIXED wide validity window (2020-2035 —
+  no wall-clock dependency; the rig pins by fingerprint, not by CA),
+  random 16-byte serial. The fingerprint is the SHA-256 of the exact
+  stored DER, rendered in the announced colon-uppercase-hex form
+  (nvst.rs:5596-5603 ≡ str0m src/lib.rs:1662). The struct keeps the
+  parsed x509 + pk contexts for R3-B (`kn_cert_pk`/`kn_cert_x509`
+  opaque handles — the header stays mbedTLS-free). `kn_cert_selfcheck`
+  is the built-in KAT: SHA-256(der)==fp, DER re-parses byte-identical,
+  and an ECDSA sign/verify roundtrip through the CERTIFICATE's public
+  key (proving the announced fingerprint binds our private key).
+* **Build discipline (the kn_net TLS-stream pattern, extended):** the
+  real body compiles under `KN_TLS_BACKEND_MBEDTLS` — which the CMake
+  mbedtls backend defines on BOTH platforms, so the sandbox ctest runs
+  the REAL battery (10 checks under ASan+UBSan: generation, fingerprint
+  format/length, DER shape, selfcheck, distinct keypairs, guards),
+  while every non-mbedTLS build gets the honest stub (available()==0,
+  loud generate() refusal — 4 checks). cross_check compiles the real
+  body with the exact target flags on x64+i686 whenever the mbedTLS
+  tree exists (the round-XXII rule). T10 suite list += test_kncert →
+  **target expectation 72 → 73**.
+* **knvstd:** after `sess_local_identity` (the 4/22 shapes), a real
+  certificate is generated when available and its fingerprint REPLACES
+  the D-s1 placeholder in the ANNOUNCE; the new `identity` evidence
+  line reports `{"ufrag_len":4,"pwd_len":22,"fp_len":95,"cert":"real"}`
+  (or `"placeholder"` — the log never lies about which identity flew).
+  R3-A frees the cert right after fingerprinting; R3-B will keep it for
+  the handshake.
+* ASan caught a real bug pre-ship: the first test draft double-freed
+  (the free contract is free(NULL)-safe, NOT double-free-safe — the
+  kn_net_tls_stream_close convention; test + header doc fixed).
+
+**What run 12 tests:** the SAME command. The rig now receives an
+ANNOUNCE whose fingerprint belongs to a real, existing P-256
+certificate. If the rig's PLAY gate only checks that the announced
+fingerprint is a well-formed/known-shape value or probes it in any way,
+behavior may change; if the gate requires an actual DTLS handshake
+(the leading theory), PLAY stays refused — and R3-B (the DTLS client
+on the bundle socket, inside the pump thread's state machine) is the
+next and likely decisive round. Either outcome is a clean measurement.

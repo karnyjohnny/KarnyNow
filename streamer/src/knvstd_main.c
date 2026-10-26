@@ -29,6 +29,7 @@
 #endif
 
 #include "kn/kn_audio.h"
+#include "kn/kn_cert.h"
 #include "kn/kn_cm.h"
 #include "kn/kn_d3d.h"
 #include "kn/kn_decode.h"
@@ -3217,6 +3218,30 @@ static int run_session(const char *token, const char *device_id,
 
         sess_local_identity(ufrag, sizeof ufrag, pwd, sizeof pwd,
                             fp, sizeof fp);
+        {   /* round XXX (R3-A): announce a REAL certificate fingerprint
+             * when the build carries the mbedTLS backend (docs/DTLS.md —
+             * the rig pins this fingerprint; the R3-B DTLS handshake will
+             * present the matching certificate). Without it, the D-s1
+             * placeholder stays and the evidence line SAYS so. The cert
+             * is freed right after fingerprinting in R3-A; R3-B keeps it
+             * alive for the handshake. Lengths/shapes only in the log
+             * (§7) — the fingerprint itself is public (it travels in the
+             * ANNOUNCE). */
+            const char *cert_src = "placeholder";
+            if (kn_cert_available()) {
+                kn_cert *cert = kn_cert_generate(err, sizeof err);
+                if (cert) {
+                    if (kn_cert_fingerprint(cert, fp, sizeof fp) == 0)
+                        cert_src = "real";
+                    kn_cert_free(cert);
+                }
+            }
+            printf("{\"mode\":\"session\",\"event\":\"identity\","
+                   "\"ufrag_len\":%d,\"pwd_len\":%d,\"fp_len\":%d,"
+                   "\"cert\":\"%s\"}\n", (int)strlen(ufrag),
+                   (int)strlen(pwd), (int)strlen(fp), cert_src);
+            fflush(stdout);
+        }
         memset(&ap, 0, sizeof ap);
         ap.width = 1280; ap.height = 720; ap.fps = 30;         /* D14 */
         ap.bitrate_kbps = 5000;          /* stage-5 will cap 3-6 Mbps */
