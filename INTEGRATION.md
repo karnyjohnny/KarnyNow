@@ -1,4 +1,141 @@
-# INTEGRATION NOTES — Round XXX delta, rev 20 (R7 run 11 = the FINAL elimination datum: PLAY refused with a saturated pump + TOTAL WS silence → R3-A SHIPPED: kn_cert, the real ECDSA P-256 self-signed identity replacing D-s1's placeholder fingerprint)
+# INTEGRATION NOTES — Round XXXI delta, rev 21 (R7 run 12 = the real fingerprint flew and PLAY STILL refused → R3-B SHIPPED: kn_dtls, the DTLS 1.2 ACTIVE client on the bundle socket + the reference's N/N+1 socket pair + the pump-thread DTLS state machine)
+
+> **Rev 21 supersedes rev 1-20.** Canonical state: `PROJECT-STATE.md`.
+> Design records: **`docs/RTSP.md` §18** (run 12 + the R3-B design +
+> the three mbedTLS landmines), `docs/DTLS.md` (R3-A/R3-B SHIPPED).
+>
+> **Round XXXI headline: run 12 finalized the fingerprint question — a
+> 4th rig (80-84-170-153) accepted the ANNOUNCE carrying the REAL
+> P-256 fingerprint (`identity cert:real fp_len 95`, ANNOUNCE 200,
+> 4137 B) and then held PLAY in the exact run-11 silence (timeout,
+> ws_pings_in 0, ws_closes_in 0, frames_out 5 vs text 4) while the
+> pump saturated UDP beside it (20921 ms, 2841+947, 126/126 answered,
+> 3788 validated, invalid 0). The announced fingerprint ALONE is not
+> the gate — the handshake behind it is. R3-B SHIPPED: `kn_dtls` (the
+> portable-mbedTLS DTLS 1.2 ACTIVE client, fingerprint-pinned via the
+> double gate, inject-queue BIO, ms-clock retransmission timers), the
+> reference's socket pair (video N / bundle N+1, preferred
+> 49005/49006), the pump-thread DTLS state machine (ClientHello gated
+> on the first REAL inbound STUN, post-ready 100 ms NATT-only cadence,
+> the worker persists through the media loop in non-unified mode), and
+> the evidence lines (`sock_pair`, `dtls_arm`, `dtls_ready`/`dtls_fail`,
+> the grown `ice_preplay`, `unified` in `ice_creds`).**
+>
+> ## Changed files (round XXXI)
+> 1. `streamer/{include/kn,src}/kn_dtls.{h,c}` (NEW) — the R3-B module:
+>    real body under KN_TLS_BACKEND_MBEDTLS on BOTH platforms (the
+>    kn_cert discipline), honest stub elsewhere (`available()==0`,
+>    loud refusal). DTLS 1.2 exactly (min=max), the kn_cert handles
+>    as own_cert (R3-A kept them for this), MTU 1200, HVR automatic
+>    (client side). PINNING = the double gate: the verify callback
+>    clears chain flags ONLY on SHA-256(peer DER) == the pinned
+>    DESCRIBE fingerprint, and poll() refuses READY unless
+>    verify_result==0 AND pin_matched (latching KN_DTLS_ERR_PIN +
+>    close_notify). VERIFY_OPTIONAL is REQUIRED for this pattern —
+>    mbedTLS fails VERIFY_REQUIRED without a CA chain before any
+>    callback (ssl_tls.c:8071); landmine documented in RTSP.md §18.
+>    BIO recv returns WANT_READ on an empty queue, NEVER TIMEOUT
+>    (a BIO TIMEOUT is read as an expired retransmission delay →
+>    resend() → a NULL-flight segfault; landmine #2). Post-ready app
+>    records are drained and counted (D-t4 — R3-C hooks here).
+> 2. `streamer/tests/test_kndtls.c` (NEW, 15th suite) — self-adaptive:
+>    REAL battery (31 checks) under the CMake mbedtls backend, the
+>    stub contract (6) elsewhere. The in-test server is shaped like
+>    the rig: HVR cookies ON, the CLIENT cert pinned server-side
+>    (pinning BOTH directions), the same inject-queue BIO discipline;
+>    legs: full handshake over real loopback UDP, DTLSv1.2 +
+>    ECDHE-ECDSA assertions, first-flight loss in BOTH directions
+>    (the timer callbacks earn their keep), wrong-pin refusal at the
+>    ready gate (fatal latch + dirty verify flags preserved),
+>    inject-queue overflow (drop-new, counted), mid-handshake free
+>    (ASan bait), NULL guards. The server implements the documented
+>    HVR contract: HELLO_VERIFY_REQUIRED → session_reset + re-armed
+>    transport id (landmine #3). PLUS the `--openssl <port> <fp>` mode
+>    for the cross-implementation leg.
+> 3. `tools/dtls_openssl_check.py` (NEW) — the independent-stack gate
+>    (sandbox-only; the target has no openssl): generates an OpenSSL
+>    ECDSA P-256 self-signed cert, runs `openssl s_server -dtls1_2`,
+>    drives `test_kndtls --openssl` pinned to that cert's fingerprint.
+>    PASS proves our ClientHello/cookie-round/cert/Finished interop
+>    with a NON-mbedTLS DTLS stack (measured: DTLSv1.2,
+>    TLS-ECDHE-ECDSA-WITH-CHACHA20-POLY1305-SHA256, ~24 ms).
+> 4. `streamer/src/knvstd_main.c` — the phase-C/D/E rework:
+>    `sess_reserve_pair` (49005/49006 preferred → <= 32 dynamic
+>    adjacent attempts → honest failure; the `sock_pair` evidence
+>    line); SETUP's client port = unified ? bundle : video
+>    (nvst_rtsp.rs:1176-1183); the BUNDLE socket is connected to the
+>    SETUP peer pre-ANNOUNCE (localAddress + clientBundlePort +
+>    a=candidate come from it — the reference test pins 49006) and to
+>    ice_dest after; the video socket connects to the video peer at
+>    media start; the save/restore reconnect dance is GONE (one peer
+>    per socket for life). The cert stays ALIVE (R3-A freed it after
+>    fingerprinting) and arms `kn_dtls_client` when ice + remote_fp +
+>    real cert + backend all exist (`dtls_arm` line, lengths only).
+>    The pump: demux PING→PONG | STUN | DTLS(20..63, kn_dtls_peek) |
+>    invalid; the DTLS arm gate = the first real inbound STUN
+>    (req_in||ok_in — the :8196 rule); cadence 20 ms (3×STUN+1×NATT)
+>    → post-ready 100 ms NATT-only (:7837-7846); `dtls_ready` /
+>    `dtls_fail` emitted FROM THE THREAD at the transition (timing is
+>    evidence; stdio locks keep lines atomic); the snapshot handshake
+>    (snap_req/snap_done) lets main read the counters while the
+>    worker runs; `pump_persist` (non-unified + thread) keeps the
+>    bundle worker alive through the media loop (D21 untouched — the
+>    media pipeline stays single-threaded on its own socket);
+>    teardown order = join → kn_dtls_free → close sockets → (teardown
+>    label) kn_cert_free. `ice_preplay` grew pongs/persist + the six
+>    dtls counters; `ice_creds` grew `unified` (answers DTLS.md open
+>    question 4 even when PLAY fails). The sequential fallback and the
+>    disablePlay window keep the STUN/NATT-only shape (documented).
+> 5. `CMakeLists.txt` — kn_dtls.c into kncore; kndtls into the test
+>    foreach (ctest 16→17 ×2); `target_compile_definitions(test_kndtls
+>    PRIVATE KN_TLS_BACKEND_MBEDTLS=1)` under the mbedtls backend (the
+>    suite's real section compiles only there — schannel builds run the
+>    stub battery, the honest split).
+> 6. `tools/build_native_tests.sh` — KNCORE += kn_dtls.c; the 15th
+>    suite builds (stub) + runs as rc19.
+> 7. `tools/cross_check.sh` — kn_dtls stub -c + the REAL-body legs
+>    (kn_dtls.c AND test_kndtls.c's real section) under the exact
+>    target flags ×2 arches whenever third_party/mbedtls exists (the
+>    round-XXII rule); the stub suite link (needs -lws2_32 via
+>    kn_sock.c); KCORE += kn_dtls.c.
+> 8. `tests/T10_build_and_test.py` — suites += test_kndtls (15) →
+>    target expectation **74** (run 12's T10 reported 72, not the
+>    round-XXX-expected 73: the target harness predates the kncert
+>    addition — SYNC THIS FILE from the repo before the next run).
+> 9. `docs/RTSP.md` §18 — run 12 + the R3-B design record + the three
+>    mbedTLS landmines. `docs/DTLS.md` — R3-B SHIPPED; open questions
+>    1/2 answered, 6 added (does the rig request the client cert; does
+>    it tolerate a DTLS-complete but SCTP-silent client — D-t4).
+> 10. `PROJECT-STATE.md` — status/Next steps/session log round XXXI.
+>
+> ## Verification status (what ran WHERE, round XXXI)
+> * Sandbox: native 15 suites PASS (stub legs); cross mingw x64+i686
+>   -Werror PASS incl. the kn_dtls real-body + test real-section legs;
+>   ctest 17/17 ×2 backends (mbedtls: test_kndtls REAL 31/31;
+>   schannel: stub 6/6); ASan+UBSan+LSan clean on the real battery;
+>   the OpenSSL interop leg PASS; paranoid knvstd legs
+>   (-Wunused-but-set-variable -Wformat-truncation=2) clean host+cross;
+>   sandbox_session_e2e 43/43 (unchanged by design — the rig doesn't
+>   speak DTLS; upgrading it is an R3-C-era candidate); T10 POSIX dry
+>   ALL PASS 64; T13 ALL PASS 63.
+> * Target (PENDING — round XXXII asks for): `python
+>   tests\T10_build_and_test.py` with the SYNCED harness (expect ALL
+>   PASS **74**, zero warnings — test_kndtls runs the REAL battery in
+>   the target's mbedtls build) then **R7 run 13** (the same --session
+>   command; watch sock_pair → dtls_arm → dtls_ready/dtls_fail → PLAY).
+>
+> ## Notes for the target build
+> * No new link libraries: kn_dtls uses the mbedtls/mbedx509/
+>   mbedcrypto statics kncore already links (MBEDTLS_SSL_PROTO_DTLS +
+>   MBEDTLS_SSL_COOKIE_C are ON in the pinned 3.6.0 default config).
+> * No new PE imports (F1 holds): mbedTLS is static; the pump thread
+>   reuses the round-XXVIII kernel32 CreateThread.
+> * The kn_dtls real body compiles ONLY with the backend define — the
+>   target's T10 (mbedtls default) exercises it for real; a schannel
+>   fallback build gets the honest stub and knvstd logs
+>   `dtls_arm {"armed":0,"reason":"backend_unavailable"}`.
+
+
 
 > **Rev 20 supersedes rev 1-19.** Canonical state: `PROJECT-STATE.md`.
 > Design records: **`docs/DTLS.md`** (R3-A now SHIPPED, R3-B/C/D

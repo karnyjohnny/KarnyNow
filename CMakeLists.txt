@@ -51,6 +51,7 @@ add_library(kncore STATIC
   streamer/src/kn_http.c
   streamer/src/kn_cm.c
   streamer/src/kn_cert.c
+  streamer/src/kn_dtls.c
   third_party/tiny-aes-c/aes.c
   third_party/crypto-algorithms-sha1/sha1.c
 )
@@ -183,7 +184,7 @@ target_compile_definitions(kncore PRIVATE
   KN_DIAG_BUILD_EXTRA="${_kn_ffmpeg}")
 
 enable_testing()
-foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert)
+foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert kndtls)
   add_executable(test_${t} streamer/tests/test_${t}.c)
   target_link_libraries(test_${t} PRIVATE kncore)
   # tests include the generated KAT vector headers, which live in src/
@@ -202,6 +203,15 @@ if(WIN32)
 endif()
 if(KN_FFMPEG_LIBS)
   target_link_libraries(test_knselftest PRIVATE ${KN_FFMPEG_LIBS})
+endif()
+
+# Round XXXI (R3-B): kn_dtls's real battery needs the mbedTLS DTLS client —
+# the SAME backend define kncore gets, so the mbedtls build compiles and
+# runs the real handshake suite while schannel builds get the honest stub.
+# kn_dtls is portable (unlike kn_net_mbedtls's Win32-only body), so this
+# leg executes for real on the Linux host too.
+if(KN_TLS_BACKEND STREQUAL "mbedtls")
+  target_compile_definitions(test_kndtls PRIVATE KN_TLS_BACKEND_MBEDTLS=1)
 endif()
 
 # knvstd — the streamer executable. Pre-stage-1 skeleton: --selftest,

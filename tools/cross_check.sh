@@ -64,6 +64,18 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     else
         echo "SKIP kn_cert real-body cross-compile (third_party/mbedtls absent)"
     fi
+    $CC $CFLAGS -c streamer/src/kn_dtls.c  -o build/cross/kn_dtls_$arch.o
+    # round XXXI (R3-B): the kn_dtls REAL body AND the test's real battery
+    # section must survive the exact target flag set (the round-XXII rule;
+    # the sandbox shell gates never define the backend)
+    if [ -d third_party/mbedtls/include/mbedtls ]; then
+        $CC $CFLAGS -DKN_TLS_BACKEND_MBEDTLS=1 -Ithird_party/mbedtls/include \
+            -c streamer/src/kn_dtls.c -o build/cross/kn_dtls_real_$arch.o
+        $CC $CFLAGS -DKN_TLS_BACKEND_MBEDTLS=1 -Ithird_party/mbedtls/include \
+            -c streamer/tests/test_kndtls.c -o build/cross/test_kndtls_real_$arch.o
+    else
+        echo "SKIP kn_dtls real-body cross-compile (third_party/mbedtls absent)"
+    fi
     $CC $CFLAGS -c third_party/tiny-aes-c/aes.c -o build/cross/tinyaes_$arch.o
     $CC $CFLAGS -c third_party/crypto-algorithms-sha1/sha1.c -o build/cross/sha1_$arch.o
     $CC $CFLAGS streamer/src/knlog.c streamer/src/knring.c streamer/tests/test_knlog.c \
@@ -97,6 +109,9 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         $LDFLAGS -o build/cross/test_kncm_$arch.exe
     $CC $CFLAGS streamer/src/kn_cert.c streamer/tests/test_kncert.c \
         $LDFLAGS -o build/cross/test_kncert_$arch.exe
+    $CC $CFLAGS streamer/src/kn_dtls.c streamer/src/kn_sock.c streamer/src/kn_sha1.c \
+        third_party/crypto-algorithms-sha1/sha1.c streamer/tests/test_kndtls.c \
+        $LDFLAGS -o build/cross/test_kndtls_$arch.exe -lws2_32
     $CC $CFLAGS streamer/src/kn_aes.c streamer/src/kn_sha1.c streamer/src/knsrtp.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c \
         streamer/tests/test_knsrtp.c $LDFLAGS -o build/cross/test_knsrtp_$arch.exe
@@ -110,7 +125,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_net.c streamer/src/kn_rx.c streamer/src/kn_sock.c \
         streamer/src/kn_ws.c streamer/src/kn_rtsp.c \
         streamer/src/kn_json.c streamer/src/kn_http.c streamer/src/kn_cm.c \
-        streamer/src/kn_cert.c \
+        streamer/src/kn_cert.c streamer/src/kn_dtls.c \
         third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
     $CC $CFLAGS $KCORE streamer/tests/test_kndiag.c \
         $LDFLAGS -o build/cross/test_kndiag_$arch.exe -lwinmm -ld3d9 -lole32 \

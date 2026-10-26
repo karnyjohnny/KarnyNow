@@ -30,6 +30,7 @@
 
 #include "kn/kn_audio.h"
 #include "kn/kn_cert.h"
+#include "kn/kn_dtls.h"
 #include "kn/kn_cm.h"
 #include "kn/kn_d3d.h"
 #include "kn/kn_decode.h"
@@ -2217,6 +2218,15 @@ static void sess_rtsp_detail(const char *step, const kn_rtsp_client *rtc,
 typedef struct {
     unsigned stun_sent, natt_sent, req_in, answered, ok_in, invalid_in,
              send_errors;
+    unsigned pongs_sent;                /* the literal PING->PONG leg
+                                           (nvst.rs:8605-8614) */
+    /* round XXXI (R3-B): the DTLS handshake state, mirrored from
+     * kn_dtls by the pump thread (the snapshot struct carries them to
+     * the main thread while the worker runs) */
+    unsigned dtls_armed, dtls_started, dtls_ready, dtls_fail_rc;
+    unsigned dtls_in, dtls_out;
+    int      dtls_last_rc, dtls_verify;
+    uint64_t dtls_ready_ms;
     uint64_t pump_ms;
 } sess_ice_stats;
 
@@ -2246,6 +2256,17 @@ typedef struct {
     char local_ufrag[32], local_pwd[48], natt[288];
     uint8_t rx[2048];
     sess_ice_stats st;
+    /* R3-B: the armed DTLS client (main creates it BEFORE the thread
+     * starts; the thread is the only poller/injector while it runs;
+     * main frees it AFTER the join — single-owner discipline). NULL =
+     * not armed (honest STUN/NATT-only pumping, like runs 9-12). */
+    struct kn_dtls *dtls;
+    /* the stats snapshot channel: while the thread runs, main cannot
+     * read st directly (torn 64-bit reads on i686, half-updated
+     * counters) — it raises snap_req, the thread copies st into snap
+     * at its next loop pass (<= ~25 ms) and raises snap_done. */
+    volatile int snap_req, snap_done;
+    sess_ice_stats snap;
     volatile int stop;
     int started;
 #ifdef _WIN32
@@ -2276,24 +2297,36 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
         char uname[400];
         size_t plen;
         int i, n;
-        if (kn_sock_now_ms() - last_burst >= 20u) {
-            snprintf(uname, sizeof uname, "%s:%s", p->remote_ufrag,
-                     p->local_ufrag);
-            for (i = 0; i < 3; ++i) {          /* the ICE burst (:7848) */
-                if (kn_ws_rand(tid, sizeof tid) != 0) break;
-                if (kn_sock_stun_build(tx, sizeof tx, &plen,
-                                       KN_SOCK_STUN_BINDING_REQUEST, tid,
-                                       (const uint8_t *)p->remote_pwd,
-                                       strlen(p->remote_pwd),
-                                       KN_SOCK_STUN_ATTR_USERNAME,
-                                       (const uint8_t *)uname,
-                                       strlen(uname)) != KN_SOCK_OK)
-                    continue;
-                if (kn_sock_udp_sendto(p->sock, p->dest_ip, p->dest_port,
-                                       tx, plen) == KN_SOCK_OK)
-                    p->st.stun_sent++;
-                else
-                    p->st.send_errors++;
+        unsigned cadence;
+        if (p->snap_req && !p->snap_done) {    /* main wants the stats */
+            p->snap = p->st;
+            p->snap_done = 1;
+        }
+        /* the reference bundle worker's cadence (:7837-7846): 20 ms of
+         * 3xSTUN+1xNATT until dtls_ready, then NATT-only every 100 ms
+         * (PING_INTERVAL_AFTER_CONNECTION :243). STUN requests from the
+         * rig keep being answered in BOTH regimes (below). */
+        cadence = p->st.dtls_ready ? 100u : 20u;
+        if (kn_sock_now_ms() - last_burst >= cadence) {
+            if (!p->st.dtls_ready) {
+                snprintf(uname, sizeof uname, "%s:%s", p->remote_ufrag,
+                         p->local_ufrag);
+                for (i = 0; i < 3; ++i) {      /* the ICE burst (:7848) */
+                    if (kn_ws_rand(tid, sizeof tid) != 0) break;
+                    if (kn_sock_stun_build(tx, sizeof tx, &plen,
+                                           KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                           (const uint8_t *)p->remote_pwd,
+                                           strlen(p->remote_pwd),
+                                           KN_SOCK_STUN_ATTR_USERNAME,
+                                           (const uint8_t *)uname,
+                                           strlen(uname)) != KN_SOCK_OK)
+                        continue;
+                    if (kn_sock_udp_sendto(p->sock, p->dest_ip, p->dest_port,
+                                           tx, plen) == KN_SOCK_OK)
+                        p->st.stun_sent++;
+                    else
+                        p->st.send_errors++;
+                }
             }
             /* the NATT hole-punch ping (:5033-5050, :7868-7890) */
             snprintf(uname, sizeof uname, "%s:%s", p->natt, p->local_ufrag);
@@ -2313,8 +2346,68 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
             }
             last_burst = kn_sock_now_ms();
         }
+        /* R3-B: the DTLS handshake, gated EXACTLY like the reference —
+         * the ClientHello arms at the first REAL inbound STUN evidence
+         * (a rig request answered or a validated success; nvst.rs
+         * :8196-8198: "skips setupDtls until a real inbound STUN. Do
+         * not synthesize Binding Success"). From there every loop pass
+         * steps the handshake (non-blocking; retransmissions are
+         * timer-driven inside kn_dtls) while the bursts continue. */
+        if (p->dtls && !p->st.dtls_ready && p->st.dtls_fail_rc == 0) {
+            if (!p->st.dtls_started && (p->st.req_in || p->st.ok_in))
+                p->st.dtls_started = 1;
+            if (p->st.dtls_started) {
+                int drc = kn_dtls_poll(p->dtls);
+                if (drc == KN_DTLS_READY) {
+                    char cs[64];
+                    kn_dtls_stats ds;
+                    p->st.dtls_ready = 1;
+                    p->st.dtls_ready_ms = kn_dtls_ready_ms(p->dtls);
+                    kn_dtls_stats_get(p->dtls, &ds);
+                    p->st.dtls_in = ds.records_in;
+                    p->st.dtls_out = ds.records_out;
+                    p->st.dtls_verify = ds.verify_result;
+                    (void)kn_dtls_ciphersuite(p->dtls, cs, sizeof cs);
+                    printf("{\"mode\":\"session\",\"event\":\"dtls_ready\","
+                           "\"ms\":%llu,\"version\":\"%.16s\","
+                           "\"cipher\":\"%.48s\",\"records_in\":%u,"
+                           "\"records_out\":%u,\"verify\":%d}\n",
+                           (unsigned long long)p->st.dtls_ready_ms,
+                           kn_dtls_version(p->dtls), cs, ds.records_in,
+                           ds.records_out, ds.verify_result);
+                    fflush(stdout);
+                } else if (drc < 0) {
+                    kn_dtls_stats ds;
+                    p->st.dtls_fail_rc = (unsigned)(-drc);
+                    kn_dtls_stats_get(p->dtls, &ds);
+                    p->st.dtls_last_rc = ds.last_rc;
+                    p->st.dtls_verify = ds.verify_result;
+                    p->st.dtls_in = ds.records_in;
+                    p->st.dtls_out = ds.records_out;
+                    printf("{\"mode\":\"session\",\"event\":\"dtls_fail\","
+                           "\"rc\":%d,\"mbedtls_rc\":%d,\"verify\":%d,"
+                           "\"pin_matched\":%d,\"records_in\":%u,"
+                           "\"records_out\":%u,\"send_errors\":%u}\n",
+                           drc, ds.last_rc, ds.verify_result,
+                           ds.pin_matched, ds.records_in, ds.records_out,
+                           ds.send_errors);
+                    fflush(stdout);
+                }
+            }
+        } else if (p->dtls && p->st.dtls_ready) {
+            /* keep the established session serviced: drains app records
+             * (the rig's SCTP until R3-C — counted, D-t4) and lets
+             * mbedTLS answer any post-handshake traffic */
+            kn_dtls_stats ds;
+            (void)kn_dtls_poll(p->dtls);
+            kn_dtls_stats_get(p->dtls, &ds);
+            p->st.dtls_in = ds.records_in;
+            p->st.dtls_out = ds.records_out;
+        }
         {   /* drain inbound: answer the rig's binding requests, count
-             * its binding successes (handle_stun_datagram :5151-5172) */
+             * its binding successes (handle_stun_datagram :5151-5172),
+             * feed DTLS records to the handshake, PONG the literal
+             * PING (:8605-8614) */
             size_t rlen = 0, ulen = 0;
             uint16_t mtype = 0, xport = 0;
             uint32_t xip = 0;
@@ -2323,8 +2416,23 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
             n = kn_sock_udp_recv(p->sock, p->rx, sizeof p->rx, 5, &rlen,
                                  NULL);
             if (n != 1) continue;              /* timeout/error: keep pumping */
+            if (rlen == 4 && memcmp(p->rx, "PING", 4) == 0) {
+                if (kn_sock_udp_sendto(p->sock, p->dest_ip, p->dest_port,
+                                       (const uint8_t *)"PONG",
+                                       4) == KN_SOCK_OK)
+                    p->st.pongs_sent++;
+                continue;
+            }
             if (!kn_sock_stun_inspect(p->rx, rlen, &mtype, tid_in, user,
                                       sizeof user, &ulen, &xip, &xport)) {
+                /* the demux order of the reference worker: STUN by
+                 * magic cookie first, then DTLS by content type
+                 * (looks_like_dtls :6345 — first byte 20..63) */
+                if (kn_dtls_peek(p->rx, rlen) && p->dtls) {
+                    (void)kn_dtls_inject(p->dtls, p->rx, rlen);
+                    /* a fresh record may advance the handshake at once */
+                    continue;
+                }
                 p->st.invalid_in++;
                 continue;
             }
@@ -2371,6 +2479,11 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
         }
     }
     p->st.pump_ms += kn_sock_now_ms() - t0;
+    if (p->snap_req && !p->snap_done) {        /* a late request still
+                                                  gets an answer */
+        p->snap = p->st;
+        p->snap_done = 1;
+    }
 }
 
 #ifdef _WIN32
@@ -2448,8 +2561,78 @@ static void sess_ice_pump(kn_sock_udp *sock, uint32_t dest_ip,
     st->ok_in += p.st.ok_in;
     st->invalid_in += p.st.invalid_in;
     st->send_errors += p.st.send_errors;
+    st->pongs_sent += p.st.pongs_sent;
     st->pump_ms += p.st.pump_ms;
+    /* dtls_* stay zero on the sequential path (it never arms DTLS) */
 }
+static void sess_sleep(uint32_t ms, void *c);   /* fwd (snapshot helper) */
+
+/* R3-B: the reference's socket-pair reservation
+ * (reserve_nvst_socket_pair_preferred, nvst.rs:5953-6000). Video
+ * (Mjolnir) on N, the ICE/DTLS bundle on N+1 — the official Windows
+ * client reserves 49005/49006 FIRST (useReserved=1) because "some
+ * cloud seats do not route the dedicated Mjolnir video flow back to an
+ * arbitrary source port" (:5941-5944), and only falls back to a
+ * dynamic adjacent pair (<= 32 attempts). Returns KN_SOCK_OK with both
+ * sockets open, or a negative error (nothing left open). */
+#define SESS_VIDEO_PORT_PREF 49005u
+static int sess_reserve_pair(kn_sock_udp *vid, kn_sock_udp *bun,
+                             const char **selection, char *err, size_t errsz)
+{
+    int attempt;
+    if (kn_sock_udp_open(vid, NULL, SESS_VIDEO_PORT_PREF,
+                         KN_SOCK_RCVBUF_DEFAULT, err, errsz) == KN_SOCK_OK) {
+        if (kn_sock_udp_open(bun, NULL, (uint16_t)(SESS_VIDEO_PORT_PREF + 1),
+                             KN_SOCK_RCVBUF_DEFAULT, err,
+                             errsz) == KN_SOCK_OK) {
+            *selection = "preferred";
+            return KN_SOCK_OK;
+        }
+        kn_sock_udp_close(vid);
+    }
+    for (attempt = 0; attempt < 32; ++attempt) {
+        uint16_t vp;
+        if (err && errsz) err[0] = '\0';
+        if (kn_sock_udp_open(vid, NULL, 0, KN_SOCK_RCVBUF_DEFAULT,
+                             err, errsz) != KN_SOCK_OK)
+            continue;
+        vp = kn_sock_udp_port(vid);
+        if (vp != 0 && vp != 65535u &&
+            kn_sock_udp_open(bun, NULL, (uint16_t)(vp + 1u),
+                             KN_SOCK_RCVBUF_DEFAULT, err,
+                             errsz) == KN_SOCK_OK) {
+            *selection = "dynamic";
+            return KN_SOCK_OK;
+        }
+        kn_sock_udp_close(vid);
+    }
+    if (err && errsz && err[0] == '\0')
+        snprintf(err, errsz, "no adjacent UDP pair available");
+    return KN_SOCK_ERR_SOCKET;
+}
+
+/* The snapshot handshake for a RUNNING pump thread: raise snap_req,
+ * the worker copies its stats at its next loop pass (<= ~25 ms: 5 ms
+ * recv timeout + the 20 ms cadence) and raises snap_done. Bounded wait
+ * (500 ms); on a stuck worker the caller gets the last snapshot — the
+ * evidence degrades, never the session. */
+static void sess_pump_snapshot(sess_pump *p, sess_ice_stats *out)
+{
+    if (!p->started) {
+        *out = p->st;
+        return;
+    }
+    p->snap_done = 0;
+    p->snap_req = 1;
+    {
+        uint64_t t0 = kn_sock_now_ms();
+        while (!p->snap_done && kn_sock_now_ms() - t0 < 500u)
+            sess_sleep(2u, NULL);
+    }
+    p->snap_req = 0;
+    *out = p->snap_done ? p->snap : p->st;
+}
+
 static void sess_sleep(uint32_t ms, void *c)
 {
     (void)c;
@@ -2621,7 +2804,22 @@ static int run_session(const char *token, const char *device_id,
     kn_rtsp_response resp;
     kn_rtsp_describe desc;
     kn_rtsp_setup_result setup;
-    kn_sock_udp sock;
+    kn_sock_udp sock;                   /* video (Mjolnir) socket, port N */
+    kn_sock_udp bsock;                  /* R3-B: ICE/DTLS bundle, port N+1
+                                           (the reference's pair layout,
+                                           nvst.rs:5472-5541/:5933-6000) */
+    int have_sock = 0, have_bsock = 0;  /* open flags for the teardown */
+    kn_cert *cert = NULL;               /* R3-A identity, kept ALIVE for
+                                           the R3-B handshake (R3-A freed
+                                           it right after fingerprinting) */
+    kn_dtls *dtls = NULL;               /* armed into the pump when the
+                                           DESCRIBE fp + a real cert exist */
+    int unified_mode = 0;               /* described || bundle_fallback
+                                           (nvst_rtsp.rs:1205) */
+    const char *pair_sel = "none";      /* sock_pair evidence: preferred |
+                                           dynamic (nvst.rs:5953-6000) */
+    int pump_persist = 0;               /* the bundle worker outlives PLAY
+                                           (non-unified only, D-t2) */
     kn_ring ring;
     kn_rx_video v;
     kn_rx_mem mem;
@@ -2652,9 +2850,15 @@ static int run_session(const char *token, const char *device_id,
     /* round XXV: the pre-PLAY ICE burst state (see sess_ice_pump) */
     char ice_remote_ufrag[288];         /* the resolved ladder output */
     char ice_natt[288];                 /* NATT payload: bundle user | PING */
-    uint32_t ice_dest_ip = 0, vid_peer_ip = 0;
-    uint16_t ice_dest_port = 0, vid_peer_port = 0;
-    int ice_enabled = 0, ice_reconnect = 0, play_attempts = 0, pump_th = 0;
+    uint32_t ice_dest_ip = 0;
+    uint16_t ice_dest_port = 0;
+    uint32_t vid_peer_ip = 0;           /* R3-B: the EFFECTIVE video peer
+                                           (unified => the bundle peer,
+                                           nvst_rtsp.rs:1207-1214) */
+    uint16_t vid_peer_port = 0;
+    kn_sock_udp *ms = NULL;             /* the media-loop socket: bundle
+                                           in unified mode, video otherwise */
+    int ice_enabled = 0, play_attempts = 0, pump_th = 0;
     int ka_on = 0;                        /* round XXVIII: the Mjolnir
                                              NATT keepalive (nvst.rs
                                              :8849-8905) */
@@ -3122,19 +3326,42 @@ static int run_session(const char *token, const char *device_id,
         describe_sdp[dl] = '\0';
 
         /* ---------------- phase C: socket + SETUP + ANNOUNCE + PLAY --- */
+        /* R3-B: reserve the reference's socket PAIR before SETUP so the
+         * announced X-GS-ClientPort range stays truthful — video
+         * (Mjolnir) on N, the ICE/DTLS bundle on N+1 (:5484: "the server
+         * still relies on this pairing ... Reserving the bundle first
+         * reverses those ports and causes some seats to keep all video
+         * off the client entirely"). Preferred 49005/49006 first (the
+         * official useReserved pair, :5941-5944: some seats do not route
+         * Mjolnir video to an arbitrary source port), then <= 32 dynamic
+         * adjacent attempts (:5953-6000), then an honest failure. */
         err[0] = '\0';
-        rc = kn_sock_udp_open(&sock, NULL, 0, KN_SOCK_RCVBUF_DEFAULT,
-                              err, sizeof err);
+        rc = sess_reserve_pair(&sock, &bsock, &pair_sel, err, sizeof err);
         if (rc != KN_SOCK_OK) {
             printf("{\"mode\":\"session\",\"error\":\"media_socket\","
                    "\"detail\":\"%.120s\"}\n", err);
             fflush(stdout);
             goto teardown;
         }
+        have_sock = have_bsock = 1;
+        printf("{\"mode\":\"session\",\"event\":\"sock_pair\","
+               "\"video_port\":%u,\"bundle_port\":%u,\"selection\":\"%s\","
+               "\"unified\":%d,\"rcvbuf_video\":%u,\"rcvbuf_bundle\":%u}\n",
+               (unsigned)kn_sock_udp_port(&sock),
+               (unsigned)kn_sock_udp_port(&bsock), pair_sel,
+               desc.unified_socket ? 1 : 0, sock.rcvbuf_actual,
+               bsock.rcvbuf_actual);
+        fflush(stdout);
+        /* SETUP's X-GS-ClientPort = the BUNDLE port when the seat
+         * described unified-socket mode, the VIDEO port otherwise
+         * (nvst_rtsp.rs:1176-1183) */
         rc = kn_rtsp_setup_video(&rtc, desc.video_control,
                                  sess.rtsps_endpoint, desc.session,
                                  desc.ping_version,
-                                 kn_sock_udp_port(&sock), common, 3,
+                                 desc.unified_socket
+                                     ? kn_sock_udp_port(&bsock)
+                                     : kn_sock_udp_port(&sock),
+                                 common, 3,
                                  sess.have_media ? sess.media_ip : NULL,
                                  sess.have_media ? sess.media_port : 0,
                                  &setup);
@@ -3195,11 +3422,16 @@ static int run_session(const char *token, const char *device_id,
             }
         }
 
-        /* connect the media socket to the SETUP peer BEFORE announcing:
-         * the kernel picks the route's source address and getsockname
-         * (inside kn_sock_udp_connect) exposes it — the ANNOUNCE then
-         * carries the REAL local address like the reference's reserved
-         * bundle socket does */
+        /* R3-B: the video peer parse stays the hard gate (IPv6 peers are
+         * stage 5), and the BUNDLE socket is connected to the SETUP peer
+         * BEFORE announcing: the kernel picks the route's source address
+         * and getsockname (inside kn_sock_udp_connect) exposes it — the
+         * ANNOUNCE's clientPorts.localAddress + a=candidate then carry
+         * the REAL routed address of the bundle socket, exactly like the
+         * reference's advertised_local_address_for(bundle_peer)
+         * (nvst.rs:6119-6127). The bundle socket later re-connects to
+         * ice_dest when the CloudMatch media peer differs; the VIDEO
+         * socket is connected to its peer at media-loop start. */
         {
             uint32_t peer_ip = 0;
             if (kn_sock_ipv4_parse(setup.peer_ip, &peer_ip) != 0) {
@@ -3208,13 +3440,14 @@ static int run_session(const char *token, const char *device_id,
                 fflush(stdout);
                 goto teardown_sock;
             }
-            if (kn_sock_udp_connect(&sock, peer_ip, setup.peer_port) !=
+            if (kn_sock_udp_connect(&bsock, peer_ip, setup.peer_port) !=
                 KN_SOCK_OK) {
                 printf("{\"mode\":\"session\",\"error\":\"media_connect\"}\n");
                 fflush(stdout);
                 goto teardown_sock;
             }
         }
+        unified_mode = desc.unified_socket || setup.bundle_fallback;
 
         sess_local_identity(ufrag, sizeof ufrag, pwd, sizeof pwd,
                             fp, sizeof fp);
@@ -3229,13 +3462,20 @@ static int run_session(const char *token, const char *device_id,
              * ANNOUNCE). */
             const char *cert_src = "placeholder";
             if (kn_cert_available()) {
-                kn_cert *cert = kn_cert_generate(err, sizeof err);
+                cert = kn_cert_generate(err, sizeof err);
                 if (cert) {
                     if (kn_cert_fingerprint(cert, fp, sizeof fp) == 0)
                         cert_src = "real";
-                    kn_cert_free(cert);
+                    else {
+                        kn_cert_free(cert);   /* unusable: back to the
+                                                 honest placeholder */
+                        cert = NULL;
+                    }
                 }
             }
+            /* R3-B: the cert stays ALIVE now — the kn_dtls handshake
+             * below presents exactly the certificate whose fingerprint
+             * the ANNOUNCE carries (kn_cert_pk/kn_cert_x509 handles). */
             printf("{\"mode\":\"session\",\"event\":\"identity\","
                    "\"ufrag_len\":%d,\"pwd_len\":%d,\"fp_len\":%d,"
                    "\"cert\":\"%s\"}\n", (int)strlen(ufrag),
@@ -3250,13 +3490,18 @@ static int run_session(const char *token, const char *device_id,
         ap.hdr = 0;
         snprintf(ap.key_hex, sizeof ap.key_hex, "%s", key_hex);
         ap.key_id = key_id;
-        ap.bundle_port = kn_sock_udp_port(&sock);
+        ap.bundle_port = kn_sock_udp_port(&bsock);   /* clientBundlePort +
+                                                        a=candidate = the
+                                                        BUNDLE socket (the
+                                                        reference test pins
+                                                        clientBundlePort:
+                                                        49006, :2955) */
         {
             char iptext[16];
-            if (sock.local_addr == 0)
+            if (bsock.local_addr == 0)
                 snprintf(iptext, sizeof iptext, "127.0.0.1");
             else
-                (void)kn_sock_ipv4_text(sock.local_addr, iptext);
+                (void)kn_sock_ipv4_text(bsock.local_addr, iptext);
             snprintf(ap.local_address, sizeof ap.local_address, "%s",
                      iptext);
         }
@@ -3337,7 +3582,7 @@ static int run_session(const char *token, const char *device_id,
                    "\"enabled\":%d,\"ping_ver\":%u,\"dest\":\"%.15s:%u\","
                    "\"remote_ufrag_len\":%d,\"bundle_user_len\":%d,"
                    "\"natt_len\":%d,\"setup_payload_len\":%d,"
-                   "\"remote_pw\":%d,\"remote_fp\":%d}\n",
+                   "\"remote_pw\":%d,\"remote_fp\":%d,\"unified\":%d}\n",
                    ice_enabled, (unsigned)setup.ping_version,
                    ice_enabled ? kn_sock_ipv4_text(ice_dest_ip, dtxt) : "",
                    (unsigned)ice_dest_port,
@@ -3347,19 +3592,54 @@ static int run_session(const char *token, const char *device_id,
                    setup.have_ping_payload
                        ? (int)strlen(setup.ping_payload) : 0,
                    desc.remote_password[0] ? 1 : 0,
-                   desc.remote_fp[0] ? 1 : 0);
+                   desc.remote_fp[0] ? 1 : 0,
+                   unified_mode ? 1 : 0);
             fflush(stdout);
         }
+        /* R3-B socket routing (the reference's split, nvst_rtsp.rs
+         * :1205-1222): the BUNDLE socket's peer for life is the bundle
+         * peer (ice_dest — the CloudMatch media endpoint else the SETUP
+         * peer); the VIDEO socket (non-unified) is connected to the
+         * SETUP video peer at media-loop start. In unified mode the
+         * bundle socket ALSO carries the media flow (the video socket
+         * stays reserved-but-idle, exactly like the reference's pair).
+         * The old save/restore reconnect dance is GONE: each socket has
+         * exactly one peer for life now. */
         if (ice_enabled &&
-            (sock.peer_addr != ice_dest_ip ||
-             sock.peer_port != ice_dest_port)) {
-            /* pump towards the bundle peer, then restore the video peer
-             * for the media loop (kn_sock_udp_connect is re-connectable) */
-            vid_peer_ip = sock.peer_addr;
-            vid_peer_port = sock.peer_port;
-            if (kn_sock_udp_connect(&sock, ice_dest_ip, ice_dest_port)
-                == KN_SOCK_OK)
-                ice_reconnect = 1;
+            (bsock.peer_addr != ice_dest_ip ||
+             bsock.peer_port != ice_dest_port))
+            (void)kn_sock_udp_connect(&bsock, ice_dest_ip, ice_dest_port);
+        /* ---- R3-B: arm the DTLS client (the decisive round) ----
+         * The handshake itself starts inside the pump thread, gated on
+         * the first REAL inbound STUN (the :8196 rule — never
+         * synthesized). Requirements: working ICE (dest + creds), the
+         * DESCRIBE remote fingerprint to pin, and the real kn_cert
+         * identity (a placeholder fingerprint has no keypair behind it —
+         * announcing one and handshaking another would be a lie). */
+        {
+            const char *no_arm = NULL;
+            char arm_detail[160];
+            arm_detail[0] = '\0';
+            if (!ice_enabled)          no_arm = "ice_disabled";
+            else if (!desc.remote_fp[0]) no_arm = "no_remote_fp";
+            else if (!cert)            no_arm = "no_real_cert";
+            else if (!kn_dtls_available()) no_arm = "backend_unavailable";
+            if (!no_arm) {
+                err[0] = '\0';
+                dtls = kn_dtls_client(&bsock, ice_dest_ip, ice_dest_port,
+                                      cert, desc.remote_fp, err, sizeof err);
+                if (!dtls) {
+                    no_arm = "client_init";
+                    lb_json_path(arm_detail, sizeof arm_detail, err);
+                }
+            }
+            printf("{\"mode\":\"session\",\"event\":\"dtls_arm\","
+                   "\"armed\":%d,\"reason\":\"%s\",\"detail\":\"%s\","
+                   "\"pin_len\":%d,\"cert_real\":%d,\"available\":%d}\n",
+                   dtls ? 1 : 0, no_arm ? no_arm : "", arm_detail,
+                   (int)strlen(desc.remote_fp), cert ? 1 : 0,
+                   kn_dtls_available());
+            fflush(stdout);
         }
         /* Round XXVIII: the pump runs CONCURRENTLY with the PLAY
          * exchange (the reference's receiver thread never goes quiet
@@ -3372,9 +3652,13 @@ static int run_session(const char *token, const char *device_id,
          * session stays resumable (phase B-E policy). */
         memset(&pump, 0, sizeof pump);
         if (ice_enabled) {
-            pump.sock = &sock;
+            pump.sock = &bsock;       /* R3-B: the pump owns the BUNDLE
+                                       * socket (ICE + DTLS live there);
+                                       * the video socket is untouched
+                                       * until the media loop */
             pump.dest_ip = ice_dest_ip;
             pump.dest_port = ice_dest_port;
+            pump.dtls = dtls;         /* NULL = STUN/NATT-only (honest) */
             pump_set_str(pump.remote_ufrag, sizeof pump.remote_ufrag,
                          ice_remote_ufrag);
             pump_set_str(pump.remote_pwd, sizeof pump.remote_pwd,
@@ -3382,23 +3666,37 @@ static int run_session(const char *token, const char *device_id,
             pump_set_str(pump.local_ufrag, sizeof pump.local_ufrag, ufrag);
             pump_set_str(pump.local_pwd, sizeof pump.local_pwd, pwd);
             pump_set_str(pump.natt, sizeof pump.natt, ice_natt);
+            if (dtls) pump.st.dtls_armed = 1;
         }
+        /* R3-B: in the NON-unified layout the pump thread becomes the
+         * reference's bundle worker for the WHOLE session (it keeps
+         * answering STUN, NATT-pinging at the post-ready 100 ms and
+         * servicing the DTLS session while the media loop runs on the
+         * separate video socket — single-owner discipline holds, D21's
+         * media loop untouched). Unified mode keeps the round-XXVIII
+         * handoff shape: one socket, one owner, join before media
+         * (deviation D-t2 — bundle servicing there is R3-C scope). */
         if (!desc.disable_play) {
             play_attempts = 1;
             if (ice_enabled) {
                 pump_th = (sess_pump_start(&pump) == 0);
+                /* persist ONLY with a live thread AND the split-socket
+                 * layout (unified mode hands the single socket to the
+                 * media loop — join first, D-t2) */
+                pump_persist = pump_th && !unified_mode;
                 if (!pump_th)      /* honest sequential fallback */
-                    sess_ice_pump(&sock, ice_dest_ip, ice_dest_port,
+                    sess_ice_pump(&bsock, ice_dest_ip, ice_dest_port,
                                   ice_remote_ufrag, desc.remote_password,
                                   ufrag, pwd, ice_natt, pkt, sizeof pkt,
                                   400u, &pump.st);
                 else
                     /* round XXIX warm-up: guarantee PLAY never lands
-                     * before the first bursts (run 10 raced the thread
-                     * start; run 9's sequential 400 ms had history and
-                     * still 455'd — this removes the confound, not the
-                     * DTLS suspect). The reference's receiver is tens of
-                     * ms ahead of finish() by construction. */
+                     * before the first bursts — and since round XXXI it
+                     * also gives the DTLS arm its first real-STUN gate
+                     * a window to fire, so the ClientHello is on the
+                     * wire before/while PLAY is in flight (the
+                     * reference's receiver is tens of ms ahead of
+                     * finish() by construction, lib.rs:894->1117). */
                     sess_sleep(400u, NULL);
             }
             rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint,
@@ -3410,29 +3708,41 @@ static int run_session(const char *token, const char *device_id,
             fflush(stdout);
         } else if (ice_enabled) {
             /* a disablePlay seat: the reference's receiver still pings —
-             * a short sequential window for routing/evidence */
-            sess_ice_pump(&sock, ice_dest_ip, ice_dest_port,
+             * a short sequential window for routing/evidence (no DTLS on
+             * the sequential path; a disablePlay seat never reached a
+             * live run yet) */
+            sess_ice_pump(&bsock, ice_dest_ip, ice_dest_port,
                           ice_remote_ufrag, desc.remote_password,
                           ufrag, pwd, ice_natt, pkt, sizeof pkt,
                           400u, &pump.st);
         }
-        sess_pump_stop(&pump);        /* join BEFORE the socket handoff */
-        if (ice_enabled) ice_st = pump.st;
-        if (ice_reconnect) {
-            (void)kn_sock_udp_connect(&sock, vid_peer_ip, vid_peer_port);
-            ice_reconnect = 0;
+        if (pump_persist) {
+            /* the worker keeps running through the media loop — read
+             * the PLAY-window stats through the snapshot handshake
+             * (never touch pump.st directly while the thread lives) */
+            sess_pump_snapshot(&pump, &ice_st);
+        } else {
+            sess_pump_stop(&pump);    /* join BEFORE any socket handoff */
+            if (ice_enabled) ice_st = pump.st;
         }
         if (ice_enabled) {
             printf("{\"mode\":\"session\",\"event\":\"ice_preplay\","
                    "\"stun_sent\":%u,\"natt_sent\":%u,\"req_in\":%u,"
                    "\"answered\":%u,\"ok_in\":%u,\"invalid_in\":%u,"
-                   "\"send_errors\":%u,\"pump_ms\":%llu,"
-                   "\"play_attempts\":%d,\"thread\":%d}\n",
+                   "\"send_errors\":%u,\"pongs\":%u,\"pump_ms\":%llu,"
+                   "\"play_attempts\":%d,\"thread\":%d,\"persist\":%d,"
+                   "\"dtls_armed\":%u,\"dtls_started\":%u,"
+                   "\"dtls_ready\":%u,\"dtls_ms\":%llu,\"dtls_in\":%u,"
+                   "\"dtls_out\":%u,\"dtls_fail_rc\":%u}\n",
                    ice_st.stun_sent, ice_st.natt_sent, ice_st.req_in,
                    ice_st.answered, ice_st.ok_in, ice_st.invalid_in,
-                   ice_st.send_errors,
+                   ice_st.send_errors, ice_st.pongs_sent,
                    (unsigned long long)ice_st.pump_ms, play_attempts,
-                   pump_th);
+                   pump_th, pump_persist,
+                   ice_st.dtls_armed, ice_st.dtls_started,
+                   ice_st.dtls_ready,
+                   (unsigned long long)ice_st.dtls_ready_ms,
+                   ice_st.dtls_in, ice_st.dtls_out, ice_st.dtls_fail_rc);
             fflush(stdout);
         }
         if (!desc.disable_play && (rc != KN_RTSP_OK || resp.status != 200)) {
@@ -3559,12 +3869,39 @@ static int run_session(const char *token, const char *device_id,
          * NATT keepalive pings are WHAT ROUTES VIDEO HERE). Sent inline
          * from the loop — D21's single-threaded media loop is untouched;
          * the reference runs it on its mjolnir receiver thread. */
+        /* R3-B media routing: unified mode collapses video onto the
+         * bundle socket (the reference: video_peer = bundle_peer,
+         * nvst_rtsp.rs:1207-1214, and the bundle worker feeds
+         * process_datagram itself, :8616-8640); non-unified runs the
+         * media loop on the dedicated Mjolnir video socket, connected
+         * here to the SETUP video peer (the kernel filter keeps stray
+         * traffic out; the keepalive sendto below rides the same
+         * socket — "the NATT keepalive pings are WHAT ROUTES VIDEO
+         * HERE", :8849-8905). */
+        ms = unified_mode ? &bsock : &sock;
+        if (!unified_mode) {
+            if (kn_sock_ipv4_parse(setup.peer_ip, &vid_peer_ip) == 0) {
+                vid_peer_port = setup.peer_port;
+                if (kn_sock_udp_connect(&sock, vid_peer_ip, vid_peer_port)
+                    != KN_SOCK_OK)
+                    printf("{\"mode\":\"session\",\"event\":\"note\","
+                           "\"note\":\"video_socket_unconnected\"}\n");
+            }
+        } else if (ice_enabled) {
+            vid_peer_ip = ice_dest_ip;
+            vid_peer_port = ice_dest_port;
+        } else {
+            if (kn_sock_ipv4_parse(setup.peer_ip, &vid_peer_ip) == 0)
+                vid_peer_port = setup.peer_port;
+        }
+        fflush(stdout);
         ka_on = desc.remote_password[0] &&
                 (setup.ping_version == 6 || desc.remote_fp[0]);
         ka_payload = setup.have_ping_payload ? setup.ping_payload : "PING";
-        if (kn_sock_ipv4_parse(setup.peer_ip, &ka_ip) != 0)
+        ka_ip = vid_peer_ip;
+        ka_port = vid_peer_port;
+        if (!ka_ip || !ka_port)
             ka_on = 0;
-        ka_port = setup.peer_port;
         next_ka_ms = 0;
         t_start = kn_sock_now_ms();
         t_last_stats = t_start;
@@ -3585,7 +3922,7 @@ static int run_session(const char *token, const char *device_id,
                 stop_reason = "expect_frames";
                 break;
             }
-            rc = kn_sock_udp_recv(&sock, pkt, sizeof pkt,
+            rc = kn_sock_udp_recv(ms, pkt, sizeof pkt,
                                   KN_SOCK_POLL_INTERVAL_MS, &plen, NULL);
             c.now_ms = kn_sock_now_ms();
             if (rc == 1) {
@@ -3604,7 +3941,7 @@ static int run_session(const char *token, const char *device_id,
                 if (consecutive_errors <= 5) {
                     printf("{\"mode\":\"session\",\"error\":\"recv\","
                            "\"rc\":%d,\"errno\":%d}\n", rc,
-                           sock.last_error);
+                           ms->last_error);
                     fflush(stdout);
                 }
                 if (consecutive_errors >= 100u) {
@@ -3635,7 +3972,7 @@ static int run_session(const char *token, const char *device_id,
                             KN_SOCK_STUN_ATTR_USERNAME,
                             (const uint8_t *)kuname,
                             strlen(kuname)) == KN_SOCK_OK &&
-                        kn_sock_udp_sendto(&sock, ka_ip, ka_port, ktx,
+                        kn_sock_udp_sendto(ms, ka_ip, ka_port, ktx,
                                            ktlen) == KN_SOCK_OK)
                         ka_sent++;
                 }
@@ -3718,9 +4055,9 @@ static int run_session(const char *token, const char *device_id,
                    (unsigned long long)(v.withheld_frames % 1000000000ull),
                    (unsigned long long)(v.keyframe_requests %
                                         1000000000ull),
-                   (unsigned long long)(sock.recv_timeouts %
+                   (unsigned long long)(ms->recv_timeouts %
                                         10000000000ull),
-                   (unsigned long long)(sock.recv_errors % 1000000000ull),
+                   (unsigned long long)(ms->recv_errors % 1000000000ull),
                    c.event_lines_capped % 1000000000ull,
                    c.au_write_errors % 1000000000ull,
                    profile_name, v.state,
@@ -3768,11 +4105,19 @@ static int run_session(const char *token, const char *device_id,
         c.stream = NULL;
         free(arena);
         arena = NULL;
-        kn_sock_udp_close(&sock);
+        /* R3-B stop order: join the bundle worker FIRST (it owns bsock
+         * and the dtls context while running), then free/close */
+        sess_pump_stop(&pump);
+        if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
+        if (have_sock)  { kn_sock_udp_close(&sock);  have_sock = 0; }
+        if (have_bsock) { kn_sock_udp_close(&bsock); have_bsock = 0; }
         goto teardown;
 
     teardown_sock:
-        kn_sock_udp_close(&sock);
+        sess_pump_stop(&pump);          /* idempotent (started flag) */
+        if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
+        if (have_sock)  { kn_sock_udp_close(&sock);  have_sock = 0; }
+        if (have_bsock) { kn_sock_udp_close(&bsock); have_bsock = 0; }
     }
 teardown:
     /* best-effort TEARDOWN (the reference's Drop path: 1 s, errors
@@ -3788,6 +4133,7 @@ teardown:
                               NULL, 0, 1, &tresp);
     }
     kn_ws_send_close(&wsc, 1000);
+    if (cert) { kn_cert_free(cert); cert = NULL; }   /* after kn_dtls */
     kn_net_tls_stream_close(sig_tls);
     if (cm_tls) kn_net_tls_stream_close(cm_tls);
     if (exit_code != 0 && !have_sess)

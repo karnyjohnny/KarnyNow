@@ -4,7 +4,16 @@
 > ECDSA P-256 self-signed identity, sandbox-proven 10/10 under
 > ASan+UBSan via the CMake mbedtls backend, cross-compiled for Win32,
 > wired into the knvstd ANNOUNCE with the `identity` evidence line;
-> run 12 is its first live measurement). R3-B/C/D: PLAN as below.
+> run 12 live-proved it: `"cert":"real"`, fp_len 95, ANNOUNCE 200).
+> **R3-B SHIPPED (round XXXI, 2026-10-26/27** — run 12's verdict: the
+> real fingerprint ALONE changed nothing (PLAY timeout in total WS
+> silence on a 4th rig) → kn_dtls, the DTLS 1.2 ACTIVE client on the
+> bundle socket inside the pump thread; the reference's N/N+1 socket
+> pair (preferred 49005/49006); the full design record + the three
+> mbedTLS landmines are in docs/RTSP.md §18; sandbox-gated: test_kndtls
+> 31/31 real battery (mutual pinning, HVR cookies, loss legs) under
+> ASan+UBSan, the OpenSSL-3 interop leg PASS, ctest 17/17 ×2; run 13 is
+> its first live measurement). R3-C/D: PLAN as below.
 > Original plan header (round XXIX, 2026-10-26): Provenance: nvst.rs @ a49b124
 > (line refs below), str0m vendored in the reference tree
 > (`native/opennow-streamer/vendor/str0m`), runs 6/9/10 evidence in
@@ -87,27 +96,47 @@ prerequisite for finishing stage 2.
   cert EXISTS — if the rig validates fingerprint presence/shape before
   DTLS, run 12 may already behave differently (measurement).
 
-### R3-B — DTLS 1.2 client on the bundle socket
-* NEW `kn_dtls.{h,c}` — mbedTLS DTLS 1.2 (min=max 1.2 like the TLS
-  stream policy; VERIFY_REQUIRED against the PINNED remote
-  fingerprint — a self-signed peer cert is matched by fingerprint, not
-  chain; no-CA mode with an explicit verify callback), custom BIO over
-  `kn_sock_udp` (non-blocking + our select tick), handshake
-  retransmission timers driven by the same loop.
-* Integration: the pump thread grows a state machine — STUN bursts
-  until the first validated success pair, then DTLS handshake steps
-  interleaved with continued 20 ms keepalives (the reference's str0m
-  poll does exactly this on one socket). Single-owner discipline kept
-  (thread owns the socket until joined).
-* ICE role: knvstd becomes controlling-consistent (it already sends
-  the USERNAME pair the controlling side sends; formal nomination
-  (USE-CANDIDATE) only if the rig demands it — MEASURE first).
-* Socket pairing: implement the N+1 Mjolnir sibling socket when
-  `enableUnifiedSocket != 1` (reserve both BEFORE SETUP so the
-  announced client-port range stays truthful).
-* Gates: sandbox loopback KAT (kn_dtls vs a Python/mbedTLS mini-server
-  with fingerprint pinning both ways — the two-implementations rule),
-  then the live run: `dtls_ready:1` evidence line, and PLAY's verdict.
+### R3-B — DTLS 1.2 client on the bundle socket — **SHIPPED (round XXXI)**
+* DELIVERED as planned, with the design record + provenance + the three
+  mbedTLS landmines in **docs/RTSP.md §18** (kn_dtls.{h,c} — DTLS 1.2
+  ACTIVE client, fingerprint pinning as a DOUBLE GATE (verify callback
+  + the poll-side ready refusal; VERIFY_OPTIONAL because mbedTLS fails
+  REQUIRED without a CA chain before any callback — ssl_tls.c:8071),
+  inject-queue BIO with WANT_READ (never TIMEOUT — the resend-NULL-
+  flight segfault class), ms-clock retransmission timers, MTU 1200,
+  post-ready app-record drain counted for R3-C).
+* Integration: the pump thread's state machine — the ClientHello arms
+  at the first REAL inbound STUN evidence (req_in or ok_in; the :8196
+  "never synthesize" rule), handshake steps interleave with the 20 ms
+  bursts, and on `dtls_ready` the cadence switches to the reference's
+  post-connection shape (NATT-only, 100 ms, :7837-7846) with the thread
+  PERSISTING through the media loop in non-unified mode (the bundle
+  worker lifetime; D21 untouched). Socket pairing: the video-N +
+  bundle-N+1 pair (preferred 49005/49006, then <= 32 dynamic adjacent
+  attempts, :5933-6000) reserved BEFORE SETUP; SETUP's X-GS-ClientPort
+  = unified ? bundle : video (:1176-1183); clientBundlePort +
+  a=candidate + localAddress from the bundle socket (:1626/:1648, the
+  test :2955 pins 49006). The old single-socket save/restore reconnect
+  dance is gone — one peer per socket for life. Literal `PING` gets a
+  `PONG` (:8605-8614).
+* ICE role: unchanged (controlling-consistent bursts; no USE-CANDIDATE
+  — the reference's OWN hand-built bursts are USERNAME-only,
+  :5013-5028; str0m's parallel agent nomination stays deviation D-t1,
+  measured per run).
+* Gates (all green in the sandbox): test_kndtls 31/31 (in-test mbedTLS
+  server shaped like the rig: HVR cookies + client-cert pinned
+  server-side = pinning BOTH directions; loss/retransmit legs both
+  directions; wrong-pin refusal at the ready gate; mid-handshake free;
+  app-data drain) under ASan+UBSan+LSan; `tools/dtls_openssl_check.py`
+  — the independent-stack interop leg (OpenSSL 3 s_server -dtls1_2
+  accepts our ClientHello/cookie/cert/Finished: PASS, ~24 ms); ctest
+  17/17 ×2 backends; cross x64+i686 -Werror incl. the real-body legs;
+  E2E 43/43; T10 dry 64; T13 63.
+* Live evidence lines (run 13): `sock_pair`, `dtls_arm`,
+  `dtls_ready`/`dtls_fail` (emitted from the thread AT the transition),
+  the grown `ice_preplay` (persist + the dtls counters), and
+  `ice_creds` now carries `unified` — answering open question 4 (which
+  mode real seats describe) even when PLAY fails.
 
 ### R3-C — SCTP over DTLS (usrsctp) + the rtcp1 channel
 * Vendor usrsctp (BOOTSTRAP's R3 choice) behind the third_party model;
@@ -124,18 +153,26 @@ prerequisite for finishing stage 2.
 
 ## 3. Open questions (answered BY the spike, not before)
 
-1. str0m's exact cert algorithm/key size (read vendor/str0m during
-   R3-A; the rig only pins the fingerprint, so any strong algorithm
-   SHOULD pass — but mirror the official one).
+1. str0m's exact cert algorithm/key size — **ANSWERED (R3-A):** ECDSA
+   P-256 (the str0m provider default), fingerprint = SHA-256(DER)
+   (vendor str0m src/dtls.rs:69-71); mirrored by kn_cert.
 2. Does the rig initiate DTLS toward the client if the client is
-   silent (run 9/10 `invalid_in:0` says NO within ~20 s — client
-   initiates, matching the ICE-controlling role).
-3. Is PLAY gated on DTLS *completion* or merely *started*? (Run 11/12
-   measurements with R3-A/B in place.)
-4. unified vs paired sockets on real PL-region seats (the handoff
-   line's `unified_socket` field already reports it).
+   silent — **ANSWERED (runs 9-12):** NO within ~20 s (invalid_in 0 —
+   the client is the DTLS-ACTIVE side, `start_dtls(true)`, nvst.rs:6300).
+3. Is PLAY gated on DTLS *completion* or merely *started*? (Run 13 is
+   the measurement: `dtls_ready` timing vs the PLAY verdict. Run 12
+   proved the announced fingerprint ALONE is not the gate.)
+4. unified vs paired sockets on real PL-region seats — run 13 answers
+   it even on failure (the `ice_creds` + `sock_pair` lines carry
+   `unified`; the handoff line does too).
 5. Whether the rig's 455-vs-timeout refusal modes correlate with rig
-   software versions (collect `serverId`/peer evidence per run).
+   software versions (collect `serverId`/peer evidence per run; so far
+   four rigs: 455, timeout ×3).
+6. NEW (run 13+): does the rig's DTLS server REQUEST a client
+   certificate (WebRTC stacks pin the announced fingerprint, so almost
+   certainly yes — kn_dtls sends it whenever asked), and does the rig
+   tolerate a client that completes DTLS but never opens SCTP channels
+   (D-t4 — R3-C's urgency depends on this answer)?
 
 ## 4. Rule bindings
 
