@@ -53,6 +53,10 @@
 #endif
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <pthread.h>   /* round XXVIII: the pre-PLAY pump thread (POSIX;
+                          Win32 uses kernel32 CreateThread — the F1 set) */
+#endif
 #ifdef _WIN32
 #  include <direct.h>     /* _mkdir */
 #else
@@ -2186,9 +2190,12 @@ static void sess_rtsp_detail(const char *step, const kn_rtsp_client *rtc,
     lb_json_path(esc, sizeof esc, rtc->err);
     printf("{\"mode\":\"session\",\"event\":\"rtsp_detail\",\"step\":\"%s\","
            "\"detail\":\"%s\",\"ws_err\":%d,\"ws_close\":%d,"
-           "\"ws_text\":%llu,\"ws_bin\":%llu}\n", step, esc,
+           "\"ws_text\":%llu,\"ws_bin\":%llu,\"ws_pings_in\":%llu,"
+           "\"ws_pongs_in\":%llu,\"ws_pongs_out\":%llu,"
+           "\"ws_closes_in\":%llu,\"ws_frames_out\":%llu}\n", step, esc,
            wsc->last_error, wsc->last_close_code, wsc->frames_in_text,
-           wsc->frames_in_binary);
+           wsc->frames_in_binary, wsc->pings_in, wsc->pongs_in,
+           wsc->pongs_out, wsc->closes_in, wsc->frames_out);
     fflush(stdout);
 }
 
@@ -2212,57 +2219,96 @@ typedef struct {
     uint64_t pump_ms;
 } sess_ice_stats;
 
-static void sess_ice_pump(kn_sock_udp *sock, uint32_t dest_ip,
-                          uint16_t dest_port, const char *remote_ufrag,
-                          const char *remote_pwd, const char *local_ufrag,
-                          const char *local_pwd, const char *natt_payload,
-                          uint8_t *rx, size_t rxsz, uint32_t budget_ms,
-                          sess_ice_stats *st)
+/* Round XXVIII — the pump context + its optional worker thread. Run 9
+ * measured that the SEQUENTIAL pump (400 ms of bursts, then silence
+ * during the PLAY exchange) still drew PLAY 455 despite a fully
+ * bidirectional ICE exchange (stun_sent 147, req_in 99, answered 99,
+ * ok_in 327, invalid_in 0), and that a re-PLAY on the 455'd WS hit a
+ * DEAD channel (rc -2, ws_close -1, no close frame — the rig drops the
+ * RTSP context after the refusal). The reference never goes quiet: its
+ * bundle receiver thread bursts every 20 ms THROUGH announce → PLAY →
+ * response and for the whole session (lib.rs:894→937→1117; nvst.rs
+ * :7438/:7842-7900). The pump therefore runs on a thread spanning
+ * exactly the PLAY request/response window, joined before the socket
+ * returns to the media loop. Single-owner discipline holds: while the
+ * thread runs, the main thread touches only the WS/TLS stream; the
+ * stats are read after the join. D21 is untouched — the MEDIA loop
+ * stays single-threaded (the thread is gone before the first media
+ * tick). Thread APIs: kernel32 CreateThread/WaitForSingleObject/
+ * CloseHandle (already in the F1 import set) / POSIX pthread (the
+ * native build already links -pthread). */
+typedef struct {
+    kn_sock_udp *sock;
+    uint32_t dest_ip;
+    uint16_t dest_port;
+    char remote_ufrag[288], remote_pwd[128];
+    char local_ufrag[32], local_pwd[48], natt[288];
+    uint8_t rx[2048];
+    sess_ice_stats st;
+    volatile int stop;
+    int started;
+#ifdef _WIN32
+    uintptr_t th;                        /* HANDLE */
+#else
+    pthread_t th;
+#endif
+} sess_pump;
+
+/* bounded string fill — snprintf("%s") into a parameter-sized dst is
+ * what -Wformat-truncation cannot prove (the kn_cm.c precedent) */
+static void pump_set_str(char *dst, size_t dstsz, const char *src)
+{
+    size_t n = strlen(src);
+    if (n >= dstsz) n = dstsz - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
 {
     uint64_t t0 = kn_sock_now_ms();
-    uint64_t t_end = t0 + budget_ms;
+    uint64_t t_end = budget_ms ? t0 + budget_ms : ~(uint64_t)0;
     uint64_t last_burst = t0 - 20u;            /* fire at once (:7438) */
-    while (kn_sock_now_ms() < t_end && !g_knv_stop) {
+    while (!p->stop && !g_knv_stop && kn_sock_now_ms() < t_end) {
         uint8_t tx[KN_SOCK_STUN_MAX_PKT];
         uint8_t tid[12];
-        char uname[320];
+        char uname[400];
         size_t plen;
         int i, n;
         if (kn_sock_now_ms() - last_burst >= 20u) {
-            snprintf(uname, sizeof uname, "%s:%s", remote_ufrag,
-                     local_ufrag);
+            snprintf(uname, sizeof uname, "%s:%s", p->remote_ufrag,
+                     p->local_ufrag);
             for (i = 0; i < 3; ++i) {          /* the ICE burst (:7848) */
                 if (kn_ws_rand(tid, sizeof tid) != 0) break;
                 if (kn_sock_stun_build(tx, sizeof tx, &plen,
                                        KN_SOCK_STUN_BINDING_REQUEST, tid,
-                                       (const uint8_t *)remote_pwd,
-                                       strlen(remote_pwd),
+                                       (const uint8_t *)p->remote_pwd,
+                                       strlen(p->remote_pwd),
                                        KN_SOCK_STUN_ATTR_USERNAME,
                                        (const uint8_t *)uname,
                                        strlen(uname)) != KN_SOCK_OK)
                     continue;
-                if (kn_sock_udp_sendto(sock, dest_ip, dest_port, tx, plen)
-                    == KN_SOCK_OK)
-                    st->stun_sent++;
+                if (kn_sock_udp_sendto(p->sock, p->dest_ip, p->dest_port,
+                                       tx, plen) == KN_SOCK_OK)
+                    p->st.stun_sent++;
                 else
-                    st->send_errors++;
+                    p->st.send_errors++;
             }
             /* the NATT hole-punch ping (:5033-5050, :7868-7890) */
-            snprintf(uname, sizeof uname, "%s:%s", natt_payload,
-                     local_ufrag);
+            snprintf(uname, sizeof uname, "%s:%s", p->natt, p->local_ufrag);
             if (kn_ws_rand(tid, sizeof tid) == 0 &&
                 kn_sock_stun_build(tx, sizeof tx, &plen,
                                    KN_SOCK_STUN_BINDING_REQUEST, tid,
-                                   (const uint8_t *)remote_pwd,
-                                   strlen(remote_pwd),
+                                   (const uint8_t *)p->remote_pwd,
+                                   strlen(p->remote_pwd),
                                    KN_SOCK_STUN_ATTR_USERNAME,
                                    (const uint8_t *)uname,
                                    strlen(uname)) == KN_SOCK_OK) {
-                if (kn_sock_udp_sendto(sock, dest_ip, dest_port, tx, plen)
-                    == KN_SOCK_OK)
-                    st->natt_sent++;
+                if (kn_sock_udp_sendto(p->sock, p->dest_ip, p->dest_port,
+                                       tx, plen) == KN_SOCK_OK)
+                    p->st.natt_sent++;
                 else
-                    st->send_errors++;
+                    p->st.send_errors++;
             }
             last_burst = kn_sock_now_ms();
         }
@@ -2272,57 +2318,136 @@ static void sess_ice_pump(kn_sock_udp *sock, uint32_t dest_ip,
             uint16_t mtype = 0, xport = 0;
             uint32_t xip = 0;
             uint8_t tid_in[12];
-            char user[320];
-            n = kn_sock_udp_recv(sock, rx, rxsz, 5, &rlen, NULL);
+            char user[400];
+            n = kn_sock_udp_recv(p->sock, p->rx, sizeof p->rx, 5, &rlen,
+                                 NULL);
             if (n != 1) continue;              /* timeout/error: keep pumping */
-            if (!kn_sock_stun_inspect(rx, rlen, &mtype, tid_in, user,
+            if (!kn_sock_stun_inspect(p->rx, rlen, &mtype, tid_in, user,
                                       sizeof user, &ulen, &xip, &xport)) {
-                st->invalid_in++;
+                p->st.invalid_in++;
                 continue;
             }
             if (mtype == KN_SOCK_STUN_BINDING_REQUEST) {
-                char expect[320];
-                st->req_in++;
-                snprintf(expect, sizeof expect, "%s:%s", local_ufrag,
-                         remote_ufrag);
+                char expect[400];
+                p->st.req_in++;
+                snprintf(expect, sizeof expect, "%s:%s", p->local_ufrag,
+                         p->remote_ufrag);
                 if (ulen == strlen(expect) &&
                     memcmp(user, expect, ulen) == 0 &&
-                    kn_sock_stun_check_integrity(rx, rlen,
-                                                 (const uint8_t *)local_pwd,
-                                                 strlen(local_pwd))) {
+                    kn_sock_stun_check_integrity(p->rx, rlen,
+                                                 (const uint8_t *)p->local_pwd,
+                                                 strlen(p->local_pwd))) {
                     /* the reference echoes the request's SOURCE (:5166);
-                     * the socket is CONNECTED to dest for the pump (the
-                     * kernel peer filter), so source == dest is exact
-                     * here, not an approximation */
+                     * the socket is CONNECTED to dest (the kernel peer
+                     * filter), so source == dest is exact, not a guess */
                     uint8_t xa[8];
                     size_t xlen;
                     (void)xip; (void)xport;
-                    if (kn_sock_stun_xor_addr_v4(dest_ip, dest_port, xa)
-                            == KN_SOCK_OK &&
+                    if (kn_sock_stun_xor_addr_v4(p->dest_ip, p->dest_port,
+                                                 xa) == KN_SOCK_OK &&
                         kn_sock_stun_build(tx, sizeof tx, &xlen,
                                            KN_SOCK_STUN_BINDING_SUCCESS,
                                            tid_in,
-                                           (const uint8_t *)local_pwd,
-                                           strlen(local_pwd),
+                                           (const uint8_t *)p->local_pwd,
+                                           strlen(p->local_pwd),
                                            KN_SOCK_STUN_ATTR_XOR_MAPPED_ADDRESS,
                                            xa, sizeof xa) == KN_SOCK_OK &&
-                        kn_sock_udp_sendto(sock, dest_ip, dest_port, tx,
+                        kn_sock_udp_sendto(p->sock, p->dest_ip,
+                                           p->dest_port, tx,
                                            xlen) == KN_SOCK_OK)
-                        st->answered++;
+                        p->st.answered++;
                 }
             } else if (mtype == KN_SOCK_STUN_BINDING_SUCCESS) {
-                if (kn_sock_stun_check_integrity(rx, rlen,
-                                                 (const uint8_t *)remote_pwd,
-                                                 strlen(remote_pwd)))
-                    st->ok_in++;
+                if (kn_sock_stun_check_integrity(p->rx, rlen,
+                                                 (const uint8_t *)p->remote_pwd,
+                                                 strlen(p->remote_pwd)))
+                    p->st.ok_in++;
                 else
-                    st->invalid_in++;
+                    p->st.invalid_in++;
             } else {
-                st->invalid_in++;
+                p->st.invalid_in++;
             }
         }
     }
-    st->pump_ms += kn_sock_now_ms() - t0;
+    p->st.pump_ms += kn_sock_now_ms() - t0;
+}
+
+#ifdef _WIN32
+static DWORD WINAPI sess_pump_entry(void *a)
+{
+    sess_ice_pump_run((sess_pump *)a, 0);
+    return 0;
+}
+#else
+static void *sess_pump_entry(void *a)
+{
+    sess_ice_pump_run((sess_pump *)a, 0);
+    return NULL;
+}
+#endif
+
+static int sess_pump_start(sess_pump *p)
+{
+    p->stop = 0;
+#ifdef _WIN32
+    {
+        HANDLE h = CreateThread(NULL, 0, sess_pump_entry, p, 0, NULL);
+        if (!h) return -1;
+        p->th = (uintptr_t)h;
+    }
+#else
+    if (pthread_create(&p->th, NULL, sess_pump_entry, p) != 0) return -1;
+#endif
+    p->started = 1;
+    return 0;
+}
+
+static void sess_pump_stop(sess_pump *p)
+{
+    if (!p->started) return;
+    p->stop = 1;
+#ifdef _WIN32
+    /* the pump checks stop at least every ~25 ms (5 ms recv timeout +
+     * the 20 ms cadence), so the join is bounded in practice */
+    (void)WaitForSingleObject((HANDLE)p->th, INFINITE);
+    CloseHandle((HANDLE)p->th);
+#else
+    (void)pthread_join(p->th, NULL);
+#endif
+    p->started = 0;
+}
+
+/* the sequential form (the spawn-failure fallback and the disablePlay
+ * path): the same core on a bounded budget, stats merged into the
+ * caller's struct. */
+static void sess_ice_pump(kn_sock_udp *sock, uint32_t dest_ip,
+                          uint16_t dest_port, const char *remote_ufrag,
+                          const char *remote_pwd, const char *local_ufrag,
+                          const char *local_pwd, const char *natt_payload,
+                          uint8_t *rx, size_t rxsz, uint32_t budget_ms,
+                          sess_ice_stats *st)
+{
+    sess_pump p;
+    (void)rx; (void)rxsz;      /* the ctx carries its own 2 KiB buffer —
+                                  pre-PLAY traffic is STUN-sized */
+    memset(&p, 0, sizeof p);
+    p.sock = sock;
+    p.dest_ip = dest_ip;
+    p.dest_port = dest_port;
+    pump_set_str(p.remote_ufrag, sizeof p.remote_ufrag, remote_ufrag);
+    pump_set_str(p.remote_pwd, sizeof p.remote_pwd, remote_pwd);
+    pump_set_str(p.local_ufrag, sizeof p.local_ufrag, local_ufrag);
+    pump_set_str(p.local_pwd, sizeof p.local_pwd, local_pwd);
+    pump_set_str(p.natt, sizeof p.natt, natt_payload);
+    sess_ice_pump_run(&p, budget_ms);
+    st->stun_sent += p.st.stun_sent;
+    st->natt_sent += p.st.natt_sent;
+    st->req_in += p.st.req_in;
+    st->answered += p.st.answered;
+    st->ok_in += p.st.ok_in;
+    st->invalid_in += p.st.invalid_in;
+    st->send_errors += p.st.send_errors;
+    st->pump_ms += p.st.pump_ms;
 }
 static void sess_sleep(uint32_t ms, void *c)
 {
@@ -2398,21 +2523,33 @@ static void sess_hex_upper(const uint8_t *b, size_t n, char *out)
     out[2 * n] = '\0';
 }
 
-/* the D-s1 placeholder bundle identity: random ufrag/pwd (base64-ish hex)
- * + a random 32-byte fingerprint in colon-hex. Syntactically valid,
- * cryptographically inert until stage 3. */
+/* The bundle identity: the OFFICIAL GenerateIceCredentials shapes
+ * (nvst.rs:5545-5559 — the base64-ish alphabet, a 4-char ufrag and a
+ * 22-char password; :5564-5565: str0m's default 16-char ufrag is
+ * REJECTED by Bifrost length checks). Round XXIX: our old 16/24-hex
+ * shapes were tolerated at ANNOUNCE+ICE (runs 9/10) but fidelity is
+ * the R32 rule and the R3 DTLS phase reuses this identity. The
+ * fingerprint stays a random 32-byte colon-hex PLACEHOLDER until R3-A
+ * ships the real certificate (deviation D-s1; the colon-uppercase-hex
+ * format itself matches nvst_fingerprint_hex :5596-5603). */
 static void sess_local_identity(char *ufrag, size_t ufsz, char *pwd,
                                 size_t pwsz, char *fp, size_t fpsz)
 {
+    static const char alpha[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
     uint8_t raw[32];
+    size_t i;
     if (kn_ws_rand(raw, sizeof raw) != 0) {
         /* the CSPRNG refusing is fatal for the session anyway; fill
          * deterministic placeholders so the SDP stays well-formed and the
          * failure surfaces at the handshake, not as garbage */
         memset(raw, 0x5A, sizeof raw);
     }
-    sess_hex_upper(raw, 8, ufrag);        (void)ufsz;   /* 16 hex chars */
-    sess_hex_upper(raw + 8, 12, pwd);     (void)pwsz;   /* 24 hex chars */
+    (void)ufsz; (void)pwsz;               /* callers pass [24] and [32] */
+    for (i = 0; i < 4u; ++i)  ufrag[i] = alpha[raw[i] & 0x3Fu];
+    ufrag[4] = '\0';
+    for (i = 0; i < 22u; ++i) pwd[i] = alpha[raw[4u + i] & 0x3Fu];
+    pwd[22] = '\0';
     {
         size_t i, o = 0;
         for (i = 0; i < 32 && o + 3 < fpsz; ++i) {
@@ -2516,7 +2653,17 @@ static int run_session(const char *token, const char *device_id,
     char ice_natt[288];                 /* NATT payload: bundle user | PING */
     uint32_t ice_dest_ip = 0, vid_peer_ip = 0;
     uint16_t ice_dest_port = 0, vid_peer_port = 0;
-    int ice_enabled = 0, ice_reconnect = 0, play_attempts = 0;
+    int ice_enabled = 0, ice_reconnect = 0, play_attempts = 0, pump_th = 0;
+    int ka_on = 0;                        /* round XXVIII: the Mjolnir
+                                             NATT keepalive (nvst.rs
+                                             :8849-8905) */
+    const char *ka_payload = "PING";
+    uint32_t ka_ip = 0;
+    uint16_t ka_port = 0;
+    uint64_t next_ka_ms = 0;
+    unsigned long long ka_sent = 0;
+    unsigned relearns = 0;                /* cm_control re-learn events */
+    static sess_pump pump;
     sess_ice_stats ice_st;
     char ufrag[24], pwd[32], fp[128];
     char key_hex[65], salt_hex[25];
@@ -2722,10 +2869,11 @@ static int run_session(const char *token, const char *device_id,
                     poll_host[nl] = '\0';
                     poll_port = np;
                     lb_json_path(esc, sizeof esc, poll_host);
+                    relearns++;
                     printf("{\"mode\":\"session\",\"event\":\"cm_control\","
                            "\"poll_host\":\"%s\",\"port\":%u,"
-                           "\"source\":\"relearned\"}\n", esc,
-                           (unsigned)poll_port);
+                           "\"source\":\"relearned\",\"n\":%u}\n", esc,
+                           (unsigned)poll_port, relearns);
                     fflush(stdout);
                 }
             }
@@ -2857,8 +3005,8 @@ static int run_session(const char *token, const char *device_id,
         char esc[300];
         lb_json_path(esc, sizeof esc, sess.rtsps_endpoint);
         printf("{\"mode\":\"session\",\"event\":\"ready\",\"rtsps\":\"%s\","
-               "\"media_peer\":\"%.64s:%u\"}\n", esc, sess.media_ip,
-               (unsigned)sess.media_port);
+               "\"media_peer\":\"%.64s:%u\",\"relearns\":%u}\n", esc,
+               sess.media_ip, (unsigned)sess.media_port, relearns);
         fflush(stdout);
     }
 
@@ -3188,48 +3336,78 @@ static int run_session(const char *token, const char *device_id,
                 == KN_SOCK_OK)
                 ice_reconnect = 1;
         }
-        if (ice_enabled)
-            sess_ice_pump(&sock, ice_dest_ip, ice_dest_port,
-                          ice_remote_ufrag, desc.remote_password, ufrag,
-                          pwd, ice_natt, pkt, sizeof pkt, 400u, &ice_st);
-        if (!desc.disable_play) {
-            for (play_attempts = 1; play_attempts <= 3; ++play_attempts) {
-                rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint,
-                                     ah, 4, NULL, 0, 0, &resp);
-                printf("{\"mode\":\"session\",\"event\":\"rtsp\","
-                       "\"step\":\"PLAY\",\"rc\":%d,\"status\":%d,"
-                       "\"attempt\":%d}\n", rc,
-                       rc == KN_RTSP_OK ? resp.status : 0, play_attempts);
-                fflush(stdout);
-                if (rc != KN_RTSP_OK || resp.status == 200) break;
-                /* 455 = "Method Not Valid in This State" — the rig had
-                 * not seen our hole-punch burst (run 6); pump again and
-                 * retry (bounded; deviation D-s2 — the reference is
-                 * concurrent and needs no retry) */
-                if (resp.status != 455 || !ice_enabled ||
-                    play_attempts == 3)
-                    break;
-                sess_ice_pump(&sock, ice_dest_ip, ice_dest_port,
-                              ice_remote_ufrag, desc.remote_password,
-                              ufrag, pwd, ice_natt, pkt, sizeof pkt,
-                              600u, &ice_st);
-                sess_sleep(200u, NULL);
-            }
+        /* Round XXVIII: the pump runs CONCURRENTLY with the PLAY
+         * exchange (the reference's receiver thread never goes quiet
+         * across announce→PLAY→response — run 9 showed the sequential
+         * 400 ms-then-silence shape still drew 455 with a fully alive
+         * ICE exchange) and PLAY is ONE-SHOT: run 9 also proved a
+         * re-PLAY on the 455'd WS hits a dead channel (rc -2,
+         * ws_close -1 — the rig drops the RTSP context after the
+         * refusal). A failed PLAY goes to TEARDOWN as before; the
+         * session stays resumable (phase B-E policy). */
+        memset(&pump, 0, sizeof pump);
+        if (ice_enabled) {
+            pump.sock = &sock;
+            pump.dest_ip = ice_dest_ip;
+            pump.dest_port = ice_dest_port;
+            pump_set_str(pump.remote_ufrag, sizeof pump.remote_ufrag,
+                         ice_remote_ufrag);
+            pump_set_str(pump.remote_pwd, sizeof pump.remote_pwd,
+                         desc.remote_password);
+            pump_set_str(pump.local_ufrag, sizeof pump.local_ufrag, ufrag);
+            pump_set_str(pump.local_pwd, sizeof pump.local_pwd, pwd);
+            pump_set_str(pump.natt, sizeof pump.natt, ice_natt);
         }
+        if (!desc.disable_play) {
+            play_attempts = 1;
+            if (ice_enabled) {
+                pump_th = (sess_pump_start(&pump) == 0);
+                if (!pump_th)      /* honest sequential fallback */
+                    sess_ice_pump(&sock, ice_dest_ip, ice_dest_port,
+                                  ice_remote_ufrag, desc.remote_password,
+                                  ufrag, pwd, ice_natt, pkt, sizeof pkt,
+                                  400u, &pump.st);
+                else
+                    /* round XXIX warm-up: guarantee PLAY never lands
+                     * before the first bursts (run 10 raced the thread
+                     * start; run 9's sequential 400 ms had history and
+                     * still 455'd — this removes the confound, not the
+                     * DTLS suspect). The reference's receiver is tens of
+                     * ms ahead of finish() by construction. */
+                    sess_sleep(400u, NULL);
+            }
+            rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint,
+                                 ah, 4, NULL, 0, 0, &resp);
+            printf("{\"mode\":\"session\",\"event\":\"rtsp\","
+                   "\"step\":\"PLAY\",\"rc\":%d,\"status\":%d,"
+                   "\"attempt\":%d}\n", rc,
+                   rc == KN_RTSP_OK ? resp.status : 0, play_attempts);
+            fflush(stdout);
+        } else if (ice_enabled) {
+            /* a disablePlay seat: the reference's receiver still pings —
+             * a short sequential window for routing/evidence */
+            sess_ice_pump(&sock, ice_dest_ip, ice_dest_port,
+                          ice_remote_ufrag, desc.remote_password,
+                          ufrag, pwd, ice_natt, pkt, sizeof pkt,
+                          400u, &pump.st);
+        }
+        sess_pump_stop(&pump);        /* join BEFORE the socket handoff */
+        if (ice_enabled) ice_st = pump.st;
         if (ice_reconnect) {
             (void)kn_sock_udp_connect(&sock, vid_peer_ip, vid_peer_port);
             ice_reconnect = 0;
         }
-        if (ice_enabled || play_attempts > 1) {
+        if (ice_enabled) {
             printf("{\"mode\":\"session\",\"event\":\"ice_preplay\","
                    "\"stun_sent\":%u,\"natt_sent\":%u,\"req_in\":%u,"
                    "\"answered\":%u,\"ok_in\":%u,\"invalid_in\":%u,"
                    "\"send_errors\":%u,\"pump_ms\":%llu,"
-                   "\"play_attempts\":%d}\n",
+                   "\"play_attempts\":%d,\"thread\":%d}\n",
                    ice_st.stun_sent, ice_st.natt_sent, ice_st.req_in,
                    ice_st.answered, ice_st.ok_in, ice_st.invalid_in,
                    ice_st.send_errors,
-                   (unsigned long long)ice_st.pump_ms, play_attempts);
+                   (unsigned long long)ice_st.pump_ms, play_attempts,
+                   pump_th);
             fflush(stdout);
         }
         if (!desc.disable_play && (rc != KN_RTSP_OK || resp.status != 200)) {
@@ -3349,6 +3527,20 @@ static int run_session(const char *token, const char *device_id,
         ring_ok = (kn_ring_init(&ring, 64u * 1024u, 1312) == 0);
 
         /* ---------------- phase E: the media loop (run_decode shape) --- */
+        /* Round XXVIII: the Mjolnir NATT keepalive (nvst.rs:8849-8905 —
+         * USERNAME "{setup x-nv-ping-payload}:{local ufrag}", key = the
+         * DESCRIBE remote password, to video_peer, every 20 ms until the
+         * first inbound then every 100 ms; the reference's comment: the
+         * NATT keepalive pings are WHAT ROUTES VIDEO HERE). Sent inline
+         * from the loop — D21's single-threaded media loop is untouched;
+         * the reference runs it on its mjolnir receiver thread. */
+        ka_on = desc.remote_password[0] &&
+                (setup.ping_version == 6 || desc.remote_fp[0]);
+        ka_payload = setup.have_ping_payload ? setup.ping_payload : "PING";
+        if (kn_sock_ipv4_parse(setup.peer_ip, &ka_ip) != 0)
+            ka_on = 0;
+        ka_port = setup.peer_port;
+        next_ka_ms = 0;
         t_start = kn_sock_now_ms();
         t_last_stats = t_start;
         next_poll_ms = t_start;
@@ -3404,6 +3596,26 @@ static int run_session(const char *token, const char *device_id,
                 dec_drain_queue(&c);
                 next_poll_ms = now_ms + KN_SOCK_POLL_INTERVAL_MS;
             }
+            if (ka_on && now_ms >= next_ka_ms) {
+                uint8_t ktid[12], ktx[KN_SOCK_STUN_MAX_PKT];
+                size_t ktlen;
+                char kuname[128];
+                if (kn_ws_rand(ktid, sizeof ktid) == 0) {
+                    snprintf(kuname, sizeof kuname, "%s:%s", ka_payload,
+                             ufrag);
+                    if (kn_sock_stun_build(ktx, sizeof ktx, &ktlen,
+                            KN_SOCK_STUN_BINDING_REQUEST, ktid,
+                            (const uint8_t *)desc.remote_password,
+                            strlen(desc.remote_password),
+                            KN_SOCK_STUN_ATTR_USERNAME,
+                            (const uint8_t *)kuname,
+                            strlen(kuname)) == KN_SOCK_OK &&
+                        kn_sock_udp_sendto(&sock, ka_ip, ka_port, ktx,
+                                           ktlen) == KN_SOCK_OK)
+                        ka_sent++;
+                }
+                next_ka_ms = now_ms + (datagrams ? 100u : 20u);
+            }
             if (now_ms - t_last_stats >= 1000u) {
                 kn_lctx p;
                 t_last_stats = now_ms;
@@ -3424,6 +3636,11 @@ static int run_session(const char *token, const char *device_id,
             }
         }
         if (g_knv_stop) stop_reason = "signal";
+        if (ka_on) {
+            printf("{\"mode\":\"session\",\"event\":\"natt_keepalive\","
+                   "\"sent\":%llu}\n", ka_sent % 1000000000ull);
+            fflush(stdout);
+        }
 
         if (c.stream && !c.decode_aborted)
             (void)kn_decode_stream_flush(c.stream, dec_frame_out_cb, &c);

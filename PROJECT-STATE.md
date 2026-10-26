@@ -55,13 +55,13 @@ sh tools/cross_check.sh            # mingw x64+i686, -Wall -Wextra -Werror, F1 f
 (loopback-only, no account; reuses T10's build). The user runs both quickly
 and willingly — ask for a measurement instead of guessing (§10.7).
 
-## Current status (updated 2026-10-26, post-round-XXVII: R7 RUN 8 RODE the 503 window exactly as designed (10 transient rounds, D-s4 backoff 6→20 s, Ctrl-C → cm_cancel 200) and the captured body made the 503 TALK — CloudMatch's own JSON, a session skeleton with sessionControlInfo.ip:null = the seat-transition window from the inside; the T10-r20 set-but-unused warning is fixed + gated permanently (paranoid knvstd legs in BOTH scripts); control-node re-learning per successful poll (store_active fidelity) + deep error fields + --session-keep are IN; awaiting the next target T10 + R7 run 9 — the round-XXV PLAY pump has STILL not seen a live run)
+## Current status (updated 2026-10-26, post-round-XXIX: R7 RUN 10 — the pump thread is LIVE-PROVEN (20.5 s of continuous bidirectional ICE through the whole PLAY window: 2760+920 sent, 123/123 rig probes answered, 3671 rig successes, invalid 0) and PLAY went from instant-455 (run 9 rig) to DEAD SILENCE/timeout (run 10 rig): the elimination table is empty except D-s1 → **R3 (the real DTLS identity + handshake) is PROMOTED to the stage-2 PLAY blocker; docs/DTLS.md is the phased plan** (R3-A portable-mbedTLS certificate → R3-B DTLS on the bundle → R3-C usrsctp → R3-D WS pings); round XXIX mirrors the official ICE identity shapes (4/22 + alphabet), warms the pump 400 ms before PLAY, and enriches rtsp_detail's WS counters; awaiting the next T10 + R7 run 11 = the final elimination datum, then R3-A)
 
 | Stage | State |
 |---|---|
 | **0 — measurements** | **COMPLETE.** G0.1 CPU ✅ · G0.2 D3D9 presentation ✅ **(T4 v4)** · G0.3 toolchain ✅ · G0.4 console ✅ |
 | **1 — C skeleton, logging, loopback/audio** | **CLOSED.** Stage-1 scope complete; G0 closed and target T11 full G1 passed (see round XV evidence below). |
-| **2 — NVST media/transport** | **IN PROGRESS — MEDIA CORE TARGET-VERIFIED (T10 r12: ALL PASS 67) + SOCKET LAYER DONE (round XVII, sandbox-verified incl. the full T13 E2E matrix under three builds + sanitizers; awaiting target T10 r13 + T13 r1).** `kn_rx` (reorder, FEC repair + re-wrap, RFI, NACK tracker + encoders, watchdog, SRTP incl. GCM/CM256) passed on Win7: test_knrx 209/209, rx.vectors 153/153 (scenarios 31/31, srtp256/gcm verified), registry 13. Round XVII adds the live path: `kn_sock` (real UDP, Win32+POSIX), `knvstd --capture` (streaming gs_capture.hex-format recorder — the R32 mechanism), `knvstd --decode` (socket → kn_rx on a real QPC clock → capacity-2 AU queue → the NEW persistent `kn_decode_stream_*` session), `tools/send_rx_capture.py` (paced/blast UDP sender), `tests/T13_udp_e2e.py` (the socket gate: capture → replay-verify → decode paced/blast → SRTP cm128/gcm256 → sock.loopback), and `sock.loopback` — the 14th self-test (portable, gated). **SOCKET LAYER CLOSED ON THE TARGET** (T10 r14 ALL PASS 69 + T13 r2 ALL PASS 61, 2026-10-25): the round-XVIII JSONL-escape fix confirmed; all T13 legs green on Win7 (capture 119/119 + parseable JSONL, live-recorded capture replays byte-identical, decode paced/blast/cm128/gcm256 each 60/60 with FFmpeg 63, zero overflows); **R34 CLOSED: Windows applies the full 8 MiB SO_RCVBUF** (requested 8 388 608 → applied 8 388 608 on every leg). Round XX added the signaling cores (kn_ws 84 + kn_rtsp 127 checks — target-verified in T10 r15, ALL PASS 71). **Round XXI built the REST of the production path: the persistent verified TLS-1.2 stream API (Win32+mbedTLS, honest stubs elsewhere), kn_json + kn_http + kn_cm (CloudMatch create/poll/extract — test_kncm 91 checks), kn_sock_udp_connect (kernel peer filter), the independent Python fake rig + a 36-check real-socket E2E of the WHOLE chain (create→poll→WS→RTSP→handoff→connected UDP), and `knvstd --session` (TLS-only, token length-only logging, queue events for the future TUI, the round-XVII media loop reused verbatim).** Remaining for stage 2 = MEASUREMENTS, not code: target T10 r16 (first compile of the Win32 TLS-stream body), then the R7 first-real-session round (token+appId → `--session`; D-s1/D-cm1/D-cm2 deviations get measured there), then G2. R7 RUNS 1-4 HAPPENED (round XXIII, on the T10 r17 ALL PASS 72 build): create works against the LIVE production cloud (4/4 real sessions, plausible live queue positions; D-cm1/D-cm2 accepted at create); the queue wait exposed ONE contract violation — polls stayed on the global create front (prod.cloudmatchbeta...) instead of the regional `sessionControlInfo.ip` node the create response nominates (np-waw-01... — exactly where the official client polls at ~4.1 s per the user's DevTools capture, and what cloudmatch.rs's learned control_base does :401-414/:652-656/:1149-1152) → frozen queuePosition across 40+ polls + `cm_poll_failed`. FIXED in round XXIII (trust-gated poll-host switch + the reference's transient-retry/404 semantics + no-clobber poll commit + requestStatus surfacing + 4 s cadence + best-effort DELETE cancel on abort + queue-timeout default 600 s); docs/RTSP.md §10 is the record. **R7 RUN 5 (round XXIV) CONFIRMED THE FIX LIVE: cm_control switched to np-waw-01 (source sessionControlInfo), the session progressed seat_step 1→3 to status:2 READY with a real rtsps endpoint, and OPTIONS returned 200 over RTSPS/WSS on the real rig; DESCRIBE then died rc:-2/status:0 — the 8 KiB per-message scratch in kn_rtsp_request (real SDPs are bigger; the reference accumulates up to 4 MiB, nvst_rtsp.rs:559-566/:614-623) and/or the refused BINARY frames (:621) — both FIXED, plus Host:port fidelity (:1070-1076) and rtsp_detail failure instrumentation; docs/RTSP.md §11 is the record. **R7 RUN 6 (round XXV): DESCRIBE/SETUP/ANNOUNCE 200 LIVE (the §11 fix confirmed; SETUP peered first round; the D-s1 placeholder ANNOUNCE was ACCEPTED); PLAY 455 — the reference spawns its media receivers between announce() and PLAY (lib.rs:894→937→1117) and the bundle thread immediately fires the hole-punch burst (3×STUN+1×NATT per 20 ms, nvst.rs:7438/:7842-7900, dest bundle_peer() :1880); we sent PLAY with zero UDP egress. Round XXV ships the kn_sock STUN toolkit (byte-exact builders, Python-independent goldens), the kn_rtsp credential ladder (+ a caught pre-existing sdp_attribute LAST-match bug), the knvstd pre-PLAY pump + 455-retry (D-s2/D-s3), and the rig now gates PLAY exactly like run 6 (E2E 43/43). The user also proved R23 RESUME real: run 6's session resumed+played in the browser. docs/RTSP.md §12 is the record. **R7 RUN 7 (round XXVI): the pump never got its live try — BOTH attempts died earlier, in the queue: after ~29 static step-1 polls (~2 min — the exact mark where runs 5/6 transitioned to seat_step 3) every GET poll answered 503 (15 attempts/attempt-run, rc:0 = parsed responses) while a SAME-MOMENT DELETE to the same host answered 200 (cm_cancel target-proven: the user watched the session leave the web UI; the immediate re-create hit no SESSION_LIMIT). The round-XXIII 5-round give-up killed the wait inside the seat-transition window. Round XXVI mirrors the reference (which never gives up on transient poll errors): transient 4xx/5xx are OUTLIVED until queue_timeout, transport deaths bounded at 10 rounds, hard rejections at 5 (new stop_reason cm_poll_rejected), the poll gap backs off 4→6→9→13.5→20 s while failing (D-s4), and cm_poll_error now carries the response BODY excerpt + class + gap — run 8 names the 503's sender. docs/RTSP.md §13 is the record. **R7 RUN 8 (round XXVII): the policy PROVED itself — the client rode ten transient rounds with the visible backoff (gap_ms 6000→9000→13500→20000) until the user's Ctrl-C (interrupted → cm_cancel 200; the queue-stage session then correctly left the web UI — DELETE worked; run 6's resume survived only because READY sessions aren't cancelled). The captured 503 body is CloudMatch's OWN JSON: a session SKELETON with sessionControlInfo.ip:null + the id echoed in resourcePath — the front knows the record but can't name its owning state mid-transition; the record is alive (same-window DELETE 200). Round XXVII: the deep fields (status/errorCode/requestStatus+unifiedErrorCode — now filled even on rejected payloads) ride in cm_poll_error; the T10-r20 warning (write-only consec_transient; target GCC 16.2's -Wunused-but-set-variable is not in sandbox GCC 12's -Wall — the FIFTH target catch) is fixed AND gated permanently (paranoid knvstd legs in both scripts); the control node is RE-LEARNED per successful poll (store_active :1333-1336 fidelity — a mid-queue migration is followed; ip:null keeps the host); --session-keep skips the abort cancel for browser-RESUME experiments. docs/RTSP.md §14 is the record. Next = the next target T10 (expect ALL PASS 72, zero warnings) + R7 run 9 (seat transition → the round-XXV pump's FIRST live try → first media, or a 503 window speaking in parsed fields).** |
+| **2 — NVST media/transport** | **IN PROGRESS — MEDIA CORE TARGET-VERIFIED (T10 r12: ALL PASS 67) + SOCKET LAYER DONE (round XVII, sandbox-verified incl. the full T13 E2E matrix under three builds + sanitizers; awaiting target T10 r13 + T13 r1).** `kn_rx` (reorder, FEC repair + re-wrap, RFI, NACK tracker + encoders, watchdog, SRTP incl. GCM/CM256) passed on Win7: test_knrx 209/209, rx.vectors 153/153 (scenarios 31/31, srtp256/gcm verified), registry 13. Round XVII adds the live path: `kn_sock` (real UDP, Win32+POSIX), `knvstd --capture` (streaming gs_capture.hex-format recorder — the R32 mechanism), `knvstd --decode` (socket → kn_rx on a real QPC clock → capacity-2 AU queue → the NEW persistent `kn_decode_stream_*` session), `tools/send_rx_capture.py` (paced/blast UDP sender), `tests/T13_udp_e2e.py` (the socket gate: capture → replay-verify → decode paced/blast → SRTP cm128/gcm256 → sock.loopback), and `sock.loopback` — the 14th self-test (portable, gated). **SOCKET LAYER CLOSED ON THE TARGET** (T10 r14 ALL PASS 69 + T13 r2 ALL PASS 61, 2026-10-25): the round-XVIII JSONL-escape fix confirmed; all T13 legs green on Win7 (capture 119/119 + parseable JSONL, live-recorded capture replays byte-identical, decode paced/blast/cm128/gcm256 each 60/60 with FFmpeg 63, zero overflows); **R34 CLOSED: Windows applies the full 8 MiB SO_RCVBUF** (requested 8 388 608 → applied 8 388 608 on every leg). Round XX added the signaling cores (kn_ws 84 + kn_rtsp 127 checks — target-verified in T10 r15, ALL PASS 71). **Round XXI built the REST of the production path: the persistent verified TLS-1.2 stream API (Win32+mbedTLS, honest stubs elsewhere), kn_json + kn_http + kn_cm (CloudMatch create/poll/extract — test_kncm 91 checks), kn_sock_udp_connect (kernel peer filter), the independent Python fake rig + a 36-check real-socket E2E of the WHOLE chain (create→poll→WS→RTSP→handoff→connected UDP), and `knvstd --session` (TLS-only, token length-only logging, queue events for the future TUI, the round-XVII media loop reused verbatim).** Remaining for stage 2 = MEASUREMENTS, not code: target T10 r16 (first compile of the Win32 TLS-stream body), then the R7 first-real-session round (token+appId → `--session`; D-s1/D-cm1/D-cm2 deviations get measured there), then G2. R7 RUNS 1-4 HAPPENED (round XXIII, on the T10 r17 ALL PASS 72 build): create works against the LIVE production cloud (4/4 real sessions, plausible live queue positions; D-cm1/D-cm2 accepted at create); the queue wait exposed ONE contract violation — polls stayed on the global create front (prod.cloudmatchbeta...) instead of the regional `sessionControlInfo.ip` node the create response nominates (np-waw-01... — exactly where the official client polls at ~4.1 s per the user's DevTools capture, and what cloudmatch.rs's learned control_base does :401-414/:652-656/:1149-1152) → frozen queuePosition across 40+ polls + `cm_poll_failed`. FIXED in round XXIII (trust-gated poll-host switch + the reference's transient-retry/404 semantics + no-clobber poll commit + requestStatus surfacing + 4 s cadence + best-effort DELETE cancel on abort + queue-timeout default 600 s); docs/RTSP.md §10 is the record. **R7 RUN 5 (round XXIV) CONFIRMED THE FIX LIVE: cm_control switched to np-waw-01 (source sessionControlInfo), the session progressed seat_step 1→3 to status:2 READY with a real rtsps endpoint, and OPTIONS returned 200 over RTSPS/WSS on the real rig; DESCRIBE then died rc:-2/status:0 — the 8 KiB per-message scratch in kn_rtsp_request (real SDPs are bigger; the reference accumulates up to 4 MiB, nvst_rtsp.rs:559-566/:614-623) and/or the refused BINARY frames (:621) — both FIXED, plus Host:port fidelity (:1070-1076) and rtsp_detail failure instrumentation; docs/RTSP.md §11 is the record. **R7 RUN 6 (round XXV): DESCRIBE/SETUP/ANNOUNCE 200 LIVE (the §11 fix confirmed; SETUP peered first round; the D-s1 placeholder ANNOUNCE was ACCEPTED); PLAY 455 — the reference spawns its media receivers between announce() and PLAY (lib.rs:894→937→1117) and the bundle thread immediately fires the hole-punch burst (3×STUN+1×NATT per 20 ms, nvst.rs:7438/:7842-7900, dest bundle_peer() :1880); we sent PLAY with zero UDP egress. Round XXV ships the kn_sock STUN toolkit (byte-exact builders, Python-independent goldens), the kn_rtsp credential ladder (+ a caught pre-existing sdp_attribute LAST-match bug), the knvstd pre-PLAY pump + 455-retry (D-s2/D-s3), and the rig now gates PLAY exactly like run 6 (E2E 43/43). The user also proved R23 RESUME real: run 6's session resumed+played in the browser. docs/RTSP.md §12 is the record. **R7 RUN 7 (round XXVI): the pump never got its live try — BOTH attempts died earlier, in the queue: after ~29 static step-1 polls (~2 min — the exact mark where runs 5/6 transitioned to seat_step 3) every GET poll answered 503 (15 attempts/attempt-run, rc:0 = parsed responses) while a SAME-MOMENT DELETE to the same host answered 200 (cm_cancel target-proven: the user watched the session leave the web UI; the immediate re-create hit no SESSION_LIMIT). The round-XXIII 5-round give-up killed the wait inside the seat-transition window. Round XXVI mirrors the reference (which never gives up on transient poll errors): transient 4xx/5xx are OUTLIVED until queue_timeout, transport deaths bounded at 10 rounds, hard rejections at 5 (new stop_reason cm_poll_rejected), the poll gap backs off 4→6→9→13.5→20 s while failing (D-s4), and cm_poll_error now carries the response BODY excerpt + class + gap — run 8 names the 503's sender. docs/RTSP.md §13 is the record. **R7 RUN 8 (round XXVII): the policy PROVED itself — the client rode ten transient rounds with the visible backoff (gap_ms 6000→9000→13500→20000) until the user's Ctrl-C (interrupted → cm_cancel 200; the queue-stage session then correctly left the web UI — DELETE worked; run 6's resume survived only because READY sessions aren't cancelled). The captured 503 body is CloudMatch's OWN JSON: a session SKELETON with sessionControlInfo.ip:null + the id echoed in resourcePath — the front knows the record but can't name its owning state mid-transition; the record is alive (same-window DELETE 200). Round XXVII: the deep fields (status/errorCode/requestStatus+unifiedErrorCode — now filled even on rejected payloads) ride in cm_poll_error; the T10-r20 warning (write-only consec_transient; target GCC 16.2's -Wunused-but-set-variable is not in sandbox GCC 12's -Wall — the FIFTH target catch) is fixed AND gated permanently (paranoid knvstd legs in both scripts); the control node is RE-LEARNED per successful poll (store_active :1333-1336 fidelity — a mid-queue migration is followed; ip:null keeps the host); --session-keep skips the abort cancel for browser-RESUME experiments. docs/RTSP.md §14 is the record. **R7 RUN 9 (round XXVIII): T10 r21 ALL PASS 72 (zero warnings — the paranoid legs held). The re-learning fired ~25× in one wait — the nominated control front migrates nearly every poll (np-waw→ams→sth→lon→par→frk…) and EVERY nominated node answered: the 503 class of runs 7/8 VANISHED (zero 503s, clean step 1→3→ready; runs 7/8 were us pinned to a node the record had drifted from — the ip:null skeleton's real meaning). The XXV STUN toolkit is live-proven byte-correct: ice_creds enabled:1 via the pingVersion-6 bundle-username ladder leg (ufrag/bundle/natt/payload lengths all 13 — the real DESCRIBE carries iceUsernameFragment + serverBundlePort), ice_preplay = stun 147 / natt 49 / rig-requests 99 ALL answered / rig-successes 327 / invalid 0 — a fully bidirectional validated ICE exchange. PLAY still 455 (burst existence necessary but not sufficient), and the 455-retry hit a DEAD WS (rc -2, ws_close -1 — the rig drops the RTSP context after refusing). Remaining deltas vs the reference at PLAY time: the sequential pump goes quiet DURING the exchange (the reference thread never stops) and D-s1 (no real DTLS identity; unproven — the rig sent no DTLS: invalid 0). Round XXVIII: the pump moves to a bounded worker thread spanning exactly the PLAY exchange (joined before the media loop — D21 untouched; sequential fallback kept), PLAY is ONE-SHOT, and the media loop gains the reference's Mjolnir NATT keepalive (nvst.rs:8849-8905 — 'the pings are what ROUTES video here': {setup payload}:{local ufrag} to the video peer, 20 ms pre-first-inbound then 100 ms, + the natt_keepalive evidence line); cm_control/ready now quantify the migrations (n/relearns). docs/RTSP.md §15 is the record. **R7 RUN 10 (round XXIX): the pump thread spanned the ENTIRE 20 s PLAY window (thread:1, pump_ms 20525, 2760 STUN + 920 NATT, the rig's 123 probes ALL answered, 3671 rig successes validated, invalid_in 0 — difference (a) CLOSED) and PLAY received NO response at all (rc -3, ws_text stuck at 4, no close frame). A second rig (80.250.98.40) refused DIFFERENTLY than run 9's (instant 455 vs hold-until-timeout) — same root state. The elimination table (RTSP.md §16) now has ONE row left: the D-s1 placeholder DTLS identity — the reference announces a real certificate's fingerprint (nvst.rs:5562-5603) and runs ICE+DTLS on the bundle from receiver-spawn (:6106-6160: client ICE-CONTROLLING, remote fingerprint pinned from DESCRIBE, video SRTP keys stay ANNOUNCE-derived, DTLS carries SCTP rtcp1+input). **R3 PROMOTED to the stage-2 PLAY blocker — docs/DTLS.md (NEW) phases it: R3-A kn_cert (PORTABLE mbedTLS: self-signed cert + colon-hex SHA-256 fingerprint, sandbox-KAT'd both platforms, cross-compiled for Win32 per the round-XXII rule) → R3-B kn_dtls (DTLS 1.2 client on the bundle socket, fingerprint-pinned, inside the pump thread's state machine, + the N+1 Mjolnir sibling socket when !unifiedSocket) → R3-C usrsctp (rtcp1 + input channels) → R3-D WS control pings (NvstControlPing :260-290/:844-930).** Round XXIX also mirrored the OFFICIAL ICE identity shapes (generate_gfn_local_ice_credentials :5545-5559 — 4-char ufrag / 22-char password over the base64-ish alphabet; str0m's 16-char default is Bifrost-rejected :5564 — our 16/24-hex had been tolerated but fidelity rules), added the 400 ms pump warm-up before PLAY (run 10 raced the thread start) and the full WS counters in rtsp_detail. Next = the next T10 (expect ALL PASS 72, zero warnings) + R7 run 11 (expected: PLAY still refused = the final elimination datum, with the enriched counters), then R3-A implementation.** |
 | **3–5** | Not started; see BOOTSTRAP stage gates. |
 
 Stage 1 closure: T11 full G1 passed on the target before this continuation; graphics, decode, audio, and logging gates are closed. No GPU retest is needed for the current Stage-2 socket work (round XVII touched no graphics code).
@@ -129,47 +129,49 @@ unchanged — see BOOTSTRAP §9.
 
 ## Next steps (ordered)
 
-1. **Target-verify round XXVII: `python tests\T10_build_and_test.py`** —
-   expect ALL PASS **72 with ZERO warnings** (r20's single failure was
-   exactly the removed write-only counter; both gate scripts now carry
-   the paranoid knvstd leg that catches the class in the sandbox).
-   Round XXVII touched knvstd_main.c (phase-A diagnostics + re-learning
-   + --session-keep), kn_cm.* (two diagnostic fields, extraction order),
-   test_kncm.c (148) and both gate scripts — sandbox-gated (native 13,
-   cross + paranoid legs, E2E 43/43, ctest 15/15 ×2). T13 optional
-   (unchanged, expect 61 — kn_rx untouched).
-2. **R7 run 9 — through the seat-transition window to the first real
-   media** (run 8 rode the 503 window correctly and its body revealed
-   the ip:null skeleton; the deep fields are now parsed; the round-XXV
-   PLAY pump is STILL awaiting its first live try; docs/RTSP.md §14).
-   Same command (optionally `--session-queue-timeout=1200` in peak
-   hours; `--session-keep` to leave the session resumable in the web
-   UI on abort):
+1. **Target-verify round XXIX: `python tests\T10_build_and_test.py`** —
+   expect ALL PASS **72, zero warnings** (round XXIX touched ONLY
+   knvstd_main.c + docs: the identity shapes, the pump warm-up, the
+   rtsp_detail counters — sandbox-gated: native 13 suites, cross +
+   paranoid ×3 compilers, E2E 43/43, ctest 15/15 ×2, T10 dry 62).
+   T13 optional (unchanged, expect 61).
+2. **R7 run 11 — the final elimination datum, then R3-A** (run 10
+   closed difference (a): the pump thread spanned the whole PLAY
+   window with saturated bidirectional ICE, and PLAY still got
+   nothing — the ONLY major difference left is D-s1, the placeholder
+   DTLS identity; docs/RTSP.md §16 + docs/DTLS.md). Same command
+   (optionally `--session-queue-timeout=1200`; `--session-keep` to
+   leave the session resumable on abort):
    `knvstd --session --session-token=... --session-app=N
    [--session-title=...] --session-seconds=60 --session-au-dir=aus`
-   → watch the JSONL: cm_created → cm_control → queue (static position
-   with step transitions is the native-queue norm — runs 5/6/7) →
-   **around the ~2-minute mark EITHER seat_step 3 → ready, OR a 503
-   window: `cm_poll_error` lines with `class:"transient"`, growing
-   `gap_ms` and a `body` excerpt — paste those bodies verbatim, they
-   name the 503's sender** → ready → rtsp steps → ice_creds (expect
-   enabled:1) → ice_preplay counters → PLAY attempt 1 possibly 455 →
-   attempt 2 200 → handoff → the media loop = the first real Mjolnir
-   SRTP → kn_rx → aus/frames (R32's final stage-2 gate; R34-remainder:
-   the firewall question on inbound UDP). If PLAY still 455s after 3
-   attempts: `ice_preplay.ok_in` (did the rig answer our STUN?) +
-   `ice_creds` (which ladder leg fired) localize it. ANY failed step
-   emits an `rtsp_detail` line. `cloud_status 11` on cm_create =
-   SESSION_LIMIT (an earlier session is alive server-side — phases B-E
-   deliberately leave sessions resumable like the reference; end it in
-   the GFN web UI or let it expire). A not_ready exit ends with
-   `cm_cancel` (run 7 PROVED it: 200 + the session left the web UI).
-   Capture always feeds the diagnostic ring; add --capture in a second
-   run for the permanent regression vector.
+   → watch the JSONL: cm_created → cm_control (+ `relearned` lines with
+   `"n"` — the migration is normal, run 9 saw ~25) → queue (position
+   may sit at a 100 cap; the step transitions are the signal) → ready
+   (`"relearns"` total) → rtsp steps → ice_creds (expect enabled:1) →
+   **PLAY ONE attempt with the pump thread running (`ice_preplay`
+   `"thread":1`, counters rich) → 200** → handoff → the media loop:
+   `natt_keepalive.sent` + the summary's datagrams/aus/frames_out =
+   the first real Mjolnir SRTP → kn_rx → aus/frames (R32's final
+   stage-2 gate; R34-remainder: the firewall question on inbound UDP).
+   **The EXPECTED run-11 outcome is PLAY still refused (455 or
+   timeout) — that verdict FINALIZES the elimination and green-lights
+   R3-A (docs/DTLS.md); paste ice_creds + ice_preplay + rtsp_detail
+   (now with the full WS counter set — it shows what the rig does on
+   the control channel during the hold).** ANY failed step emits an
+   `rtsp_detail` line.
+   `cloud_status 11` on cm_create = SESSION_LIMIT (a live session
+   server-side — phases B-E deliberately leave sessions resumable;
+   end it in the GFN web UI or let it expire). A not_ready exit ends
+   with `cm_cancel` unless --session-keep. Capture always feeds the
+   diagnostic ring; add --capture in a second run for the permanent
+   regression vector.
 
-3. Stage 3 (R3 DTLS/SCTP spike — replaces the D-s1 placeholder identity)
-   + presentation wiring for --session frames (the G1-proven presenter;
-   the natural follow-up once real frames flow).
+3. **R3 — PROMOTED into stage 2 by run 10 (docs/DTLS.md):** R3-A
+   kn_cert (the real certificate identity, portable mbedTLS) → R3-B
+   kn_dtls (the handshake on the bundle, inside the pump thread's
+   state machine) → R3-C usrsctp (rtcp1 + input) → R3-D WS control
+   pings. Presentation wiring for --session frames (the G1-proven
+   presenter) follows once real frames flow.
 4. Stage 3+ per BOOTSTRAP §12; R22's full 31-field context + R23 RESUME
    at stage 4/5.
 5. **Presentation wiring for the live path**: `--decode` frames →
@@ -1939,3 +1941,147 @@ STUN/RTCP/SCTP plane + the real DTLS identity = stage 3 (R3).
   pre-gate fills), `streamer/tests/test_kncm.c` (148),
   `tools/{build_native_tests,cross_check}.sh` (the paranoid legs),
   `docs/RTSP.md` §14, `INTEGRATION.md` rev 17, this file
+
+### 2026-10-26 · impl round XXVIII (R7 run 9: re-learning LIVE — the control front migrates constantly and the 503 class vanished; ICE fully bidirectional yet PLAY still 455 → the pump goes CONCURRENT, PLAY ONE-SHOT, the Mjolnir NATT keepalive lands)
+**Context:** same handoff chain; GitHub now carries the work through
+`8f97bb8` (patch 27 = the round-XXVI+XXVII trees applied verbatim —
+verified byte-identical to the sandbox-gated state before this round).
+The user ran T10 r21 (**ALL PASS 72, zero warnings** — the XXVII
+paranoid-leg fix confirmed) and then run 9 live. docs/RTSP.md §15 is
+the record.
+**Run 9 evidence (live production):** (1) the XXVII control-node
+re-learning fired ~25 times in one queue wait — the nominated front
+migrates across np-ams-06/07, np-sth-04, np-lon-06/07, np-par-05,
+np-frk-07 nearly every poll, every node answered, and **the 503 class
+of runs 7/8 disappeared entirely** (zero 503s across ~28 polls; clean
+step 1→3→ready). Retro-reading: runs 7/8 were us PINNED to np-waw-01
+after the record drifted — the ip:null skeleton was that node saying
+"not mine to serve". (2) Queue position sat at a `100` cap on every
+node with one `23` glimpse mid-migration — recorded as display
+semantics, not a defect. (3) ice_creds enabled:1 through the
+pingVersion-6 bundle-username ladder leg (all lengths 13 — the real
+DESCRIBE carries iceUsernameFragment + serverBundlePort; the ladder
+fixtures from the reference's own tests matched reality). (4)
+**ice_preplay: stun 147, natt 49, req_in 99, answered 99, ok_in 327,
+invalid 0, send_errors 0** — the round-XXV STUN toolkit is live-proven
+byte-correct in BOTH directions with the real rig. (5) **PLAY 455
+anywhere**; the retry hit a dead WS (rc -2, ws_err -2, ws_close -1,
+ws_text stuck at 5 — the rig drops the RTSP context after refusing).
+**Conclusions:** burst existence is necessary (run 6) but not
+sufficient (run 9). Remaining deltas vs the reference at PLAY time:
+(a) the sequential pump goes QUIET during the PLAY exchange — the
+reference's receiver thread keeps bursting every 20 ms through it
+(lib.rs:894→937→1117; nvst.rs:7438/:7842); (b) D-s1's placeholder DTLS
+identity — unproven either way (invalid_in:0 — the rig sent no DTLS
+during the window). And re-PLAY after a 455 is pointless (dead
+channel) — the reference has no in-place retry at all.
+**Round XXVIII delta (knvstd_main.c only + docs):** the pump moves to a
+bounded worker thread (sess_pump ctx + sess_ice_pump_run core;
+kernel32 CreateThread — F1 import set, no new DLLs; POSIX pthread for
+the sandbox build) spanning exactly the PLAY request/response window,
+joined before the media loop (single-owner socket discipline: main
+touches only WS/TLS while it runs; stats read after join; **D21's
+single-threaded MEDIA loop untouched** — the thread is gone before the
+first media tick); spawn failure falls back to the sequential 400 ms
+pump honestly. PLAY is ONE-SHOT (the 455-retry loop is deleted;
+failure → TEARDOWN + the resumable-session policy). ice_preplay gains
+"thread". The media loop gains the reference's **Mjolnir NATT
+keepalive** (nvst.rs:8849-8905 + the test :14549's shape: USERNAME
+"{setup x-nv-ping-payload}:{local ufrag}", key = the DESCRIBE remote
+password, to the video peer, 20 ms until the first inbound datagram
+then 100 ms, inline in the loop's 10 ms tick) — the reference's
+comment is explicit that these pings are what ROUTES video to the
+socket, so a PLAY-200 run without them risked media silence; evidence
+line natt_keepalive{"sent":N} after the loop (the verify-compatible
+summary schema is untouched). cm_control relearn events carry "n", the
+ready line the "relearns" total.
+**E2E honesty note:** sandbox_session_e2e keeps its OWN sequential pump
++ two-PLAY sequence — it is the independent second implementation of
+the WIRE shapes (its rig gate accepts once a request validates); the
+thread scheduling is knvstd glue on Win32-target territory (POSIX
+session mode refuses at the TLS gate). 43/43 unchanged.
+**Gates (sandbox, final tree):** native 13 suites PASS (knsock 98,
+knrtsp 150, kncm 148 — libraries unchanged); cross x64+i686 -Werror
+PASS incl. the paranoid knvstd legs on three compilers; E2E 43/43;
+CMake fresh both backends 0 warnings + ctest 15/15 ×2; T10 POSIX dry
+ALL PASS 62. (Workspace note: the agent's .git does not survive the
+between-message snapshot; this round re-based onto the user's pushed
+8f97bb8 after verifying it byte-identical to the XXVII state.)
+**Awaiting (round XXIX):** the next target T10 (expect ALL PASS 72,
+zero warnings), then **R7 run 10** — PLAY 200 → the keepalive carries
+the routing → first real Mjolnir SRTP → kn_rx → aus/frames (R32's
+final stage-2 gate + the R34 inbound-firewall answer); OR PLAY still
+455 with "thread":1 + rich counters → the DTLS identity (D-s1) is the
+prime suspect and the stage-3 R3 spike becomes the PLAY prerequisite
+(the honest next milestone either way).
+→ `streamer/src/knvstd_main.c` (the pump thread + one-shot PLAY + the
+  media-loop keepalive + the relearn counters), `docs/RTSP.md` §15,
+  `INTEGRATION.md` rev 18, this file
+
+### 2026-10-26 · impl round XXIX (R7 run 10: the pump thread live-proven through the whole PLAY window; PLAY went 455→SILENCE on a second rig → the elimination table is empty except D-s1 — R3 PROMOTED to the stage-2 PLAY blocker with docs/DTLS.md; the official ICE identity shapes mirrored)
+**Context:** same handoff chain. The user ran the round-XXVIII tree
+live (run 10) after T10 confirmed ALL PASS 72 / zero warnings.
+docs/RTSP.md §16 (the measurement + the elimination table) and the NEW
+**docs/DTLS.md** (the R3 spike plan) are the records.
+**Run 10 evidence (live production):** queue — re-learning ×24 (the
+`ready` line's new `relearns:24`), the 97 cap with real glimpses
+(17/16/5 — the queue moved under the cap), zero 503s again, clean
+step 1→3→ready. RTSP — OPTIONS/DESCRIBE/SETUP/ANNOUNCE 200 (peer
+80.250.98.40:5004; ANNOUNCE 4165 B). ICE — `ice_creds enabled:1`
+(identical ladder shape to run 9: all lengths 13) and the pump thread
+PERFORMED: `"thread":1`, `pump_ms 20525` (it spanned the ENTIRE 20 s
+PLAY timeout), 2760 STUN + 920 NATT sent at the 20 ms cadence, the
+rig's 123 probes ALL validated+answered, 3671 rig successes validated
+here, invalid 0, send_errors 0. **PLAY: rc -3 timeout, status 0 — NO
+response at all** (ws_text stuck at 4 — the fifth RTSP answer never
+came; ws_close -1 — the WS stayed open and silent). The run-9 rig
+refused instantly (455); the run-10 rig held until timeout. Two rigs,
+two refusal modes, one common missing layer.
+**Verdict (RTSP.md §16 elimination table):** wire shape — proven
+(ANNOUNCE 200 ×3 rigs); bursts before PLAY — closed (run 6→9);
+burst continuity THROUGH the exchange — closed (run 10, thread);
+credential ladder — proven (invalid 0 both directions, 3671 answers);
+**the announced DTLS identity — the ONLY major remaining difference**
+(D-s1: a random placeholder fingerprint, no DTLS stack; the reference
+announces a real certificate's fingerprint — nvst.rs:5562-5603 — and
+runs ICE+DTLS on the bundle from receiver-spawn time, :6106-6160:
+client ICE-CONTROLLING, host candidates only, the remote fingerprint
+PINNED from DESCRIBE; video SRTP keys stay ANNOUNCE-derived, DTLS
+carries SCTP — rtcp1 "a must for One SDK video" :411 — and input).
+**R3 is PROMOTED from stage 3 to the stage-2 PLAY blocker.** The plan
+(docs/DTLS.md): R3-A kn_cert — a PORTABLE mbedTLS self-signed-cert
+module (sandbox-KAT'd on both platforms; Win32 cross-compiled per the
+round-XXII rule) whose colon-hex SHA-256 fingerprint replaces the
+placeholder in the ANNOUNCE; R3-B kn_dtls — the DTLS 1.2 client on the
+bundle socket (fingerprint-pinned, inside the pump thread's state
+machine; the N+1 Mjolnir sibling socket when !unifiedSocket — the
+:5484 pairing comment); R3-C usrsctp — rtcp1 + input channels (also
+unlocks the kn_rx NACK-v2/IDR/RFI senders); R3-D WS control pings
+(NvstControlPing :260-290/:844-930 — kn_ws auto-pongs but never pings).
+**Round XXIX deltas (while the verdict stands):** (1) the OFFICIAL ICE
+identity shapes — generate_gfn_local_ice_credentials (:5545-5559):
+4-char ufrag / 22-char password over the base64-ish alphabet; :5564
+notes str0m's 16-char default is REJECTED by Bifrost length checks —
+our 16/24-hex had been tolerated at ANNOUNCE+ICE (runs 9/10) but
+fidelity is the R32 rule and R3 reuses this identity. (2) The 400 ms
+pump warm-up before PLAY (run 10 raced the thread start — PLAY could
+land before the first burst; run 9's sequential shape had 400 ms of
+history; the warm-up removes the last timing confound). (3)
+rtsp_detail now carries the full WS counter set (pings_in/pongs_in/
+pongs_out/closes_in/frames_out) — run 11 shows what the rig does on
+the control channel during a hold.
+**Gates (sandbox, final tree):** native 13 suites PASS (libraries
+unchanged — the delta is knvstd glue; E2E keeps its own static
+identity by design); cross x64+i686 -Werror PASS; paranoid
+-Wunused-but-set-variable -Wformat-truncation=2 clean on
+knvstd_main.c ×3 compilers; E2E 43/43; CMake both backends 0 warnings
++ ctest 15/15 ×2; T10 POSIX dry ALL PASS 62.
+**Awaiting (round XXX = R3-A):** the next target T10 (expect ALL PASS
+72, zero warnings) + **R7 run 11** — the EXPECTED outcome is PLAY
+still refused, which FINALIZES the elimination (and the enriched WS
+counters document the rig's control-channel behaviour during the
+hold); either way R3-A (kn_cert) starts next: the first sandbox-
+provable piece of the DTLS layer, retiring D-s1's fingerprint half.
+→ `streamer/src/knvstd_main.c` (identity shapes + warm-up + counters),
+  `docs/DTLS.md` (NEW), `docs/RTSP.md` §16, `INTEGRATION.md` rev 19,
+  this file

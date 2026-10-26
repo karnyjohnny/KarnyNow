@@ -891,3 +891,163 @@ window now speaking in parsed fields (`sess_status`, `err_code`,
 window outlives the budget, those five numbers are the basis for the
 next decision (extend the budget, treat long 503s as a dead record, or
 re-create).
+
+## 15. Round XXVIII — R7 run 9 (T10 r21 ALL PASS 72; re-learning LIVE: the control node migrates constantly; ICE fully bidirectional; PLAY still 455 → the pump goes CONCURRENT + one-shot PLAY + the Mjolnir keepalive)
+
+**What was measured (2026-10-26, the round-XXVII tree; T10 r21 confirmed
+ALL PASS 72, zero warnings — the paranoid legs work):**
+* **The control-node re-learning fired ~25 times in one queue wait:**
+  np-waw-01 → np-ams-06 → np-sth-04 → np-lon-06 → np-ams-07 → np-lon-07
+  → np-par-05 → np-frk-07 … nearly every poll response nominated a
+  DIFFERENT regional front, and every nominated node answered. This is
+  the reference's own behaviour (store_active re-derives control_base
+  from EVERY response, :1333-1336) — and it retro-explains runs 7/8:
+  pinned to np-waw-01, we polled a node the session had already drifted
+  from; its 503+`ip:null` skeleton was "this record is not mine to
+  serve right now". **Run 9 saw ZERO 503s across ~28 polls and walked
+  step 1 → 3 → ready cleanly.**
+* Queue position semantics: `100` repeated on EVERY node (a saturation/
+  display cap — the real depth was ≥100), with one poll catching `23`
+  (a fresher per-node view mid-migration). Recorded, not a defect; the
+  transitions are what matter.
+* Ready → rtsps://77-111-249-145…:322 → OPTIONS/DESCRIBE/SETUP/
+  ANNOUNCE 200 (SETUP peer 77.111.249.145:5004, first round).
+* **ice_creds enabled:1** with all ladder legs real: ping_ver 6,
+  remote_ufrag_len 13, bundle_user_len 13 (so the REAL DESCRIBE carries
+  general.iceUsernameFragment + serverBundlePort — the ladder took the
+  pingVersion-6 bundle-username leg, exactly the reference's own test
+  shape "a1b248001"), setup_payload_len 13, remote_pw 1, remote_fp 1.
+* **ice_preplay: stun_sent 147, natt_sent 49, req_in 99, answered 99,
+  ok_in 327, invalid_in 0, send_errors 0, pump_ms 1005** — a fully
+  bidirectional, integrity-validated ICE exchange with the real rig
+  (it probed us 99 times; every answer it sent us validated). The
+  round-XXV STUN toolkit is live-proven byte-correct.
+* **PLAY attempt 1 → 455** anyway. **Attempt 2 → rc:-2, ws_err:-2,
+  ws_close:-1, ws_text still 5** — the WS died without a close frame:
+  the rig drops the RTSP context after refusing PLAY.
+
+**Conclusions (evidence-driven):**
+1. Burst EXISTENCE before PLAY is necessary (run 6: no UDP → 455) but
+   not sufficient (run 9: full bidirectional ICE → still 455). The
+   remaining differences vs the reference at PLAY time: (a) our
+   sequential pump goes QUIET during the PLAY exchange itself — the
+   reference's receiver thread keeps bursting every 20 ms through it;
+   (b) D-s1: no real DTLS identity (notably `invalid_in:0` — the rig
+   sent NO DTLS records during the pump, so (b) is unproven either
+   way).
+2. Re-PLAY on a 455'd WS is pointless (dead channel) — PLAY must be
+   one-shot, like the reference (which has no in-place retry at all).
+3. `invalid_in:0` + `ok_in:327` also means the rig's answers used the
+   remote password exactly as the reference expects — the credential
+   ladder resolution is confirmed correct end-to-end.
+
+**Fix (round XXVIII):**
+* **The pump goes CONCURRENT:** a small worker thread (kernel32
+  CreateThread / POSIX pthread — no new imports, D21's single-threaded
+  MEDIA loop untouched: the thread is joined before the first media
+  tick) spans exactly the PLAY request/response window, bursting every
+  20 ms like the reference's receiver; single-owner socket discipline
+  (main touches only WS/TLS while it runs; stats read after join).
+  Spawn failure falls back to the sequential 400 ms pump (honest).
+* **PLAY is one-shot** (the 455-retry loop is gone; the failure path is
+  TEARDOWN + the resumable-session policy, with the full ice_preplay
+  evidence line incl. `"thread":0/1`).
+* **The Mjolnir NATT keepalive in the media loop** (nvst.rs:8849-8905):
+  USERNAME `{setup x-nv-ping-payload}:{local ufrag}`, key = the
+  DESCRIBE remote password, to the video peer — 20 ms until the first
+  inbound datagram, then 100 ms — sent inline from the loop's 10 ms
+  tick. The reference's comment is explicit: these pings are WHAT
+  ROUTES THE VIDEO to the socket; a PLAY-200 run would otherwise risk
+  media silence. Evidence: the `natt_keepalive {"sent":N}` line after
+  the loop (the summary schema stays verify-compatible).
+* `cm_control` relearn events carry a running `"n"`, and the `ready`
+  line the total `"relearns"` — the migration pattern is now
+  quantified evidence.
+
+**E2E honesty note:** sandbox_session_e2e keeps its OWN sequential pump
++ two-PLAY sequence (it is the independent second implementation of the
+WIRE shapes, and its rig gate accepts once a request validates — the
+thread scheduling is knvstd glue, Win32-target territory; POSIX session
+mode refuses at the TLS gate anyway). The rig/E2E stay at 43/43.
+
+**Next measurement = R7 run 10:** if PLAY 200 → the keepalive carries
+the routing and the media loop should see real Mjolnir SRTP (watch
+`natt_keepalive.sent` + the summary's datagrams/aus/frames_out — R32's
+final gate + the R34 inbound-UDP firewall answer). If PLAY STILL 455
+with `"thread":1` and rich ice counters → difference (b) (the real DTLS
+identity / handshake on the bundle) becomes the prime suspect and
+stage-3 R3 moves up as the prerequisite for PLAY.
+
+## 16. Round XXIX — R7 run 10 (the pump thread LIVE-PROVEN; PLAY went from instant-455 to DEAD-SILENCE → difference (b), the real DTLS identity, is now the prime and near-only suspect; R3 is promoted to the stage-2 PLAY blocker)
+
+**What was measured (2026-10-26, the round-XXVIII tree; T10 confirmed
+ALL PASS 72 zero warnings):**
+* Queue: re-learning fired 24× (`relearns:24` in the ready line — the
+  migration pattern quantified), the position sat at the `97` cap with
+  real glimpses (17, 16, 5 — the queue WAS moving under the cap), then
+  seat_step 3 → ready → rtsps://80-250-98-40…:322. ZERO 503s again —
+  the run-9 finding held.
+* OPTIONS/DESCRIBE/SETUP/ANNOUNCE 200 (SETUP peer 80.250.98.40:5004,
+  first round; ANNOUNCE 4165 B — byte-identical size class to run 9).
+* ice_creds identical shape to run 9 (all lengths 13, ping_ver 6,
+  remote_pw 1, remote_fp 1 — the ladder is deterministic across rigs).
+* **The pump thread performed exactly as built (`"thread":1`):**
+  `pump_ms 20525` — it ran through the ENTIRE 20 s PLAY window (run
+  9's difference (a) — silence during the exchange — is CLOSED);
+  `stun_sent 2760, natt_sent 920` (920 bursts at the 20 ms cadence),
+  `req_in 123, answered 123` (every rig probe validated + answered),
+  `ok_in 3671` (the rig answered ~every one of ours), `invalid_in 0`,
+  `send_errors 0`. A fully saturated, bidirectional, integrity-clean
+  ICE/NATT channel for 20 straight seconds.
+* **PLAY: rc -3 (timeout), status 0 — NO response at all** (ws_text
+  stuck at 4: the fifth RTSP answer never came; ws_close -1: the WS
+  stayed open, silent). A DIFFERENT rig than run 9 (80.250.98.40 vs
+  77.111.249.145) and a different refusal mode: run 9 = instant 455,
+  run 10 = hold-until-timeout. Both are "PLAY is not valid in this
+  state" — one rig says it immediately, one waits for a state change
+  that never comes.
+
+**The elimination table is now nearly empty:**
+| difference vs the reference | status |
+|---|---|
+| request wire shape (target/headers/CSeq) | proven identical (run 6-era; ANNOUNCE 200 shows the SDP is consumed) |
+| hole-punch burst before PLAY | CLOSED (run 6 → run 9/10: bursts flow) |
+| burst continuity DURING the PLAY exchange | CLOSED (run 10: thread:1, pump_ms 20525) |
+| ICE credential ladder | PROVEN correct (invalid_in 0 both directions, ok_in 3671) |
+| **the announced DTLS identity (D-s1 placeholder)** | **OPEN — the only major remaining difference** |
+| (post-PLAY items: WS control pings, SCTP channels) | not yet reachable — after PLAY |
+
+The reference announces a fingerprint of a REAL certificate
+(`create_nvst_bundle_rtc` → str0m → `local_dtls_fingerprint`,
+nvst.rs:5562-5592) and its bundle socket runs a live ICE+DTLS stack
+from receiver-spawn time — i.e., by PLAY time the rig has typically
+seen a DTLS ClientHello from a certificate matching the ANNOUNCE. We
+announce a random 32-byte placeholder and never speak DTLS. Two rigs,
+two refusal modes, one common missing layer. **Verdict: the stage-3 R3
+spike (real DTLS identity + handshake on the bundle) is promoted to the
+PLAY blocker — stage 2 cannot complete without it.** The plan lives in
+**docs/DTLS.md** (new this round).
+
+**Round XXIX delta (small, evidence-maximizing — the verdict above is
+the real content):**
+* **Pump warm-up:** when the thread spawns, PLAY waits 400 ms so it can
+  never land before the first bursts (run 10 raced the thread start by
+  design; run 9's sequential shape had 400 ms of history — this removes
+  the last timing confound before run 11).
+* **rtsp_detail grew the full WS counter set** (`ws_pings_in`,
+  `ws_pongs_in/out`, `ws_closes_in`, `ws_frames_out`) — run 11's 20 s
+  of silence will show whether the rig WS-pings us while it holds PLAY
+  (the reference answers pings via tungstenite; kn_ws already
+  auto-pongs — the counters make it visible).
+* NOTE (recorded, not yet built): the reference keeps the control
+  channel alive AFTER PLAY with WS PING frames carrying a sequence +
+  RTT tracking (NvstControlPing, nvst_rtsp.rs:260-290, :844-930) — our
+  kn_ws answers pings but never sends them; that is DTLS.md phase R3-D
+  (small, ships with the media phase).
+
+**Next measurement = R7 run 11** (same command): expected outcome with
+high confidence = PLAY still refused (455 or timeout) — that is the
+final elimination datum; the new counters tell us what the rig does on
+WS during the hold. The queue/ICE evidence keeps accumulating for free
+(every run now also stress-tests re-learning + the pump). Then R3-A
+(the real certificate) starts — see docs/DTLS.md.

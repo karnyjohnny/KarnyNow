@@ -1,4 +1,125 @@
-# INTEGRATION NOTES — Round XXVII delta, rev 17 (R7 run 8: the 503 body speaks — an app-level session skeleton with sessionControlInfo.ip:null; the T10-r20 warning fixed + gated permanently; control-node re-learning; --session-keep)
+# INTEGRATION NOTES — Round XXIX delta, rev 19 (R7 run 10: the pump thread live-proven, PLAY went 455→SILENCE → the elimination table is empty except D-s1; R3 (real DTLS) promoted to the stage-2 PLAY blocker — docs/DTLS.md; the official ICE identity shapes mirrored)
+
+> **Rev 19 supersedes rev 1-18.** Canonical state: `PROJECT-STATE.md`.
+> Design records: **`docs/DTLS.md`** (NEW — the R3 spike plan),
+> `docs/RTSP.md` §16 (run 10 + the elimination table), §15, §12.
+>
+> **Round XXIX headline: run 10 closed the last transport difference —
+> the pump thread ran through the ENTIRE 20 s PLAY window
+> (`"thread":1`, pump_ms 20525, 2760 STUN + 920 NATT, the rig's 123
+> probes ALL answered, 3671 rig successes validated, invalid 0) — and
+> PLAY got NO response at all (rc -3 timeout, ws_text stuck at 4, no
+> close frame). A different rig than run 9 refused differently
+> (instant 455 vs hold-until-timeout), same root state: the transport
+> never reaches "PLAY-valid". With the wire shape, the bursts, their
+> continuity through the exchange and the credential ladder ALL proven
+> live, the elimination table has one row left: the announced DTLS
+> identity (D-s1 placeholder, no DTLS stack). The reference announces
+> a REAL certificate's fingerprint and runs ICE+DTLS on the bundle from
+> receiver-spawn time (nvst.rs:5562-5603, :6106-6160 — client is ICE
+> CONTROLLING, remote fingerprint PINNED from DESCRIBE, video SRTP
+> keys stay ANNOUNCE-derived, DTLS carries SCTP/rtcp1+input). R3 is
+> promoted to the stage-2 PLAY blocker; docs/DTLS.md phases it
+> (R3-A portable-mbedTLS certificate identity → R3-B DTLS client on
+> the bundle → R3-C usrsctp channels → R3-D WS control pings), each
+> phase sandbox-KAT'd before its live verdict, with the round-XXII
+> gate rule baked in. Small round-XXIX deltas while the verdict
+> stands: the official ICE identity shapes (4-char ufrag / 22-char
+> password over the base64-ish alphabet — nvst.rs:5545-5565; our
+> 16/24-hex was tolerated but Bifrost length-checks 16-char ufrags),
+> a 400 ms pump warm-up so PLAY can never outrun the first bursts
+> (run 10 raced the thread start), and the full WS counter set in
+> rtsp_detail (pings/pongs/closes/frames_out — run 11 will show what
+> the rig does on WS during the hold).**
+>
+> ## Changed files (round XXIX)
+> 1. `streamer/src/knvstd_main.c` — `sess_local_identity` mirrors
+>    generate_gfn_local_ice_credentials exactly (alphabet, 4/22);
+>    the PLAY path gains the 400 ms warm-up when the pump thread
+>    spawns; `sess_rtsp_detail` reports ws_pings_in/ws_pongs_in/
+>    ws_pongs_out/ws_closes_in/ws_frames_out.
+> 2. `docs/DTLS.md` (NEW — the R3 plan with provenance + open
+>    questions), `docs/RTSP.md` §16, this file, `PROJECT-STATE.md`.
+>
+> ## Verification (round XXIX, sandbox)
+> native 13 suites PASS (libraries unchanged — the identity/warm-up/
+> counters are knvstd glue; E2E keeps its own static identity by
+> design) · cross x64+i686 `-Werror` PASS · paranoid
+> `-Wunused-but-set-variable -Wformat-truncation=2` clean on
+> knvstd_main.c ×3 compilers · sandbox_session_e2e **43/43** · CMake
+> both backends 0 warnings + ctest 15/15 ×2 · T10 dry ALL PASS 62.
+> **Target expectations:** next T10 → ALL PASS **72**, zero warnings.
+> Then **R7 run 11** (same command): the expected verdict is PLAY
+> still refused (455 or timeout) — the FINAL elimination datum — with
+> the enriched counters showing the rig's WS behaviour during the
+> hold; queue/ICE evidence keeps accumulating. After that R3-A starts
+> (docs/DTLS.md).
+
+---
+
+# Round XXVIII delta, rev 18 (R7 run 9: the control node MIGRATES constantly — re-learning live-proven, ZERO 503s; ICE fully bidirectional yet PLAY still 455 → the pump goes concurrent, PLAY goes one-shot, the Mjolnir NATT keepalive lands in the media loop)
+
+> **Rev 18 supersedes rev 1-17.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/RTSP.md` §15** (run 9 + this round), §14 (run
+> 8), §13 (the 503-window policy), §12 (the pump's birth).
+>
+> **Round XXVIII headline: run 9 validated TWO rounds of fixes live and
+> exposed the next layer. (1) The XXVII control-node re-learning fired
+> ~25 times in one wait — the session's nominated front migrates across
+> np-ams/sth/lon/par/frk almost every poll — and with it the 503 class
+> VANISHED (zero 503s across ~28 polls; runs 7/8 were us pinned to a
+> node the record had drifted from, which is what its ip:null skeleton
+> was saying). (2) The XXV STUN toolkit is live-proven byte-correct:
+> ice_creds enabled with the pingVersion-6 bundle-username ladder leg
+> (lengths 13/13/13 — the real DESCRIBE carries iceUsernameFragment +
+> serverBundlePort), and ice_preplay shows a fully bidirectional,
+> integrity-validated exchange (stun 147, natt 49, rig requests 99 —
+> ALL answered, rig successes 327, invalid 0). (3) PLAY STILL 455 — so
+> burst existence is necessary but not sufficient; the remaining deltas
+> vs the reference: our sequential pump goes QUIET during the PLAY
+> exchange (the reference's receiver thread never stops bursting) and
+> D-s1 (no real DTLS identity — unproven either way, the rig sent no
+> DTLS: invalid_in 0). (4) The 455 retry hit a DEAD WS (rc -2,
+> ws_close -1, no close frame — the rig drops the RTSP context after
+> refusing). Fixes: the pump moves to a bounded worker thread spanning
+> exactly the PLAY exchange (kernel32/pthread; joined before the media
+> loop — D21 untouched; honest sequential fallback), PLAY becomes
+> ONE-SHOT, and the media loop gains the reference's Mjolnir NATT
+> keepalive (nvst.rs:8849-8905 — "the pings are what ROUTES video
+> here": USERNAME {setup payload}:{local ufrag} to the video peer, 20
+> ms pre-first-inbound then 100 ms, inline in the loop's tick).**
+>
+> ## Changed files (round XXVIII)
+> 1. `streamer/src/knvstd_main.c` — the pump refactor (sess_pump ctx +
+>    sess_ice_pump_run core + thread entry/start/stop + the sequential
+>    wrapper kept as fallback), the one-shot PLAY block (retry loop
+>    removed; `ice_preplay` gains `"thread"`), the phase-E NATT
+>    keepalive (+ the `natt_keepalive {"sent":N}` evidence line; the
+>    summary schema untouched for make_rx_capture --verify), the
+>    relearn counter (`cm_control` `"n"`, `ready` `"relearns"`), and the
+>    POSIX `<pthread.h>` include (Win32 uses the F1-set kernel32
+>    thread APIs — no new imports).
+> 2. `docs/RTSP.md` §15, this file, `PROJECT-STATE.md`.
+>
+> ## Verification (round XXVIII, sandbox)
+> native 13 suites PASS (counts unchanged: knsock 98, knrtsp 150, kncm
+> 148 — the delta is knvstd glue) · cross x64+i686 `-Werror` PASS incl.
+> the paranoid knvstd legs (host+x64+i686, `-Wunused-but-set-variable`
+> `-Wformat-truncation=2`) · sandbox_session_e2e **43/43** (keeps its
+> own sequential pump = the independent wire-shape implementation; the
+> thread scheduling is Win32-target territory — POSIX session mode
+> refuses at the TLS gate) · CMake fresh both backends 0 warnings +
+> ctest **15/15 ×2** · T10 POSIX dry ALL PASS **62**.
+> **Target expectations:** next T10 → ALL PASS **72**, zero warnings.
+> Then **R7 run 10**: PLAY 200 → `natt_keepalive.sent` + real Mjolnir
+> SRTP in the summary (R32's final stage-2 gate + the R34 firewall
+> answer); PLAY still 455 with `"thread":1` + rich ice counters → the
+> DTLS identity (D-s1) becomes the prime suspect and stage-3 R3 becomes
+> the prerequisite for PLAY.
+
+---
+
+# Round XXVII delta, rev 17 (R7 run 8: the 503 body speaks — an app-level session skeleton with sessionControlInfo.ip:null; the T10-r20 warning fixed + gated permanently; control-node re-learning; --session-keep)
 
 > **Rev 17 supersedes rev 1-16.** Canonical state: `PROJECT-STATE.md`.
 > Design record: **`docs/RTSP.md` §14** (run 8 + this round), §13 (the
