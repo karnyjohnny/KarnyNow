@@ -2189,6 +2189,139 @@ static void sess_rtsp_detail(const char *step, const kn_rtsp_client *rtc,
            wsc->frames_in_binary);
     fflush(stdout);
 }
+
+/* ---- round XXV: the pre-PLAY ICE/NATT pump (deviation D-s2) ----
+ * R7 run-6 measurement: OPTIONS/DESCRIBE/SETUP/ANNOUNCE all 200 on the
+ * real rig, PLAY rejected with 455 "Method Not Valid in This State" —
+ * with ZERO UDP sent before it. The reference spawns its bundle receiver
+ * thread BETWEEN announce() and finish()/PLAY (lib.rs:894→937→1117) and
+ * that thread's first loop iteration fires immediately (nvst.rs:7438
+ * pre-arms last_hole_punch): 3× STUN binding request + 1× NATT hole-
+ * punch ping per 20 ms tick (PING_INTERVAL_BEFORE_CONNECTION :242, the
+ * burst :7842-7900) at bundle_peer() = the CloudMatch bundle peer else
+ * the SETUP video peer (:1880), while answering the rig's binding
+ * requests (:5151-5172). This pump is the SEQUENTIAL form of that burst
+ * (bounded budget, called before PLAY and re-run between 455 retries).
+ * Full ICE/DTLS stays the stage-3 R3 spike; this is exactly the hole-
+ * punch traffic that gates the rig's PLAY state machine. */
+typedef struct {
+    unsigned stun_sent, natt_sent, req_in, answered, ok_in, invalid_in,
+             send_errors;
+    uint64_t pump_ms;
+} sess_ice_stats;
+
+static void sess_ice_pump(kn_sock_udp *sock, uint32_t dest_ip,
+                          uint16_t dest_port, const char *remote_ufrag,
+                          const char *remote_pwd, const char *local_ufrag,
+                          const char *local_pwd, const char *natt_payload,
+                          uint8_t *rx, size_t rxsz, uint32_t budget_ms,
+                          sess_ice_stats *st)
+{
+    uint64_t t0 = kn_sock_now_ms();
+    uint64_t t_end = t0 + budget_ms;
+    uint64_t last_burst = t0 - 20u;            /* fire at once (:7438) */
+    while (kn_sock_now_ms() < t_end && !g_knv_stop) {
+        uint8_t tx[KN_SOCK_STUN_MAX_PKT];
+        uint8_t tid[12];
+        char uname[320];
+        size_t plen;
+        int i, n;
+        if (kn_sock_now_ms() - last_burst >= 20u) {
+            snprintf(uname, sizeof uname, "%s:%s", remote_ufrag,
+                     local_ufrag);
+            for (i = 0; i < 3; ++i) {          /* the ICE burst (:7848) */
+                if (kn_ws_rand(tid, sizeof tid) != 0) break;
+                if (kn_sock_stun_build(tx, sizeof tx, &plen,
+                                       KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                       (const uint8_t *)remote_pwd,
+                                       strlen(remote_pwd),
+                                       KN_SOCK_STUN_ATTR_USERNAME,
+                                       (const uint8_t *)uname,
+                                       strlen(uname)) != KN_SOCK_OK)
+                    continue;
+                if (kn_sock_udp_sendto(sock, dest_ip, dest_port, tx, plen)
+                    == KN_SOCK_OK)
+                    st->stun_sent++;
+                else
+                    st->send_errors++;
+            }
+            /* the NATT hole-punch ping (:5033-5050, :7868-7890) */
+            snprintf(uname, sizeof uname, "%s:%s", natt_payload,
+                     local_ufrag);
+            if (kn_ws_rand(tid, sizeof tid) == 0 &&
+                kn_sock_stun_build(tx, sizeof tx, &plen,
+                                   KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                   (const uint8_t *)remote_pwd,
+                                   strlen(remote_pwd),
+                                   KN_SOCK_STUN_ATTR_USERNAME,
+                                   (const uint8_t *)uname,
+                                   strlen(uname)) == KN_SOCK_OK) {
+                if (kn_sock_udp_sendto(sock, dest_ip, dest_port, tx, plen)
+                    == KN_SOCK_OK)
+                    st->natt_sent++;
+                else
+                    st->send_errors++;
+            }
+            last_burst = kn_sock_now_ms();
+        }
+        {   /* drain inbound: answer the rig's binding requests, count
+             * its binding successes (handle_stun_datagram :5151-5172) */
+            size_t rlen = 0, ulen = 0;
+            uint16_t mtype = 0, xport = 0;
+            uint32_t xip = 0;
+            uint8_t tid_in[12];
+            char user[320];
+            n = kn_sock_udp_recv(sock, rx, rxsz, 5, &rlen, NULL);
+            if (n != 1) continue;              /* timeout/error: keep pumping */
+            if (!kn_sock_stun_inspect(rx, rlen, &mtype, tid_in, user,
+                                      sizeof user, &ulen, &xip, &xport)) {
+                st->invalid_in++;
+                continue;
+            }
+            if (mtype == KN_SOCK_STUN_BINDING_REQUEST) {
+                char expect[320];
+                st->req_in++;
+                snprintf(expect, sizeof expect, "%s:%s", local_ufrag,
+                         remote_ufrag);
+                if (ulen == strlen(expect) &&
+                    memcmp(user, expect, ulen) == 0 &&
+                    kn_sock_stun_check_integrity(rx, rlen,
+                                                 (const uint8_t *)local_pwd,
+                                                 strlen(local_pwd))) {
+                    /* the reference echoes the request's SOURCE (:5166);
+                     * the socket is CONNECTED to dest for the pump (the
+                     * kernel peer filter), so source == dest is exact
+                     * here, not an approximation */
+                    uint8_t xa[8];
+                    size_t xlen;
+                    (void)xip; (void)xport;
+                    if (kn_sock_stun_xor_addr_v4(dest_ip, dest_port, xa)
+                            == KN_SOCK_OK &&
+                        kn_sock_stun_build(tx, sizeof tx, &xlen,
+                                           KN_SOCK_STUN_BINDING_SUCCESS,
+                                           tid_in,
+                                           (const uint8_t *)local_pwd,
+                                           strlen(local_pwd),
+                                           KN_SOCK_STUN_ATTR_XOR_MAPPED_ADDRESS,
+                                           xa, sizeof xa) == KN_SOCK_OK &&
+                        kn_sock_udp_sendto(sock, dest_ip, dest_port, tx,
+                                           xlen) == KN_SOCK_OK)
+                        st->answered++;
+                }
+            } else if (mtype == KN_SOCK_STUN_BINDING_SUCCESS) {
+                if (kn_sock_stun_check_integrity(rx, rlen,
+                                                 (const uint8_t *)remote_pwd,
+                                                 strlen(remote_pwd)))
+                    st->ok_in++;
+                else
+                    st->invalid_in++;
+            } else {
+                st->invalid_in++;
+            }
+        }
+    }
+    st->pump_ms += kn_sock_now_ms() - t0;
+}
 static void sess_sleep(uint32_t ms, void *c)
 {
     (void)c;
@@ -2349,6 +2482,13 @@ static int run_session(const char *token, const char *device_id,
     const char *poll_src;
     uint16_t poll_port = 443;
     unsigned poll_fails = 0;            /* consecutive failed poll rounds */
+    /* round XXV: the pre-PLAY ICE burst state (see sess_ice_pump) */
+    char ice_remote_ufrag[288];         /* the resolved ladder output */
+    char ice_natt[288];                 /* NATT payload: bundle user | PING */
+    uint32_t ice_dest_ip = 0, vid_peer_ip = 0;
+    uint16_t ice_dest_port = 0, vid_peer_port = 0;
+    int ice_enabled = 0, ice_reconnect = 0, play_attempts = 0;
+    sess_ice_stats ice_st;
     char ufrag[24], pwd[32], fp[128];
     char key_hex[65], salt_hex[25];
     uint8_t key_bin[32], salt_bin[14];
@@ -2870,17 +3010,118 @@ static int run_session(const char *token, const char *device_id,
             sess_rtsp_detail("ANNOUNCE", &rtc, &wsc);
             goto teardown_sock;
         }
-        if (!desc.disable_play) {
-            rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint, ah, 4,
-                                 NULL, 0, 0, &resp);
-            printf("{\"mode\":\"session\",\"event\":\"rtsp\",\"step\":\"PLAY\","
-                   "\"rc\":%d,\"status\":%d}\n", rc,
-                   rc == KN_RTSP_OK ? resp.status : 0);
-            fflush(stdout);
-            if (rc != KN_RTSP_OK || resp.status != 200) {
-                sess_rtsp_detail("PLAY", &rtc, &wsc);
-                goto teardown_sock;
+        /* ---- round XXV: pre-PLAY ICE burst (D-s2) ----
+         * Credentials + destination exactly per the reference's handoff
+         * (nvst_rtsp.rs:1244-1276, nvst.rs:1729-1746): the credential
+         * gate is pingVersion==6 or a remote DTLS fingerprint; ping
+         * version 6 WITHOUT a SETUP x-nv-ping-payload is a hard
+         * missing-ice-credentials error there (:1248-1253) — deviation
+         * D-s3: we skip the pump honestly and still try PLAY (bring-up
+         * maximizes the measurement). Destination = the CloudMatch
+         * bundle peer else the SETUP video peer (bundle_peer() :1880).
+         * Evidence line carries LENGTHS only, never values (§7). */
+        memset(&ice_st, 0, sizeof ice_st);
+        {
+            char bundle_user[288], dtxt[24];
+            int have_bu = kn_rtsp_bundle_natt_username(&desc, bundle_user,
+                                                       sizeof bundle_user);
+            const char *payload = setup.have_ping_payload
+                                      ? setup.ping_payload : NULL;
+            const char *dest_text = sess.have_media ? sess.media_ip
+                                                    : setup.peer_ip;
+            uint16_t dest_port = sess.have_media ? sess.media_port
+                                                 : setup.peer_port;
+            int creds_ok = (setup.ping_version == 6 || desc.remote_fp[0]);
+            if (setup.ping_version == 6 && !payload)
+                creds_ok = 0;              /* :1248-1253 (D-s3: skip) */
+            if (creds_ok && dest_port &&
+                kn_sock_ipv4_parse(dest_text, &ice_dest_ip) == 0 &&
+                desc.remote_password[0] &&
+                kn_rtsp_resolve_remote_ufrag(payload, &desc,
+                                             have_bu ? bundle_user : NULL,
+                                             setup.ping_version,
+                                             ice_remote_ufrag,
+                                             sizeof ice_remote_ufrag)) {
+                ice_dest_port = dest_port;
+                snprintf(ice_natt, sizeof ice_natt, "%s",
+                         have_bu ? bundle_user : "PING");  /* :7398-7400 */
+                ice_enabled = 1;
             }
+            printf("{\"mode\":\"session\",\"event\":\"ice_creds\","
+                   "\"enabled\":%d,\"ping_ver\":%u,\"dest\":\"%.15s:%u\","
+                   "\"remote_ufrag_len\":%d,\"bundle_user_len\":%d,"
+                   "\"natt_len\":%d,\"setup_payload_len\":%d,"
+                   "\"remote_pw\":%d,\"remote_fp\":%d}\n",
+                   ice_enabled, (unsigned)setup.ping_version,
+                   ice_enabled ? kn_sock_ipv4_text(ice_dest_ip, dtxt) : "",
+                   (unsigned)ice_dest_port,
+                   ice_enabled ? (int)strlen(ice_remote_ufrag) : 0,
+                   have_bu ? (int)strlen(bundle_user) : 0,
+                   ice_enabled ? (int)strlen(ice_natt) : 0,
+                   setup.have_ping_payload
+                       ? (int)strlen(setup.ping_payload) : 0,
+                   desc.remote_password[0] ? 1 : 0,
+                   desc.remote_fp[0] ? 1 : 0);
+            fflush(stdout);
+        }
+        if (ice_enabled &&
+            (sock.peer_addr != ice_dest_ip ||
+             sock.peer_port != ice_dest_port)) {
+            /* pump towards the bundle peer, then restore the video peer
+             * for the media loop (kn_sock_udp_connect is re-connectable) */
+            vid_peer_ip = sock.peer_addr;
+            vid_peer_port = sock.peer_port;
+            if (kn_sock_udp_connect(&sock, ice_dest_ip, ice_dest_port)
+                == KN_SOCK_OK)
+                ice_reconnect = 1;
+        }
+        if (ice_enabled)
+            sess_ice_pump(&sock, ice_dest_ip, ice_dest_port,
+                          ice_remote_ufrag, desc.remote_password, ufrag,
+                          pwd, ice_natt, pkt, sizeof pkt, 400u, &ice_st);
+        if (!desc.disable_play) {
+            for (play_attempts = 1; play_attempts <= 3; ++play_attempts) {
+                rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint,
+                                     ah, 4, NULL, 0, 0, &resp);
+                printf("{\"mode\":\"session\",\"event\":\"rtsp\","
+                       "\"step\":\"PLAY\",\"rc\":%d,\"status\":%d,"
+                       "\"attempt\":%d}\n", rc,
+                       rc == KN_RTSP_OK ? resp.status : 0, play_attempts);
+                fflush(stdout);
+                if (rc != KN_RTSP_OK || resp.status == 200) break;
+                /* 455 = "Method Not Valid in This State" — the rig had
+                 * not seen our hole-punch burst (run 6); pump again and
+                 * retry (bounded; deviation D-s2 — the reference is
+                 * concurrent and needs no retry) */
+                if (resp.status != 455 || !ice_enabled ||
+                    play_attempts == 3)
+                    break;
+                sess_ice_pump(&sock, ice_dest_ip, ice_dest_port,
+                              ice_remote_ufrag, desc.remote_password,
+                              ufrag, pwd, ice_natt, pkt, sizeof pkt,
+                              600u, &ice_st);
+                sess_sleep(200u, NULL);
+            }
+        }
+        if (ice_reconnect) {
+            (void)kn_sock_udp_connect(&sock, vid_peer_ip, vid_peer_port);
+            ice_reconnect = 0;
+        }
+        if (ice_enabled || play_attempts > 1) {
+            printf("{\"mode\":\"session\",\"event\":\"ice_preplay\","
+                   "\"stun_sent\":%u,\"natt_sent\":%u,\"req_in\":%u,"
+                   "\"answered\":%u,\"ok_in\":%u,\"invalid_in\":%u,"
+                   "\"send_errors\":%u,\"pump_ms\":%llu,"
+                   "\"play_attempts\":%d}\n",
+                   ice_st.stun_sent, ice_st.natt_sent, ice_st.req_in,
+                   ice_st.answered, ice_st.ok_in, ice_st.invalid_in,
+                   ice_st.send_errors,
+                   (unsigned long long)ice_st.pump_ms, play_attempts);
+            fflush(stdout);
+        }
+        if (!desc.disable_play && (rc != KN_RTSP_OK || resp.status != 200)) {
+            sess_rtsp_detail("PLAY", &rtc, &wsc);
+            goto teardown_sock;
         }
         /* the handoff line — shapes and LENGTHS only, never key material
          * (docs/RTSP.md §4 logging rule) */

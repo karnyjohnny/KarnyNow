@@ -454,6 +454,14 @@ int kn_rtsp_sdp_attribute(const char *sdp, const char *name,
     char p1[192], p2[192];
     const char *seg_end, *semi, *seg_lines_end, *ls, *le;
     int n1, n2, pi;
+    int found = -1;      /* round XXV: the reference FLATTENS every ";;"
+                          * segment of the first "||" part and keeps the
+                          * LAST match (.last(), nvst_rtsp.rs sdp_attribute)
+                          * — a later segment OVERRIDES an earlier one
+                          * (its own test :3861-3862 pins exactly that:
+                          * plain 47998 then ;;47999 -> 47999). The first
+                          * draft returned the FIRST match; the R7-run-6
+                          * ladder fixtures caught it. */
 
     if (!sdp || !name || !out || outsz == 0) return KN_RTSP_ERR_ARGS;
     out[0] = '\0';
@@ -490,10 +498,15 @@ int kn_rtsp_sdp_attribute(const char *sdp, const char *name,
                     while (v < ve && (*v == ' ' || *v == '\t')) v++;
                     vl = (size_t)(ve - v);
                     if (vl == 0) break;               /* empty = not found */
-                    if (vl + 1 > outsz) break;        /* honest refusal */
-                    memcpy(out, v, vl);
-                    out[vl] = '\0';
-                    return KN_RTSP_OK;
+                    if (vl + 1 <= outsz) {            /* last fitting match
+                                                         wins; an overlong
+                                                         one is honestly
+                                                         skipped */
+                        memcpy(out, v, vl);
+                        out[vl] = '\0';
+                        found = KN_RTSP_OK;
+                    }
+                    break;
                 }
             }
         }
@@ -501,7 +514,7 @@ int kn_rtsp_sdp_attribute(const char *sdp, const char *name,
         semi = seg_lines_end + 2;                     /* skip the ";;" */
         if (semi >= seg_end) break;
     }
-    return -1;
+    return found;
 }
 
 int kn_rtsp_media_control(const char *sdp, const char *kind,
@@ -827,6 +840,19 @@ int kn_rtsp_extract_describe(const kn_rtsp_response *resp,
         (void)kn_rtsp_sdp_attribute(resp->body, "general.iceUsernameFragment",
                                     out->remote_ufrag,
                                     sizeof out->remote_ufrag);
+    /* round XXV (the pre-PLAY ICE ladder): the V1 ufrag separately
+     * (bundle_natt_username prefers V1 over V2, nvst_rtsp.rs:1328-1329)
+     * and general.serverBundlePort (:1330-1333) */
+    (void)kn_rtsp_sdp_attribute(resp->body, "general.iceUsernameFragment",
+                                out->ufrag_v1, sizeof out->ufrag_v1);
+    if (kn_rtsp_sdp_attribute(resp->body, "general.serverBundlePort", v,
+                              sizeof v) == KN_RTSP_OK) {
+        unsigned long bp = strtoul(v, NULL, 10);
+        if (bp >= 1 && bp <= 65535) {
+            out->server_bundle_port = (uint16_t)bp;
+            out->have_server_bundle_port = 1;
+        }
+    }
     if (kn_rtsp_sdp_attribute(resp->body, "general.icePasswordV2",
                               out->remote_password,
                               sizeof out->remote_password) != KN_RTSP_OK)
@@ -846,6 +872,121 @@ int kn_rtsp_extract_describe(const kn_rtsp_response *resp,
         == KN_RTSP_OK)
         out->have_runtime_key = 1;
     return ok ? KN_RTSP_OK : -1;
+}
+
+/* ------------------------------------------------- the pre-PLAY ICE ladder
+ * Round XXV — byte-faithful ports of nvst_rtsp.rs's remote-username
+ * resolution (the R7 run-6 PLAY-455 fix needs the SAME USERNAME the
+ * reference's bundle receiver would send):
+ *   increment_hex          (:2305-2327)
+ *   bundle_natt_username   (:1327-1345 — "{V1-or-V2 ufrag}{serverBundlePort}")
+ *   resolve_remote_ufrag   (:2329-2352 — the three-step ladder)
+ */
+
+/* bounded string copy — snprintf("%s") with a parameter-sized
+ * destination is what -Wformat-truncation cannot prove (the kn_cm.c
+ * conn_signaling precedent) */
+static int ufrag_copy(const char *src, char *out, size_t outsz)
+{
+    size_t n;
+    if (!src || !out) return 0;
+    n = strlen(src);
+    if (n == 0 || n + 1 > outsz) return 0;
+    memcpy(out, src, n);
+    out[n] = '\0';
+    return 1;
+}
+
+int kn_rtsp_increment_hex(const char *in, char *out, size_t outsz)
+{
+    size_t n, i;
+    int carry = 1;
+    if (!in || !out || !in[0]) return 0;
+    n = strlen(in);
+    for (i = 0; i < n; ++i) {
+        char c = in[i];
+        int ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                 (c >= 'A' && c <= 'F');
+        if (!ok) return 0;
+    }
+    if (n + 2 > outsz) return 0;
+    memcpy(out, in, n);
+    out[n] = '\0';
+    for (i = n; i-- > 0 && carry;) {
+        char c = out[i];
+        int d = (c >= '0' && c <= '9') ? c - '0'
+              : ((c | 0x20) - 'a' + 10);
+        if (d == 15) {
+            out[i] = '0';
+        } else {
+            out[i] = "0123456789abcdef"[d + 1];   /* lowercase (:2320) */
+            carry = 0;
+        }
+    }
+    if (carry) {                        /* all-F: prepend '1' (:2323) */
+        memmove(out + 1, out, n + 1);
+        out[0] = '1';
+    }
+    return 1;
+}
+
+int kn_rtsp_bundle_natt_username(const kn_rtsp_describe *d, char *out,
+                                 size_t outsz)
+{
+    const char *ufrag;
+    char port_text[8];
+    size_t ulen, plen, i;
+    int n;
+    if (!d || !out || outsz == 0) return 0;
+    /* V1 or_else V2 (:1328-1329) — remote_ufrag is V2-else-V1, ufrag_v1
+     * is the pure V1; preferring ufrag_v1 reproduces the or_else order */
+    ufrag = d->ufrag_v1[0] ? d->ufrag_v1 : d->remote_ufrag;
+    if (!ufrag[0] || !d->have_server_bundle_port) return 0;
+    n = snprintf(port_text, sizeof port_text, "%u",
+                 (unsigned)d->server_bundle_port);
+    if (n < 0 || (size_t)n >= sizeof port_text) return 0;
+    ulen = strlen(ufrag);
+    plen = strlen(port_text);
+    /* the reference's bounds: non-empty ufrag, ufrag+port <= 256 (:1336) */
+    if (ulen == 0 || ulen + plen > 256 || ulen + plen + 1 > outsz) return 0;
+    for (i = 0; i < ulen; ++i)          /* ascii graphic, no ':' (:1338) */
+        if (ufrag[i] < 0x21 || ufrag[i] > 0x7E || ufrag[i] == ':') return 0;
+    memcpy(out, ufrag, ulen);
+    memcpy(out + ulen, port_text, plen);
+    out[ulen + plen] = '\0';
+    return 1;
+}
+
+int kn_rtsp_resolve_remote_ufrag(const char *setup_ping_payload,
+                                 const kn_rtsp_describe *d,
+                                 const char *bundle_username,
+                                 uint8_t ping_version,
+                                 char *out, size_t outsz)
+{
+    if (!d || !out || outsz == 0) return 0;
+    /* 1. pingVersion 6 + the bundle username wins (:2310-2315) */
+    if (ping_version == 6 && bundle_username && bundle_username[0])
+        return ufrag_copy(bundle_username, out, outsz);
+    /* 2. the SETUP ping payload: incremented when pure hex, else itself
+     *    for "PING" (case-insensitive) or any pingVersion-6 payload
+     *    (:2316-2323) */
+    if (setup_ping_payload && setup_ping_payload[0]) {
+        if (kn_rtsp_increment_hex(setup_ping_payload, out, outsz)) return 1;
+        {
+            static const char ping[] = "PING";
+            size_t i, pl = strlen(setup_ping_payload);
+            int eq = (pl == 4);
+            for (i = 0; eq && i < 4; ++i)
+                if ((setup_ping_payload[i] | 0x20) != (ping[i] | 0x20))
+                    eq = 0;
+            if (eq || ping_version == 6)
+                return ufrag_copy(setup_ping_payload, out, outsz);
+        }
+    }
+    /* 3. the DESCRIBE ufrag (:2324) */
+    if (d->remote_ufrag[0])
+        return ufrag_copy(d->remote_ufrag, out, outsz);
+    return 0;
 }
 
 /* ------------------------------------------------------- SETUP sweep */

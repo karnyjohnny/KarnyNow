@@ -73,7 +73,9 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS streamer/src/kn_audio.c streamer/src/knlog.c \
         streamer/src/knring.c streamer/tests/test_knaudio.c \
         $LDFLAGS -o build/cross/test_knaudio_$arch.exe -lole32
-    $CC $CFLAGS streamer/src/kn_sock.c streamer/tests/test_knsock.c \
+    $CC $CFLAGS streamer/src/kn_sock.c streamer/src/kn_sha1.c \
+        third_party/crypto-algorithms-sha1/sha1.c \
+        streamer/tests/test_knsock.c \
         $LDFLAGS -o build/cross/test_knsock_$arch.exe -lws2_32
     $CC $CFLAGS streamer/src/kn_ws.c streamer/src/kn_sha1.c \
         third_party/crypto-algorithms-sha1/sha1.c \

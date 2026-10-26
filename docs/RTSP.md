@@ -646,3 +646,97 @@ all exercised end-to-end).
 already implemented — docs/RTSP.md §2), ANNOUNCE with the D-s1
 placeholder ICE/DTLS identity (its first real verdict), PLAY, and the
 media loop. If ANY step fails, the rtsp_detail line names the stage.
+
+## 12. Round XXV — R7 run 6 (FIRST READY→RTSP CHAIN: DESCRIBE/SETUP/ANNOUNCE 200 on the real rig; PLAY 455 root-caused to the missing pre-PLAY hole-punch burst)
+
+**What was measured (2026-10-25, the round-XXIV tree on the target):**
+run 6 walked the whole signaling chain against the live cloud:
+`cm_control` switched to np-waw-01 (source sessionControlInfo), the
+queue ran 63→65 (static again — see below) → `seat_step:3` → `status:2
+ready` → `rtsps://80-84-170-155.cloudmatchbeta.nvidiagrid.net:322` →
+WS handshake → **OPTIONS 200 → DESCRIBE 200 (the round-XXIV scratch fix
+confirmed live) → SETUP 200 (video peer 80.84.170.155:5004, first
+sweep round, no bundle fallback) → ANNOUNCE 200 (4164-byte negotiated
+SDP)** → **PLAY 455** ("Method Not Valid in This State", rc:0 — an
+honest RTSP rejection, `rtsp_detail` showed a healthy WS layer:
+ws_err:0, ws_close:-1, 5 text frames, 0 binary). The user then saw the
+session as RESUMABLE in the GFN web UI ("Endfield [WZNÓW]") and played
+it in the browser — the session was real and alive; only OUR PLAY was
+refused. Side evidence: R23 RESUME is a real, working cloud path.
+**Queue-position note (run 6 = run 5 pattern):** the native queue again
+published step transitions rather than per-poll position ticks (63→65
+then static, then seat_step 3 → ready). Two runs now agree: this is the
+server's native-queue behaviour, not a client defect.
+
+**Root cause (PLAY 455):** the reference does NOT send PLAY straight
+after ANNOUNCE. Its engine: `prepare_on_endpoint` (OPTIONS/DESCRIBE/
+SETUP) → `prepared.announce()` (lib.rs:894) → **spawn the media
+receivers (:937 bundle / :990 mjolnir)** → only then `prepared.finish()`
+= PLAY (:1117). The spawned bundle receiver fires its hole-punch burst
+IMMEDIATELY (`last_hole_punch` pre-armed at spawn, nvst.rs:7438): every
+20 ms (PING_INTERVAL_BEFORE_CONNECTION :242) it sends **3× STUN binding
+request + 1× NATT hole-punch ping** (:7842-7900) to `bundle_peer()` =
+the CloudMatch bundle peer else the SETUP video peer (:1880), and
+answers the rig's binding requests (:5151-5172). Our client sent PLAY
+with zero UDP egress — the rig's state machine had not seen the
+client's transport come alive → 455.
+
+**Fix (round XXV) — the sequential pre-PLAY pump (deviation D-s2):**
+* `kn_sock` grew the STUN toolkit: `kn_sock_crc32` (IEEE reflected),
+  `kn_sock_stun_build` (byte-exact port of build_authenticated_stun_
+  packet :4977-5012 — USERNAME/XOR-MAPPED + MESSAGE-INTEGRITY HMAC-SHA1
+  with the RFC 5389 §10.5 length adjustment + FINGERPRINT CRC^0x5354
+  554E), `kn_sock_stun_xor_addr_v4`, `kn_sock_stun_inspect` (the
+  handle_stun_datagram gate: magic, exact length, MANDATORY valid
+  fingerprint :5094-5104/:5138) and `kn_sock_stun_check_integrity`
+  (:139-160, constant-time compare). KAT'd against goldens computed by
+  an independent Python implementation (hmac/hashlib/zlib) + RFC 2202.
+* `kn_rtsp` grew the credential ladder (fixtures transcribed from the
+  reference's own tests :3860-3920): `kn_rtsp_increment_hex` (:2305),
+  `kn_rtsp_bundle_natt_username` ("{V1-or-V2 ufrag}{serverBundlePort}"
+  :1327-1345), `kn_rtsp_resolve_remote_ufrag` (the three-step ladder
+  :2329-2352); `kn_rtsp_describe` extracts `ufrag_v1` +
+  `server_bundle_port`.
+* **A pre-existing kn_rtsp bug the ladder fixtures caught:**
+  `kn_rtsp_sdp_attribute` returned the FIRST match across ";;" segments;
+  the reference flattens ALL segments and keeps the LAST (.last()) — a
+  later segment OVERRIDES an earlier one (its test :3861-62 pins
+  plain-47998-then-;;47999 → 47999). Fixed + pinned by a dedicated
+  check. (media_control legitimately stays first-segment-only —
+  `.split(";;").next()`, :1494-1501.)
+* `knvstd` phase C/D: after ANNOUNCE — `ice_creds` evidence line
+  (LENGTHS only, §7), the credential gate (pingVersion==6 or a remote
+  fingerprint, nvst.rs:1729; ping-6-without-SETUP-payload = the
+  reference's missing-ice-credentials error :1248-1253 → deviation
+  **D-s3**: we skip the pump honestly and still try PLAY), the
+  destination switch (re-connect when the bundle peer differs from the
+  video peer, restore after), the 400 ms pump (20 ms bursts, answers
+  the rig's requests, counts its successes), then PLAY with **455
+  retry** (up to 3 attempts, a 600 ms pump before each retry) and the
+  `ice_preplay` counters line. The PLAY event carries `attempt`.
+* The rig + E2E now mirror the run-6 state machine: the rig's media
+  socket runs an INDEPENDENT Python STUN validator/responder (username
+  "a1b24801:{announced ufrag}" / "PING:{...}", MI keyed RIGPASSWORD),
+  and the rig GATES PLAY: the first PLAY is always 455, later ones need
+  ≥1 validated hole-punch request. sandbox_session_e2e pumps, asserts
+  the ladder ("a1b24800"→"a1b24801"), the 455-then-200 sequence, and
+  the rig's counters (`ice_req:12, ice_resp:12, play_455:1, plays:1`):
+  **36 → 43 checks** over real loopback sockets.
+
+**Not covered yet (honest):** whether the REAL rig's 455 gate is
+exactly "saw a hole-punch packet" vs "saw a VALIDATED ICE binding" vs
+something DTLS-adjacent is run-7's measurement — the pump sends both
+the ICE burst (USERNAME remote:local, keyed with the DESCRIBE password)
+and the NATT ping (USERNAME payload:local), the two shapes the
+reference sends pre-PLAY. If run 7 still 455s, `ice_preplay` (did the
+rig answer? `ok_in`) + `ice_creds` (which ladder leg fired) localize
+it. The post-PLAY STUN/RTCP/SCTP plane and the real DTLS identity stay
+stage 3 (R3); phases B-E aborts still leave the session resumable
+(reference parity: it retains allocations for RESUME — the user's
+browser-resume of run 6 is the proof that this is the right default).
+
+**Next measurement = R7 run 7:** expect `ice_creds enabled:1`,
+`ice_preplay` with stun_sent/natt_sent > 0 (ok_in > 0 if the rig
+answers), PLAY attempt 1 possibly 455 → attempt 2 200, then the handoff
+line + the media loop (first real Mjolnir SRTP → kn_rx → AUs — R32's
+final stage-2 gate).

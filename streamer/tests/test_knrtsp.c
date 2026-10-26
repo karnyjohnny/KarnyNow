@@ -291,6 +291,17 @@ static void test_sdp(void)
                                     sizeof v) == KN_RTSP_OK,
               "attribute before ;; still found");
     }
+    {   /* round XXV: the LAST match across ALL ";;" segments wins — the
+         * reference flattens the segments and takes .last(); its own
+         * fixture (:3861) pins plain-then-;; -> the ;; value */
+        const char *quirk2 =
+            "a=x-nv-general.pingVersion:5\r\n"
+            ";;a=x-nv-general.pingVersion:6\r\n";
+        CHECK(kn_rtsp_sdp_attribute(quirk2, "general.pingVersion", v,
+                                    sizeof v) == KN_RTSP_OK &&
+              strcmp(v, "6") == 0,
+              ";; segments: the LAST match wins (.last() semantics)");
+    }
     /* runtime key + salt */
     CHECK(kn_rtsp_runtime_key(k_describe_sdp, key, &id) == KN_RTSP_OK &&
           id == 7, "runtime key + id extracted");
@@ -871,6 +882,111 @@ static void test_errors(void)
     }
 }
 
+/* ---------------------------------------- the pre-PLAY ICE ladder (XXV)
+ * Fixtures transcribed from the reference's OWN tests (nvst_rtsp.rs
+ * :3860-3920) — increment_hex, bundle_natt_username and the
+ * resolve_remote_ufrag ladder, plus the new describe fields. */
+static void test_ice_ladder(void)
+{
+    kn_rtsp_describe d;
+    char out[288], bund[288];
+
+    printf("-- pre-PLAY ICE ladder (round XXV) --\n");
+    CHECK(kn_rtsp_increment_hex("a1b247998", out, sizeof out) == 1 &&
+          strcmp(out, "a1b247999") == 0, "increment_hex basic (:2305)");
+    CHECK(kn_rtsp_increment_hex("FF", out, sizeof out) == 1 &&
+          strcmp(out, "100") == 0,
+          "increment_hex all-F carry: lowercase + prepend 1 (:2317-2324)");
+    CHECK(kn_rtsp_increment_hex("a1b2480F", out, sizeof out) == 1 &&
+          strcmp(out, "a1b24810") == 0, "increment_hex in-place F->0 carry");
+    CHECK(kn_rtsp_increment_hex("zz", out, sizeof out) == 0 &&
+          kn_rtsp_increment_hex("", out, sizeof out) == 0,
+          "increment_hex rejects non-hex/empty (:2306)");
+
+    memset(&d, 0, sizeof d);
+    snprintf(d.ufrag_v1, sizeof d.ufrag_v1, "server");
+    d.server_bundle_port = 47999; d.have_server_bundle_port = 1;
+    CHECK(kn_rtsp_bundle_natt_username(&d, bund, sizeof bund) == 1 &&
+          strcmp(bund, "server47999") == 0,
+          "bundle username = V1 ufrag + decimal port (:3862)");
+    memset(&d, 0, sizeof d);
+    snprintf(d.remote_ufrag, sizeof d.remote_ufrag, "next");  /* V2 only */
+    d.server_bundle_port = 5004; d.have_server_bundle_port = 1;
+    CHECK(kn_rtsp_bundle_natt_username(&d, bund, sizeof bund) == 1 &&
+          strcmp(bund, "next5004") == 0, "V2 fallback (:3867)");
+    memset(&d, 0, sizeof d);
+    snprintf(d.ufrag_v1, sizeof d.ufrag_v1, "server");
+    CHECK(kn_rtsp_bundle_natt_username(&d, bund, sizeof bund) == 0,
+          "no serverBundlePort -> none (:3870)");
+    memset(&d, 0, sizeof d);
+    d.server_bundle_port = 47999; d.have_server_bundle_port = 1;
+    CHECK(kn_rtsp_bundle_natt_username(&d, bund, sizeof bund) == 0,
+          "no ufrag -> none");
+    memset(&d, 0, sizeof d);
+    snprintf(d.ufrag_v1, sizeof d.ufrag_v1, "bad:value");
+    d.server_bundle_port = 47999; d.have_server_bundle_port = 1;
+    CHECK(kn_rtsp_bundle_natt_username(&d, bund, sizeof bund) == 0,
+          "colon in the ufrag rejected (:1338)");
+
+    memset(&d, 0, sizeof d);
+    snprintf(d.remote_ufrag, sizeof d.remote_ufrag, "a1b2");
+    CHECK(kn_rtsp_resolve_remote_ufrag("a1b247998", &d, "a1b248001", 6,
+                                       out, sizeof out) == 1 &&
+          strcmp(out, "a1b248001") == 0,
+          "ladder 1: pingVersion 6 + bundle username wins (:3895)");
+    CHECK(kn_rtsp_resolve_remote_ufrag("a1b247998", &d, NULL, 6,
+                                       out, sizeof out) == 1 &&
+          strcmp(out, "a1b247999") == 0,
+          "ladder 2: hex SETUP payload increments (:3908)");
+    CHECK(kn_rtsp_resolve_remote_ufrag(NULL, &d, "a1b248001", 5,
+                                       out, sizeof out) == 1 &&
+          strcmp(out, "a1b2") == 0,
+          "ladder 3: no payload -> the described ufrag (:3916)");
+    CHECK(kn_rtsp_resolve_remote_ufrag("PING", &d, NULL, 5,
+                                       out, sizeof out) == 1 &&
+          strcmp(out, "PING") == 0, "\"PING\" payload passes through");
+    CHECK(kn_rtsp_resolve_remote_ufrag("xyzzy", &d, NULL, 6,
+                                       out, sizeof out) == 1 &&
+          strcmp(out, "xyzzy") == 0,
+          "non-hex payload under pingVersion 6 passes through (:2321)");
+    CHECK(kn_rtsp_resolve_remote_ufrag("xyzzy", &d, NULL, 5,
+                                       out, sizeof out) == 1 &&
+          strcmp(out, "a1b2") == 0,
+          "non-hex non-PING payload falls to described");
+
+    {   /* the new describe fields, incl. the ";;" quirk source */
+        static const char sdp[] =
+            "v=0\r\n"
+            "a=x-nv-general.iceUsernameFragment:V1FRAG\r\n"
+            "a=x-nv-general.iceUserNameFragmentV2:V2FRAG\r\n"
+            "a=x-nv-general.serverBundlePort:47998\r\n"
+            "m=video 5004 RTP/AVP 96\r\n"
+            "a=control:streamid=video/0\r\n"
+            ";;a=x-nv-general.serverBundlePort:47999\r\n"
+            "||a=x-nv-general.serverBundlePort:1234\r\n";
+        kn_rtsp_response r;
+        kn_rtsp_describe dd;
+        memset(&r, 0, sizeof r);
+        r.status = 200;
+        r.names[0][0] = 's'; r.names[0][1] = 'e'; r.names[0][2] = 's';
+        r.names[0][3] = 's'; r.names[0][4] = 'i'; r.names[0][5] = 'o';
+        r.names[0][6] = 'n'; r.names[0][7] = '\0';
+        snprintf(r.values[0], sizeof r.values[0], "SESSX");
+        r.hdr_count = 1;
+        r.body = sdp;
+        r.body_len = strlen(sdp);
+        CHECK(kn_rtsp_extract_describe(&r, &dd) == KN_RTSP_OK &&
+              strcmp(dd.ufrag_v1, "V1FRAG") == 0 &&
+              strcmp(dd.remote_ufrag, "V2FRAG") == 0 &&
+              dd.have_server_bundle_port && dd.server_bundle_port == 47999,
+              "extract: V1/V2 ufrags + serverBundlePort (the ;; quirk "
+              "wins, :3861)");
+        CHECK(kn_rtsp_bundle_natt_username(&dd, bund, sizeof bund) == 1 &&
+              strcmp(bund, "V1FRAG47999") == 0,
+              "bundle username from the extracted describe");
+    }
+}
+
 int main(void)
 {
     test_serialize();
@@ -882,6 +998,7 @@ int main(void)
     test_setup();
     test_full_sequence();
     test_big_messages();
+    test_ice_ladder();
     test_teardown_skip();
     test_errors();
     return kn_test_summary("test_knrtsp");

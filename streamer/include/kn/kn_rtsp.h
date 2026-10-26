@@ -186,6 +186,11 @@ typedef struct kn_rtsp_describe {
     char     video_control[KN_RTSP_URI_MAX];
     uint8_t  ping_version;        /* default 6 when absent */
     char     remote_ufrag[128], remote_password[128], remote_fp[192];
+    char     ufrag_v1[128];       /* general.iceUsernameFragment (V1) —
+                                     the bundle_natt_username preference
+                                     (nvst_rtsp.rs:1328-1329, round XXV) */
+    uint16_t server_bundle_port;  /* general.serverBundlePort */
+    int      have_server_bundle_port;
     int      disable_play;        /* general.disablePlay == "1" */
     int      native_bundle;       /* general.nativeRtcOnBundlePort == "1"
                                      (REQUIRED — legacy transport refused) */
@@ -202,6 +207,22 @@ typedef struct kn_rtsp_describe {
  * filled for diagnostics). */
 int kn_rtsp_extract_describe(const kn_rtsp_response *resp,
                              kn_rtsp_describe *out);
+
+/* The pre-PLAY ICE ladder (round XXV — nvst_rtsp.rs:2305-2352, :1327-
+ * 1345): increment_hex adds 1 to a pure-hex string (lowercasing the
+ * touched digit, prepending '1' on an all-F carry); bundle_natt_username
+ * is "{V1-or-V2 ufrag}{serverBundlePort}" (validated: ascii-graphic,
+ * no ':', total <= 256); resolve_remote_ufrag is the three-step ladder
+ * (pingVersion-6 bundle username → incremented/plain SETUP ping payload
+ * → the DESCRIBE ufrag). Each returns 1 on success / 0 otherwise. */
+int kn_rtsp_increment_hex(const char *in, char *out, size_t outsz);
+int kn_rtsp_bundle_natt_username(const kn_rtsp_describe *d, char *out,
+                                 size_t outsz);
+int kn_rtsp_resolve_remote_ufrag(const char *setup_ping_payload,
+                                 const kn_rtsp_describe *d,
+                                 const char *bundle_username,
+                                 uint8_t ping_version,
+                                 char *out, size_t outsz);
 
 /* --------------------------------------------------------- SETUP sweep */
 

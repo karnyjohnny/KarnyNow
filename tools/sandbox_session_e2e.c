@@ -364,7 +364,7 @@ int main(void)
                   "SETUP peer = the rig media port");
             CHECK(setup.bundle_fallback == 0, "primary Transport peer used");
             CHECK(setup.ping_version == 6 && setup.have_ping_payload &&
-                  strcmp(setup.ping_payload, "FAKEPING") == 0,
+                  strcmp(setup.ping_payload, "a1b24800") == 0,
                   "ping version + payload from SETUP");
             CHECK(kn_sock_udp_connect(&udp, lo, setup.peer_port)
                       == KN_SOCK_OK,
@@ -408,9 +408,91 @@ int main(void)
                                      ah, 5, neg, nlen, 0, &resp);
                 CHECK(rc == KN_RTSP_OK && resp.status == 200,
                       "ANNOUNCE 200");
+                /* ---- round XXV: the pre-PLAY ICE/NATT burst ----
+                 * The rig now mirrors the R7 run-6 state machine: the
+                 * first PLAY is answered 455 unconditionally and later
+                 * ones only after it validated a hole-punch request on
+                 * the media socket. The ladder must resolve the remote
+                 * ufrag to increment_hex("a1b24800") = "a1b24801"
+                 * (nvst_rtsp.rs:2316 — no serverBundlePort in the rig
+                 * SDP, so the bundle username leg stays empty and the
+                 * NATT payload falls back to "PING", nvst.rs:7398). */
+                {
+                    char rem_ufrag[64], uname[160];
+                    uint8_t tid[12], tx[KN_SOCK_STUN_MAX_PKT], rxb[2048];
+                    size_t plen, ulen;
+                    uint16_t mtype, xport;
+                    uint32_t xip;
+                    int i, burst, sent = 0, ok_in = 0, n;
+                    CHECK(kn_rtsp_resolve_remote_ufrag(
+                              setup.ping_payload, &desc, NULL,
+                              setup.ping_version, rem_ufrag,
+                              sizeof rem_ufrag) == 1 &&
+                          strcmp(rem_ufrag, "a1b24801") == 0,
+                          "ICE ladder: the hex SETUP payload increments");
+                    for (burst = 0; burst < 3; ++burst) {
+                        snprintf(uname, sizeof uname, "%s:%s", rem_ufrag,
+                                 "LOCALUFRAG");
+                        for (i = 0; i < 3; ++i) {
+                            memset(tid, (uint8_t)(burst * 16 + i + 1),
+                                   sizeof tid);
+                            if (kn_sock_stun_build(
+                                    tx, sizeof tx, &plen,
+                                    KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                    (const uint8_t *)"RIGPASSWORD", 11,
+                                    KN_SOCK_STUN_ATTR_USERNAME,
+                                    (const uint8_t *)uname,
+                                    strlen(uname)) == KN_SOCK_OK &&
+                                kn_sock_udp_sendto(&udp, lo,
+                                                   setup.peer_port, tx,
+                                                   plen) == KN_SOCK_OK)
+                                sent++;
+                        }
+                        snprintf(uname, sizeof uname, "PING:%s",
+                                 "LOCALUFRAG");
+                        memset(tid, (uint8_t)(0x5A + burst), sizeof tid);
+                        if (kn_sock_stun_build(
+                                tx, sizeof tx, &plen,
+                                KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                (const uint8_t *)"RIGPASSWORD", 11,
+                                KN_SOCK_STUN_ATTR_USERNAME,
+                                (const uint8_t *)uname,
+                                strlen(uname)) == KN_SOCK_OK &&
+                            kn_sock_udp_sendto(&udp, lo, setup.peer_port,
+                                               tx, plen) == KN_SOCK_OK)
+                            sent++;
+                        for (i = 0; i < 16; ++i) {
+                            size_t rlen = 0;
+                            ulen = 0; mtype = 0; xport = 0; xip = 0;
+                            n = kn_sock_udp_recv(&udp, rxb, sizeof rxb,
+                                                 25, &rlen, NULL);
+                            if (n != 1) break;
+                            if (!kn_sock_stun_inspect(rxb, rlen, &mtype,
+                                                      tid, uname,
+                                                      sizeof uname,
+                                                      &ulen, &xip,
+                                                      &xport))
+                                continue;
+                            if (mtype == KN_SOCK_STUN_BINDING_SUCCESS &&
+                                kn_sock_stun_check_integrity(
+                                    rxb, rlen,
+                                    (const uint8_t *)"RIGPASSWORD", 11))
+                                ok_in++;
+                        }
+                    }
+                    CHECK(sent == 12, "the burst sent 3x(3 ICE + 1 NATT)");
+                    CHECK(ok_in >= 1,
+                          "the rig answered a binding request and the "
+                          "success passed the integrity check");
+                }
                 rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint,
                                      ah, 4, NULL, 0, 0, &resp);
-                CHECK(rc == KN_RTSP_OK && resp.status == 200, "PLAY 200");
+                CHECK(rc == KN_RTSP_OK && resp.status == 455,
+                      "the rig gates the first PLAY with 455 (run-6)");
+                rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint,
+                                     ah, 4, NULL, 0, 0, &resp);
+                CHECK(rc == KN_RTSP_OK && resp.status == 200,
+                      "PLAY 200 after the hole-punch burst");
                 CHECK(desc.disable_play == 0, "PLAY was required");
 
                 /* ---- the handoff: SRTP material ---- */
@@ -464,6 +546,12 @@ done:
     if (read_ready_line(rigfd, done_line, sizeof done_line) == 0) {
         printf("rig done: %s\n", done_line);
         CHECK(json_long(done_line, "plays") == 1, "rig saw exactly 1 PLAY");
+        CHECK(json_long(done_line, "ice_req") >= 1,
+              "rig validated >=1 hole-punch request (independent STUN)");
+        CHECK(json_long(done_line, "ice_resp") >= 1,
+              "rig answered >=1 binding request");
+        CHECK(json_long(done_line, "play_455") == 1,
+              "rig gated exactly one PLAY with 455");
         CHECK(json_long(done_line, "announce_has_key") == 1,
               "rig saw the runtime key echoed in ANNOUNCE");
     } else {

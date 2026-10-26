@@ -1,4 +1,84 @@
-# INTEGRATION NOTES — Round XXIV delta, rev 14 (R7 run 5: FIRST READY SESSION — the queue fix confirmed live; DESCRIBE died on the 8 KiB per-message scratch → fixed + binary frames + Host:port + rtsp_detail instrumentation)
+# INTEGRATION NOTES — Round XXV delta, rev 15 (R7 run 6: DESCRIBE/SETUP/ANNOUNCE 200 LIVE — PLAY 455 root-caused: the reference's pre-PLAY hole-punch burst was missing → the STUN toolkit + the credential ladder + the pump)
+
+> **Rev 15 supersedes rev 1-14.** Canonical state: `PROJECT-STATE.md`.
+> Design record: **`docs/RTSP.md` §12** (the run-6 measurement + the
+> fix), §11 (run 5), §10 (runs 1-4).
+>
+> **Round XXV headline: run 6 walked the whole live signaling chain —
+> queue → ready → OPTIONS/DESCRIBE/SETUP/ANNOUNCE all 200 on the real
+> rig (the round-XXIV DESCRIBE fix confirmed live; SETUP peered on the
+> first sweep round; ANNOUNCE carried the 4164-byte negotiated SDP with
+> the D-s1 placeholder identity and was ACCEPTED) — and PLAY was
+> rejected 455 "Method Not Valid in This State" with a healthy WS layer
+> (rtsp_detail: ws_err 0, no close, 5 text frames). Root cause: the
+> reference spawns its media receivers BETWEEN announce() and PLAY
+> (lib.rs:894→937→1117) and the bundle thread immediately fires the
+> hole-punch burst (3× STUN binding + 1× NATT ping per 20 ms,
+> nvst.rs:7438/:7842-7900, dest = bundle_peer() :1880) — we sent PLAY
+> with zero UDP egress. Fixed with the sequential pre-PLAY pump (D-s2)
+> + the reference's exact STUN wire shapes + its remote-ufrag ladder.
+> Bonus catch: the ladder fixtures exposed a pre-existing
+> kn_rtsp_sdp_attribute bug (first-match instead of the reference's
+> LAST-match across ";;" segments). The user also proved R23 RESUME is
+> real: run 6's session was left alive and played in the browser.**
+>
+> ## Changed files (round XXV)
+> 1. `streamer/{include/kn,src}/kn_sock.*` — the STUN toolkit: crc32
+>    (IEEE reflected), stun_build (byte-exact port of
+>    build_authenticated_stun_packet :4977-5012 — MI HMAC-SHA1 with the
+>    RFC 5389 §10.5 length adjustment + FINGERPRINT CRC^0x5354554E),
+>    xor_addr_v4, inspect (the :5131-5146 gate — magic/exact-length/
+>    MANDATORY fingerprint), check_integrity (:139-160, const-time).
+>    test_knsock now links kn_sha1 (+ the vendored sha1) — build wiring
+>    updated in both gate scripts.
+> 2. `streamer/{include/kn,src}/kn_rtsp.*` — the ladder: increment_hex
+>    (:2305), bundle_natt_username (:1327), resolve_remote_ufrag
+>    (:2329); describe extracts ufrag_v1 + server_bundle_port; **the
+>    sdp_attribute LAST-match fix** (".last()" semantics — pinned by a
+>    dedicated check; media_control legitimately stays first-segment).
+> 3. `streamer/src/knvstd_main.c` — phase C/D: `ice_creds` (lengths
+>    only) + the credential gate (:1729, D-s3 honest skip on the
+>    ping6-no-payload error case :1248) + bundle-peer re-connect/
+>    restore + `sess_ice_pump` (20 ms bursts, answers the rig's
+>    requests, counts successes) + PLAY 455-retry (3 attempts, 600 ms
+>    re-pump) + the `ice_preplay` counters line + `attempt` in the PLAY
+>    event.
+> 4. `streamer/tests/test_knsock.c` — test_stun: goldens from an
+>    independent Python implementation (hmac/hashlib/zlib), RFC 2202
+>    HMAC, tamper/short/no-fingerprint rejects, xor-addr round-trip:
+>    **82 → 98 checks**.
+> 5. `streamer/tests/test_knrtsp.c` — test_ice_ladder (fixtures
+>    transcribed from the reference's own tests :3860-3920) + the
+>    last-wins sdp pin: **132 → 150 checks**.
+> 6. `tools/fake_rig.py` + `tools/sandbox_session_e2e.c` — the rig
+>    runs an independent Python STUN validator/responder on the media
+>    socket and GATES PLAY (first PLAY always 455; later need ≥1
+>    validated request); the harness pumps, asserts the ladder
+>    (a1b24800→a1b24801) and the 455→200 sequence: **36 → 43 checks**
+>    (rig evidence: ice_req 12, ice_resp 12, play_455 1, plays 1).
+> 7. `docs/RTSP.md` §12, this file, `PROJECT-STATE.md`.
+>
+> ## Verification (round XXV, sandbox)
+> native **13 suites PASS** (knsock 98, knrtsp 150, kncm 147) · cross
+> x64+i686 `-Werror` PASS · ASan+UBSan clean on both touched suites
+> (the single known vendored sha1.c:26 note aside) · kn_rtsp.c +
+> knvstd_main.c paranoid `-Wformat-truncation=2` clean (host -O1 +
+> mingw -O2 ×2); kn_sock.c's two =2 hits are PRE-EXISTING round-XVII
+> honest-truncation error strings (standard gates clean — left alone,
+> churn discipline) · CMake fresh both backends 0 warnings + ctest
+> **15/15 ×2** · sandbox_session_e2e **43/43** · T10 POSIX dry ALL PASS
+> **62** (baseline).
+> **Target expectations:** next T10 → ALL PASS **72** (suite count
+> unchanged). Then **R7 run 7**: expect `ice_creds enabled:1`,
+> `ice_preplay` counters > 0, PLAY attempt 1 possibly 455 → attempt 2
+> 200, then `handoff` + the media loop (the first real Mjolnir SRTP →
+> kn_rx → AUs = R32's final stage-2 gate). If PLAY still 455s:
+> `ice_preplay.ok_in` (did the rig answer?) + `ice_creds` (which ladder
+> leg fired) localize it.
+
+---
+
+# Round XXIV delta, rev 14 (R7 run 5: FIRST READY SESSION — the queue fix confirmed live; DESCRIBE died on the 8 KiB per-message scratch → fixed + binary frames + Host:port + rtsp_detail instrumentation)
 
 > **Rev 14 supersedes rev 1-13.** Canonical state: `PROJECT-STATE.md`.
 > Design record: **`docs/RTSP.md` §11** (the run-5 measurement + the

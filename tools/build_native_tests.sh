@@ -35,7 +35,9 @@ $CC $CFLAGS streamer/src/kn_rx.c streamer/src/kn_gs.c streamer/src/knfec.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c \
     streamer/tests/test_knrx.c -o build/test_knrx
 $CC $CFLAGS streamer/src/kn_audio.c streamer/tests/test_knaudio.c -o build/test_knaudio -lm
-$CC $CFLAGS streamer/src/kn_sock.c streamer/tests/test_knsock.c -o build/test_knsock
+$CC $CFLAGS streamer/src/kn_sock.c streamer/src/kn_sha1.c \
+    third_party/crypto-algorithms-sha1/sha1.c \
+    streamer/tests/test_knsock.c -o build/test_knsock
 $CC $CFLAGS streamer/src/kn_ws.c streamer/src/kn_sha1.c \
     third_party/crypto-algorithms-sha1/sha1.c \
     streamer/tests/test_knws.c -o build/test_knws

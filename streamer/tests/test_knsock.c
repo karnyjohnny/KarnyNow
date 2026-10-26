@@ -17,6 +17,7 @@
 #endif
 
 #include "kn/kn_sock.h"
+#include "kn/kn_sha1.h"
 #include "test_port.h"
 
 #include <string.h>
@@ -402,6 +403,152 @@ static void test_connect(void)
     kn_sock_udp_close(&stray);
 }
 
+
+/* ------------------------------------------------- STUN toolkit (round XXV)
+ * Goldens computed with an INDEPENDENT Python implementation (hmac +
+ * hashlib + zlib — the two-implementations rule): key "RIGPASSWORD",
+ * tid 000102..0b, USERNAME "a1b24801:ABCDEF0123456789" (the E2E rig's
+ * resolved shape), XOR-MAPPED 8.8.8.8:5004. */
+
+static int hexval_t(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static size_t hex2bin(const char *h, uint8_t *out, size_t outsz)
+{
+    size_t n = 0;
+    while (h[0] && h[1] && n < outsz) {
+        int hi = hexval_t(h[0]), lo = hexval_t(h[1]);
+        if (hi < 0 || lo < 0) break;
+        out[n++] = (uint8_t)((hi << 4) | lo);
+        h += 2;
+    }
+    return n;
+}
+
+static void test_stun(void)
+{
+    static const char k_req[] =
+        "000100402112a442000102030405060708090a0b00060019613162323438"
+        "30313a4142434445463031323334353637383900000000080014"
+        "556d8c477f2d0391bb21d73d09c969b28d12db60"
+        "80280004f177b08a";
+    static const char k_succ[] =
+        "0101002c2112a442000102030405060708090a0b002000080001329e291a"
+        "ac4a00080014c4824dac06a0d7cc442239ab749640399ef3d0f0"
+        "8028000496626426";
+    static const uint8_t k_key[] = "RIGPASSWORD";
+    static const uint8_t k_user[] = "a1b24801:ABCDEF0123456789";
+    uint8_t expect[KN_SOCK_STUN_MAX_PKT], pkt[KN_SOCK_STUN_MAX_PKT];
+    uint8_t tid[12], tid2[12], xa[8];
+    size_t elen, plen, ulen = 0;
+    uint16_t mtype = 0, xport = 0;
+    uint32_t xip = 0, ip;
+    char user[64], ibuf[16];
+    int i, rc;
+
+    printf("-- STUN toolkit (round XXV KAT) --\n");
+    for (i = 0; i < 12; ++i) tid[i] = (uint8_t)i;
+
+    CHECK(kn_sock_crc32((const uint8_t *)"123456789", 9) == 0xCBF43926u,
+          "crc32 golden (IEEE reflected)");
+    {
+        uint8_t key20[20], mac[20], want[20];
+        memset(key20, 0x0b, sizeof key20);
+        hex2bin("b617318655057264e28bc0b6fb378c8ef146be00", want,
+                sizeof want);
+        kn_hmac_sha1(key20, sizeof key20, "Hi There", 8, mac);
+        CHECK(memcmp(mac, want, 20) == 0, "hmac-sha1 RFC 2202 case 1");
+    }
+
+    elen = hex2bin(k_req, expect, sizeof expect);
+    CHECK(elen == 84, "request golden decodes to 84 bytes");
+    rc = kn_sock_stun_build(pkt, sizeof pkt, &plen,
+                            KN_SOCK_STUN_BINDING_REQUEST, tid,
+                            k_key, sizeof k_key - 1,
+                            KN_SOCK_STUN_ATTR_USERNAME, k_user,
+                            sizeof k_user - 1);
+    CHECK(rc == KN_SOCK_OK && plen == elen &&
+          memcmp(pkt, expect, plen) == 0,
+          "binding request byte-exact vs the independent golden");
+
+    CHECK(kn_sock_stun_inspect(pkt, plen, &mtype, tid2, user, sizeof user,
+                               &ulen, NULL, NULL) == 1 &&
+          mtype == KN_SOCK_STUN_BINDING_REQUEST &&
+          memcmp(tid2, tid, 12) == 0 && ulen == sizeof k_user - 1 &&
+          strcmp(user, "a1b24801:ABCDEF0123456789") == 0,
+          "inspect round-trips type/tid/username");
+    CHECK(kn_sock_stun_check_integrity(pkt, plen, k_key,
+                                       sizeof k_key - 1) == 1,
+          "integrity valid with the build key");
+    CHECK(kn_sock_stun_check_integrity(pkt, plen, (const uint8_t *)"nope",
+                                       4) == 0,
+          "integrity rejects the wrong key");
+    {
+        uint8_t bad[KN_SOCK_STUN_MAX_PKT];
+        memcpy(bad, pkt, plen);
+        bad[24] = (uint8_t)(bad[24] ^ 0xFF);   /* a username byte */
+        CHECK(kn_sock_stun_check_integrity(bad, plen, k_key,
+                                           sizeof k_key - 1) == 0,
+              "integrity rejects a tampered packet");
+        CHECK(kn_sock_stun_inspect(bad, plen, &mtype, tid2, user,
+                                   sizeof user, &ulen, NULL, NULL) == 0,
+              "inspect rejects the broken FINGERPRINT");
+    }
+
+    CHECK(kn_sock_ipv4_parse("8.8.8.8", &ip) == 0 &&
+          kn_sock_stun_xor_addr_v4(ip, 5004, xa) == KN_SOCK_OK &&
+          hex2bin("0001329e291aac4a", expect, 8) == 8 &&
+          memcmp(xa, expect, 8) == 0,
+          "xor-mapped-address golden (8.8.8.8:5004)");
+    elen = hex2bin(k_succ, expect, sizeof expect);
+    rc = kn_sock_stun_build(pkt, sizeof pkt, &plen,
+                            KN_SOCK_STUN_BINDING_SUCCESS, tid,
+                            k_key, sizeof k_key - 1,
+                            KN_SOCK_STUN_ATTR_XOR_MAPPED_ADDRESS, xa, 8);
+    CHECK(rc == KN_SOCK_OK && plen == elen &&
+          memcmp(pkt, expect, plen) == 0,
+          "binding success byte-exact vs the golden");
+    CHECK(kn_sock_stun_inspect(pkt, plen, &mtype, tid2, user, sizeof user,
+                               &ulen, &xip, &xport) == 1 &&
+          mtype == KN_SOCK_STUN_BINDING_SUCCESS && xport == 5004 &&
+          kn_sock_ipv4_text(xip, ibuf) != NULL &&
+          strcmp(ibuf, "8.8.8.8") == 0,
+          "inspect decodes XOR-MAPPED-ADDRESS back to 8.8.8.8:5004");
+
+    CHECK(kn_sock_stun_inspect((const uint8_t *)"garbage", 7, &mtype, tid2,
+                               user, sizeof user, &ulen, NULL, NULL) == 0,
+          "short garbage is not STUN");
+    {
+        uint8_t trunc[KN_SOCK_STUN_MAX_PKT], nofp[KN_SOCK_STUN_MAX_PKT];
+        size_t n2;
+        memcpy(trunc, pkt, plen);
+        CHECK(kn_sock_stun_inspect(trunc, plen - 1, &mtype, tid2, user,
+                                   sizeof user, &ulen, NULL, NULL) == 0,
+              "header-length mismatch rejected (:5138)");
+        elen = hex2bin(k_req, nofp, sizeof nofp);
+        n2 = elen - 12;                       /* strip the FP attribute */
+        nofp[2] = (uint8_t)((n2 - 20) >> 8);
+        nofp[3] = (uint8_t)((n2 - 20) & 0xFF);
+        CHECK(kn_sock_stun_inspect(nofp, n2, &mtype, tid2, user,
+                                   sizeof user, &ulen, NULL, NULL) == 0,
+              "FINGERPRINT is mandatory (valid_stun_fingerprint :5094)");
+    }
+    CHECK(kn_sock_stun_build(NULL, 0, &plen, KN_SOCK_STUN_BINDING_REQUEST,
+                             tid, k_key, sizeof k_key - 1,
+                             KN_SOCK_STUN_ATTR_USERNAME, k_user,
+                             sizeof k_user - 1) == KN_SOCK_ERR_ARGS &&
+          kn_sock_stun_build(pkt, 30, &plen, KN_SOCK_STUN_BINDING_REQUEST,
+                             tid, k_key, sizeof k_key - 1,
+                             KN_SOCK_STUN_ATTR_USERNAME, k_user,
+                             sizeof k_user - 1) == KN_SOCK_ERR_ARGS,
+          "build guards (NULL out, undersized buffer)");
+}
+
 int main(void)
 {
     test_clock();
@@ -414,5 +561,6 @@ int main(void)
     test_truncation();
     test_bad_args();
     test_connect();
+    test_stun();
     return kn_test_summary("test_knsock");
 }

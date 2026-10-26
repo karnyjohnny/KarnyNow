@@ -26,11 +26,13 @@ exits after N completed PLAY exchanges; the E2E harness uses 1).
 import argparse
 import base64
 import hashlib
+import hmac
 import json
 import os
 import signal
 import socket
 import struct
+import zlib
 import sys
 import threading
 
@@ -81,6 +83,64 @@ def ws_frame(payload, opcode=0x1):
     else:
         hdr += bytes([127]) + struct.pack(">Q", n)
     return hdr + b
+
+
+STUN_MAGIC = 0x2112A442
+STUN_FP_XOR = 0x5354554E
+
+
+def stun_build(msg_type, tid, key, attr_type, attr):
+    """Independent Python mirror of the C kn_sock_stun_build (RFC 5389
+    short-term-credential shape: USERNAME/XOR-MAPPED + MESSAGE-INTEGRITY
+    + FINGERPRINT)."""
+    p = struct.pack(">HH", msg_type, 0) + struct.pack(">I", STUN_MAGIC) + tid
+    p += struct.pack(">HH", attr_type, len(attr)) + attr
+    p += b"\x00" * ((4 - len(attr) % 4) % 4)
+    p = p[:2] + struct.pack(">H", len(p) - 20 + 24) + p[4:]
+    p += struct.pack(">HH", 0x0008, 20) + hmac.new(key, p,
+                                                   hashlib.sha1).digest()
+    p = p[:2] + struct.pack(">H", len(p) - 20 + 8) + p[4:]
+    crc = (zlib.crc32(p) ^ STUN_FP_XOR) & 0xFFFFFFFF
+    p += struct.pack(">HH", 0x8028, 4) + struct.pack(">I", crc)
+    return p
+
+
+def stun_check(pkt, mi_key):
+    """Validate structure + FINGERPRINT + MESSAGE-INTEGRITY. Returns
+    (msg_type, tid, attrs) or None."""
+    if len(pkt) < 20:
+        return None
+    mtype, mlen = struct.unpack(">HH", pkt[:4])
+    if struct.unpack(">I", pkt[4:8])[0] != STUN_MAGIC:
+        return None
+    if 20 + mlen != len(pkt):
+        return None
+    tid = pkt[8:20]
+    attrs, mi_off, fp_off, off = {}, None, None, 20
+    while off + 4 <= len(pkt):
+        at, al = struct.unpack(">HH", pkt[off:off + 4])
+        if off + 4 + al > len(pkt):
+            return None
+        attrs[at] = pkt[off + 4:off + 4 + al]
+        if at == 0x0008:
+            mi_off = off
+        if at == 0x8028:
+            fp_off = off
+        off += 4 + al + ((4 - al % 4) % 4)
+    if fp_off is None or fp_off + 8 != len(pkt):
+        return None                       # FINGERPRINT mandatory + last
+                                          # (attr = type2+len2+value4 = 8)
+    crc = (zlib.crc32(pkt[:fp_off]) ^ STUN_FP_XOR) & 0xFFFFFFFF
+    if struct.unpack(">I", attrs[0x8028])[0] != crc:
+        return None
+    if mi_off is None or len(attrs.get(0x0008, b"")) != 20:
+        return None
+    adjusted = len(pkt) - 20 - 8
+    head = pkt[:2] + struct.pack(">H", adjusted) + pkt[4:mi_off]
+    if not hmac.compare_digest(hmac.new(mi_key, head, hashlib.sha1).digest(),
+                               attrs[0x0008]):
+        return None
+    return mtype, tid, attrs
 
 
 def recv_exact(sock, n):
@@ -163,6 +223,12 @@ class Rig:
         self.session_id = "FAKE-SESS-0001"
         self.plays = 0
         self.announce_seen = None
+        # round XXV: the PLAY state machine the real rig showed at R7
+        # run 6 (PLAY 455 until the client's hole-punch burst arrives)
+        self.ice_req = 0
+        self.ice_resp = 0
+        self.play_455 = 0
+        self._ufrag = None
         self.http = socket.socket()
         self.http.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.http.bind(("127.0.0.1", args.http_port))
@@ -298,12 +364,24 @@ class Rig:
                          "X-GS-ServerPort=%d-%d" % (self.media_port,
                                                      self.media_port),
                          "x-nv-ping: 6",
-                         "x-nv-ping-payload: FAKEPING"])))
+                         # hex on purpose: the reference ladder increments
+                         # it (a1b24800 -> a1b24801, nvst_rtsp.rs:2316)
+                         "x-nv-ping-payload: a1b24800"])))
                 elif first == "ANNOUNCE":
                     self.announce_seen = text
                     conn.sendall(ws_frame(self.rtsp_response(
                         first, cseq, ["Session: %s" % self.session_id])))
                 elif first == "PLAY":
+                    # round XXV state machine: the FIRST PLAY always gets
+                    # 455 (deterministically exercising the client's
+                    # pump-and-retry), later ones need >=1 validated ICE
+                    # request on the media socket — the R7 run-6 lesson.
+                    if self.play_455 == 0 or self.ice_req == 0:
+                        self.play_455 += 1
+                        conn.sendall(ws_frame(
+                            "RTSP/1.0 455 Method Not Valid in This State"
+                            "\r\nCSeq: %s\r\n\r\n" % cseq))
+                        continue
                     conn.sendall(ws_frame(self.rtsp_response(
                         first, cseq, ["Session: %s" % self.session_id])))
                     self.plays += 1
@@ -319,6 +397,50 @@ class Rig:
                         "RTSP/1.0 501 Not Implemented\r\nCSeq: %s\r\n\r\n"
                         % cseq))
 
+    def announced_ufrag(self):
+        """The local ufrag the client ANNOUNCEd (parsed once)."""
+        if self._ufrag is None:
+            self._ufrag = ""
+            for line in (self.announce_seen or "").split("\r\n"):
+                if line.startswith("a=x-nv-general.iceUserNameFragmentV2:"):
+                    self._ufrag = line.split(":", 1)[1].strip()
+        return self._ufrag
+
+    def serve_media(self):
+        """Round XXV: validate the client's pre-PLAY hole-punch burst and
+        answer binding requests — the rig half of the run-6 state
+        machine. Independent Python STUN (stun_check/stun_build)."""
+        self.media.settimeout(0.5)
+        while not STOP.is_set():
+            try:
+                pkt, src = self.media.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            parsed = stun_check(pkt, b"RIGPASSWORD")
+            if parsed is None or parsed[0] != 0x0001:
+                continue
+            _, tid, attrs = parsed
+            ufrag = self.announced_ufrag()
+            user = attrs.get(0x0006, b"").decode("ascii", "replace")
+            if not ufrag or user not in ("a1b24801:%s" % ufrag,
+                                         "PING:%s" % ufrag):
+                continue                  # wrong USERNAME: stay silent
+            self.ice_req += 1
+            xma = b"\x00\x01" + struct.pack(
+                ">H", src[1] ^ ((STUN_MAGIC >> 16) & 0xFFFF))
+            xma += bytes(a ^ b for a, b in
+                         zip(socket.inet_aton(src[0]),
+                             struct.pack(">I", STUN_MAGIC)))
+            try:
+                self.media.sendto(
+                    stun_build(0x0101, tid, b"RIGPASSWORD", 0x0020, xma),
+                    src)
+                self.ice_resp += 1
+            except OSError:
+                pass
+
     def run(self):
         info = {"mode": "fake-rig", "http_port": self.http_port,
                 "ws_port": self.ws_port, "media_port": self.media_port,
@@ -330,13 +452,18 @@ class Rig:
                 f.write(line + "\n")
         t_http = threading.Thread(target=self.serve_http, daemon=True)
         t_ws = threading.Thread(target=self.serve_ws, daemon=True)
+        t_media = threading.Thread(target=self.serve_media, daemon=True)
         t_http.start()
         t_ws.start()
+        t_media.start()
         while not STOP.is_set():
             STOP.wait(0.2)
         # emit the evidence line (the harness reads stdout after exit)
         print(json.dumps({"mode": "fake-rig", "event": "done",
                           "plays": self.plays,
+                          "ice_req": self.ice_req,
+                          "ice_resp": self.ice_resp,
+                          "play_455": self.play_455,
                           "announce_bytes":
                               len(self.announce_seen or ""),
                           "announce_has_key":

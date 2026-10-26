@@ -167,6 +167,74 @@ int  kn_sock_udp_sendto(kn_sock_udp *s, uint32_t ipv4, uint16_t port,
  * re-connected to a new peer (stream switch). KN_SOCK_OK / KN_SOCK_ERR_*. */
 int  kn_sock_udp_connect(kn_sock_udp *s, uint32_t ipv4, uint16_t port);
 
+/* ---------------------------------------------------- STUN toolkit (R7)
+ * Round XXV: the minimal authenticated-STUN subset the NVST pre-PLAY
+ * ICE/NATT burst needs — a byte-exact port of nvst.rs's builders and
+ * validators (build_authenticated_stun_packet :4977-5012,
+ * build_stun_binding_request :5013-5028, build_natt_hole_punch_request
+ * :5033-5050, xor_mapped_address :5052-5072, find_stun_attribute
+ * :5074-5092, valid_stun_fingerprint :5094-5104, looks_like_stun :245,
+ * valid_stun_message_integrity :139-160). IPv4-only like the rest of
+ * kn_sock (stage 2). NOT an ICE agent: no candidate gathering, no
+ * role/conflict handling — the R7 run-6 measurement (PLAY 455 with zero
+ * UDP sent) showed the rig needs the client's hole-punch burst BEFORE
+ * PLAY; full ICE/DTLS is the stage-3 R3 spike. */
+
+#define KN_SOCK_STUN_MAGIC_COOKIE  0x2112A442u
+#define KN_SOCK_STUN_FINGERPRINT_XOR 0x5354554Eu
+#define KN_SOCK_STUN_HEADER_LEN    20u
+#define KN_SOCK_STUN_MAX_PKT       512u   /* builders refuse more */
+
+enum {
+    KN_SOCK_STUN_BINDING_REQUEST = 0x0001,
+    KN_SOCK_STUN_BINDING_SUCCESS = 0x0101
+};
+enum {
+    KN_SOCK_STUN_ATTR_USERNAME        = 0x0006,
+    KN_SOCK_STUN_ATTR_MESSAGE_INTEGRITY = 0x0008,
+    KN_SOCK_STUN_ATTR_XOR_MAPPED_ADDRESS = 0x0020,
+    KN_SOCK_STUN_ATTR_FINGERPRINT     = 0x8028
+};
+
+/* CRC-32 (IEEE 802.3 reflected — the crc32fast the reference uses) for
+ * the STUN FINGERPRINT. Exposed for KATs. */
+uint32_t kn_sock_crc32(const uint8_t *data, size_t len);
+
+/* Build ONE authenticated single-attribute STUN packet (USERNAME or
+ * XOR-MAPPED-ADDRESS) with MESSAGE-INTEGRITY (HMAC-SHA1 over the packet
+ * truncated to the attribute block, length pre-adjusted per RFC 5389)
+ * and FINGERPRINT. Returns KN_SOCK_OK (*outlen set; the packet never
+ * exceeds KN_SOCK_STUN_MAX_PKT) / KN_SOCK_ERR_ARGS. */
+int kn_sock_stun_build(uint8_t *out, size_t outsz, size_t *outlen,
+                       uint16_t msg_type, const uint8_t tid[12],
+                       const uint8_t *key, size_t keylen,
+                       uint16_t attr_type, const uint8_t *attr,
+                       size_t attrlen);
+
+/* The XOR-MAPPED-ADDRESS value for an IPv4 source (family 1): 8 bytes,
+ * port XOR (cookie>>16), octets XOR the cookie. */
+int kn_sock_stun_xor_addr_v4(uint32_t ipv4_be, uint16_t port,
+                             uint8_t out[8]);
+
+/* Structural validation + field extraction (handle_stun_datagram's
+ * shared gate :5136-5146): magic cookie, the EXACT length the header
+ * promises, and a valid FINGERPRINT (mandatory — the reference rejects
+ * without it). Returns 1 when well-formed (*msg_type, tid always set;
+ * user/xip/xport set when their attributes are present — *userlen / *xip
+ * are 0-initialized first), 0 when not STUN we can use. The username is
+ * copied raw (may be non-ASCII), NUL-terminated for printing; *userlen
+ * carries the true length. */
+int kn_sock_stun_inspect(const uint8_t *pkt, size_t len,
+                         uint16_t *msg_type, uint8_t tid[12],
+                         char *user, size_t usersz, size_t *userlen,
+                         uint32_t *xip, uint16_t *xport);
+
+/* MESSAGE-INTEGRITY check with the given key (valid_stun_message_
+ * integrity :139-160: HMAC-SHA1 over pkt[0..MI) with the length field
+ * adjusted to len-20-8 when a FINGERPRINT follows). 1 = valid. */
+int kn_sock_stun_check_integrity(const uint8_t *pkt, size_t len,
+                                 const uint8_t *key, size_t keylen);
+
 #ifdef __cplusplus
 }
 #endif
