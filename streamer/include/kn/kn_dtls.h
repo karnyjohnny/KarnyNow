@@ -79,6 +79,7 @@ enum {
  * would be dropped-and-counted honestly (retransmission recovers). */
 #define KN_DTLS_MAX_RECORD   2048u
 #define KN_DTLS_QUEUE_SLOTS    32u
+#define KN_DTLS_FIRST_APP_CAP  64u   /* first app-record capture window */
 
 typedef struct kn_dtls kn_dtls;   /* opaque; heap-owned like kn_cert */
 
@@ -92,6 +93,14 @@ typedef struct {
     unsigned app_records;     /* post-ready app-data reads (R3-C hook) */
     unsigned app_bytes;       /* app-data bytes drained (discarded) */
     unsigned peer_closed;     /* a close_notify arrived (rig teardown) */
+    /* the FIRST app record's head, captured verbatim (bounded): run 13
+     * showed the rig sends exactly one app record right after the
+     * handshake — its content (an SCTP INIT? something else?) is R3-C's
+     * design input, so the evidence must carry it. Protocol negotiation
+     * bytes, not key material (§7). */
+    uint8_t  first_app[KN_DTLS_FIRST_APP_CAP];
+    unsigned first_app_len;   /* the record's TRUE length (may exceed
+                                 the captured cap) */
     int      pin_matched;     /* verify callback saw the pinned fp */
     int      verify_result;   /* mbedtls_ssl_get_verify_result (0 = clean) */
     int      last_rc;         /* last fatal mbedTLS return (negative) */

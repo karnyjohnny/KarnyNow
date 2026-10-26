@@ -534,6 +534,11 @@ static void test_real_mode(void)
             CHECK(st.app_records >= 1 && st.app_bytes >= sizeof msg - 1,
                   "client drains post-ready app data into the counted "
                   "discard path (D-t4)");
+            CHECK(st.first_app_len == sizeof msg - 1 &&
+                  memcmp(st.first_app, msg, sizeof msg - 1) == 0,
+                  "the FIRST app record's head is captured verbatim "
+                  "(run-13 evidence for R3-C: what does the rig send "
+                  "after the handshake?)");
             CHECK(kn_dtls_poll(p.cli) == KN_DTLS_READY,
                   "poll stays READY (idempotent) after the handshake");
         }

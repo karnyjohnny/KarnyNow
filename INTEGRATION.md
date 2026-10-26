@@ -1,4 +1,100 @@
-# INTEGRATION NOTES — Round XXXI delta, rev 21 (R7 run 12 = the real fingerprint flew and PLAY STILL refused → R3-B SHIPPED: kn_dtls, the DTLS 1.2 ACTIVE client on the bundle socket + the reference's N/N+1 socket pair + the pump-thread DTLS state machine)
+# INTEGRATION NOTES — Round XXXII delta, rev 22 (R7 run 13 = THE DTLS HANDSHAKE COMPLETED ON A LIVE PRODUCTION RIG — R3-B live-closed; PLAY went silence→explicit 400 with the body uncaught → the instrumentation round: the full non-200 response capture, the rig's post-DTLS app-record capture, the pre-PLAY video-socket keepalive)
+
+> **Rev 22 supersedes rev 1-21.** Canonical state: `PROJECT-STATE.md`.
+> Design records: **`docs/RTSP.md` §19** (run 13 + the round-XXXII
+> delta + the run-14 decision matrix), §18 (R3-B design + the mbedTLS
+> landmines), `docs/DTLS.md` (R3-B LIVE-PROVED; open questions 3-6
+> updated).
+>
+> **Round XXXII headline: run 13 landed the project's deepest live
+> datum yet — `dtls_ready {"ms":388,"version":"DTLSv1.2","cipher":
+> "TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256","verify":0}` on a
+> production rig (and again in 293 ms on a RESUME-at-create re-attach
+> with a fresh cert): the rig answered our client-active ClientHello,
+> requested+verified our certificate against the ANNOUNCE'd
+> fingerprint, our pin verified its cert. `sock_pair` bound the
+> preferred 49005/49006 and the seat described `unified:0` — the
+> two-socket layout IS the production path. PLAY moved from silence to
+> an explicit **400** (the rig now evaluates the request) but the body
+> was NOT captured, and the rig sent exactly ONE post-handshake app
+> record that D-t4 discarded. At PLAY time the reference additionally
+> has: the SCTP INIT (start_sctp(true) the instant DTLS connects,
+> :8214-8223 → R3-C) and the PRE-PLAY Mjolnir NATT keepalives from the
+> video socket (lib.rs:990 arms that worker before finish();
+> :8849-8905) — run 13 left 49005 silent. This round ships the
+> instrumentation that ends the guessing and that last fidelity piece;
+> NO hand-rolled SCTP (poison precedent — run 14's captures decide
+> R3-C).**
+>
+> ## Changed files (round XXXII)
+> 1. `streamer/src/knvstd_main.c` —
+>    * `sess_rtsp_detail` grew a nullable `resp` parameter and emits
+>      the NEW **`rtsp_response`** line on any non-200: reason phrase,
+>      EVERY header (`{"n":..,"v":..}` pairs, each through the
+>      lb_json_path sanitizer) and a 240-byte body excerpt — the rig's
+>      own words about run 13's 400 land in run 14's log.
+>    * NEW **`rig_info`** line: the DESCRIBE response's `Server`
+>      header (RTSP.md §16 open question 5 — refusal-mode/version
+>      correlation accumulates per run now).
+>    * The pump thread grew the **pre-PLAY video-socket keepalive**:
+>      `vid_sock/vid_ip/vid_port/vid_payload` + the 20 ms NATT ping
+>      (the media loop's exact shape, :8849-8905) — SEND-ONLY (it
+>      never recvs the video socket; inbound media queues in the 8 MiB
+>      buffer for the media loop), stopped by main's `vid_handoff`
+>      flag at media-loop entry (duplicate-ping overlap harmless);
+>      wired in non-unified mode only; `vid_ka` counter.
+>    * `pump_ms` accumulates LIVE in the loop (the persist-mode
+>      snapshot used to read 0 — run 13's artifact).
+>    * `ice_preplay` grew `vid_ka`, `app_records`, `app_bytes`,
+>      `app_first_len`, `app_first` (hex); `sess_ice_stats` carries
+>      the snapshot-safe copies (main never touches kn_dtls while the
+>      thread runs).
+>    * One paranoid-gate fix pre-ship: sess_reserve_pair's fallback
+>      message uses a bounded memcpy, not snprintf (the errsz==1
+>      -Wformat-truncation=2 over-approximation class; the file's
+>      permanent =2 gate stays clean ×4 optimization levels).
+> 2. `streamer/{include/kn,src}/kn_dtls.{h,c}` — the FIRST app-data
+>    record is captured verbatim (≤ KN_DTLS_FIRST_APP_CAP=64 bytes +
+>    the true length) inside the drain path; stats grew
+>    `first_app`/`first_app_len`. This is R3-C's design input: run 13
+>    proved the rig sends exactly one app record after the handshake —
+>    run 14 names its protocol (an SCTP common header is
+>    unmistakable in hex).
+> 3. `streamer/tests/test_kndtls.c` — 31→**32 checks**: the app-data
+>    leg now asserts the first-record capture byte-exact against the
+>    test server's "kn-r3b" record.
+> 4. `docs/RTSP.md` §19 (run 13 ×2 invocations + the reference
+>    re-read + the delta + the run-14 matrix), `docs/DTLS.md`
+>    (R3-B LIVE-PROVED; Q3 partially / Q4 fully / Q5 instrumented /
+>    Q6 answered+measured), `PROJECT-STATE.md` (round XXXII),
+>    `tests/T10_build_and_test.py` UNCHANGED this round (no new
+>    suites — the expectation stays **74**).
+>
+> ## Verification status (what ran WHERE, round XXXII)
+> * Sandbox: native 15 suites PASS; cross mingw x64+i686 -Werror PASS
+>   incl. the kn_dtls real-body + test real-section legs; paranoid
+>   knvstd legs clean -O0..-O3; ctest **17/17 ×2** (test_kndtls real
+>   32/32 / stub 6/6); ASan+UBSan+LSan clean; the OpenSSL-3 interop
+>   PASS; sandbox_session_e2e **43/43**; T10 POSIX dry ALL PASS 64;
+>   T13 ALL PASS 63.
+> * Target (round XXXII's evidence, user-reported): T10 **ALL PASS
+>   74** zero warnings; R7 run 13 ×2 invocations (docs/RTSP.md §19).
+> * Target (PENDING — round XXXIII asks for): T10 (expect 74) + **R7
+>   run 14** — paste rtsp_response/rig_info/sock_pair/dtls_arm/
+>   dtls_ready/PLAY/ice_preplay verbatim (+ handoff/summary if PLAY
+>   200).
+>
+> ## Notes for the target build
+> * No new files to wire this round beyond syncing the three changed
+>   sources + two headers' consumers: knvstd_main.c, kn_dtls.{h,c},
+>   test_kndtls.c (the gates and T10 harness are unchanged since
+>   round XXXI's sync).
+> * Behaviour notes: the video socket now emits NATT pings from the
+>   moment the pump thread starts (pre-PLAY) — a firewall prompt, if
+>   the machine ever shows one, would appear there (run 13 already
+>   proved inbound UDP flows on 49006; 49005 send-side is new).
+
+
 
 > **Rev 21 supersedes rev 1-20.** Canonical state: `PROJECT-STATE.md`.
 > Design records: **`docs/RTSP.md` §18** (run 12 + the R3-B design +

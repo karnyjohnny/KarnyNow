@@ -1,19 +1,24 @@
 # DTLS.md — the R3 spike: real bundle identity, DTLS + SCTP (promoted to the stage-2 PLAY blocker by R7 run 10)
 
-> Status: **R3-A SHIPPED (round XXX, 2026-10-26** — kn_cert live: real
-> ECDSA P-256 self-signed identity, sandbox-proven 10/10 under
-> ASan+UBSan via the CMake mbedtls backend, cross-compiled for Win32,
-> wired into the knvstd ANNOUNCE with the `identity` evidence line;
-> run 12 live-proved it: `"cert":"real"`, fp_len 95, ANNOUNCE 200).
-> **R3-B SHIPPED (round XXXI, 2026-10-26/27** — run 12's verdict: the
-> real fingerprint ALONE changed nothing (PLAY timeout in total WS
-> silence on a 4th rig) → kn_dtls, the DTLS 1.2 ACTIVE client on the
-> bundle socket inside the pump thread; the reference's N/N+1 socket
-> pair (preferred 49005/49006); the full design record + the three
-> mbedTLS landmines are in docs/RTSP.md §18; sandbox-gated: test_kndtls
-> 31/31 real battery (mutual pinning, HVR cookies, loss legs) under
-> ASan+UBSan, the OpenSSL-3 interop leg PASS, ctest 17/17 ×2; run 13 is
-> its first live measurement). R3-C/D: PLAN as below.
+> Status: **R3-A SHIPPED (round XXX) + LIVE-PROVED (run 12:
+> `"cert":"real"`, fp_len 95, ANNOUNCE 200 on a 4th rig).**
+> **R3-B SHIPPED (round XXXI) + LIVE-PROVED (round XXXII / R7 run 13,
+> docs/RTSP.md §19): `dtls_ready {"ms":388,"version":"DTLSv1.2",
+> "cipher":"TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256","verify":0}` on a
+> PRODUCTION rig — the rig answered our client-active ClientHello,
+> requested+verified our certificate against the ANNOUNCE'd
+> fingerprint, and our pin verified its cert; twice (the second run
+> re-attached to the live session and re-handshook with a FRESH cert,
+> 293 ms). The socket pair bound preferred 49005/49006 and the seat
+> describes `unified:0` — the two-socket layout IS the production
+> path. PLAY moved from silence to an explicit **400**: the rig now
+> evaluates the request; the remaining pre-PLAY deltas are the SCTP
+> INIT (R3-C — the rig sent exactly ONE app record post-handshake,
+> its capture ships in round XXXII) and the pre-PLAY Mjolnir
+> keepalive (shipped round XXXII). Sandbox gates: test_kndtls 32/32
+> under ASan+UBSan, the OpenSSL-3 interop PASS, ctest 17/17 ×2.)**
+> R3-C/D: PLAN as below — R3-C is the leading next round pending run
+> 14's captured 400 body.
 > Original plan header (round XXIX, 2026-10-26): Provenance: nvst.rs @ a49b124
 > (line refs below), str0m vendored in the reference tree
 > (`native/opennow-streamer/vendor/str0m`), runs 6/9/10 evidence in
@@ -159,20 +164,29 @@ prerequisite for finishing stage 2.
 2. Does the rig initiate DTLS toward the client if the client is
    silent — **ANSWERED (runs 9-12):** NO within ~20 s (invalid_in 0 —
    the client is the DTLS-ACTIVE side, `start_dtls(true)`, nvst.rs:6300).
-3. Is PLAY gated on DTLS *completion* or merely *started*? (Run 13 is
-   the measurement: `dtls_ready` timing vs the PLAY verdict. Run 12
-   proved the announced fingerprint ALONE is not the gate.)
-4. unified vs paired sockets on real PL-region seats — run 13 answers
-   it even on failure (the `ice_creds` + `sock_pair` lines carry
-   `unified`; the handoff line does too).
-5. Whether the rig's 455-vs-timeout refusal modes correlate with rig
-   software versions (collect `serverId`/peer evidence per run; so far
-   four rigs: 455, timeout ×3).
-6. NEW (run 13+): does the rig's DTLS server REQUEST a client
-   certificate (WebRTC stacks pin the announced fingerprint, so almost
-   certainly yes — kn_dtls sends it whenever asked), and does the rig
-   tolerate a client that completes DTLS but never opens SCTP channels
-   (D-t4 — R3-C's urgency depends on this answer)?
+3. Is PLAY gated on DTLS *completion* or merely *started*? —
+   **PARTIALLY ANSWERED (run 13):** DTLS COMPLETES (388/293 ms) and
+   PLAY still fails — but now with an explicit **400** instead of
+   silence/455, so DTLS completion moved the state machine forward.
+   Whether the 400 wants SCTP (R3-C) or something else is run 14's
+   captured-body measurement.
+4. unified vs paired sockets on real PL-region seats — **ANSWERED
+   (run 13): `unified:0`** — real seats describe the NON-unified
+   two-socket layout; the pair + the persisting bundle worker are the
+   production path.
+5. Whether the rig's refusal modes correlate with software versions —
+   five rigs so far (455, timeout ×3, 400-after-DTLS); round XXXII adds
+   the `rig_info` Server-header line per run — the correlation data
+   now accumulates automatically. NOTE: the 400 appeared only AFTER
+   DTLS completed, on two different-invocation runs of the SAME rig —
+   it correlates with OUR state, not the rig's identity.
+6. Does the rig REQUEST a client certificate — **ANSWERED (run 13):
+   yes** (the handshake completed with our cert; a server that pins
+   the announced fingerprint must request+verify it). Does it tolerate
+   a DTLS-complete but SCTP-silent client? — **MEASURED (run 13): NO
+   at PLAY time (the 400), and it sent exactly ONE app record after
+   the handshake — round XXXII captures its head bytes (R3-C's design
+   input: an SCTP INIT from the rig, or something else).**
 
 ## 4. Rule bindings
 

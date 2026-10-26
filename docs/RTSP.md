@@ -1298,3 +1298,115 @@ PLAY's verdict. If PLAY 200: the media loop on the video socket,
 PLAY still refuses WITH dtls_ready:1 → the gate needs SCTP channels
 (R3-C promoted); if dtls_fail → fix per the rc. Either outcome is a
 clean measurement.
+
+## 19. Round XXXII — R7 run 13 (THE DTLS HANDSHAKE COMPLETED ON A LIVE PRODUCTION RIG — the R3-B layer is live-proven; PLAY moved from silence to an explicit 400, whose body we did not capture → round XXXII instruments the refusal and closes the last pre-PLAY fidelity gap)
+
+**Target T10 (the synced harness): ALL PASS 74, zero warnings** — the
+round-XXXI prediction exactly; test_kndtls ran its REAL 31-check
+battery on Win7 (the first DTLS handshake executed on the target in
+the suite), test_kncert's 14 checks finally ran there too.
+
+**Run 13, invocation 1 (legal queue wait):** 20 re-learns, the 156 cap
+with real glimpses (44/48/47/33/7), clean step 1→3→ready on the FIFTH
+rig (80-250-96-38). Then, in order:
+* **`sock_pair {"video_port":49005,"bundle_port":49006,
+  "selection":"preferred","unified":0}`** — the official reserved pair
+  bound cleanly on the target (both ports free), 8 MiB rcvbuf each.
+  **`unified:0` answers DTLS.md open question 4: real PL-region seats
+  describe the NON-unified two-socket layout** — the pair + the
+  persisting bundle worker are the production path, not an edge case.
+* OPTIONS/DESCRIBE/SETUP 200 (peer :5004, first round), identity
+  cert:real, ANNOUNCE 200 (4137 B).
+* `dtls_arm {"armed":1}` → **`dtls_ready {"ms":388,"version":
+  "DTLSv1.2","cipher":"TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256",
+  "records_in":2,"records_out":2,"verify":0}`** — **THE FIRST REAL
+  DTLS HANDSHAKE WITH A PRODUCTION GFN RIG.** Everything R3-B bet on
+  is live-confirmed: the rig answered our client-active ClientHello,
+  negotiated ECDHE-ECDSA over DTLS 1.2, REQUESTED AND VERIFIED our
+  client certificate against the ANNOUNCE'd fingerprint (a completed
+  handshake is the proof — a pin mismatch on its side aborts), and our
+  pin verified its certificate (verify:0). The ECDSA/PSA sign path
+  (CertificateVerify) works on Win7 — which also retroactively closes
+  the run-12 T10-72 worry about test_kncert never running there.
+* **PLAY: `rc:0, status:400`** — refusal mode #3 (after run 9's
+  instant 455 and runs 10-12's hold-in-silence). The rig ANSWERED
+  (ws_text 5, ws_err 0, ws_close -1): it now considers the request
+  evaluable and rejects something specific. **The response body/
+  headers were NOT captured — the round's main evidence gap, closed by
+  the delta below.**
+* `ice_preplay`: stun 54, natt 20, req_in 3/answered 3, ok_in 40,
+  invalid 0, persist:1, dtls_ready:1 — and **`dtls_in:3` vs
+  `records_in:2` at ready time: the rig sent EXACTLY ONE app-data
+  record right after the handshake** (discarded per D-t4; its content
+  — an SCTP INIT? something else? — is R3-C's design input, now
+  captured by the delta). `pump_ms:0` = the persist-mode snapshot
+  artifact (the total only landed at thread exit) — fixed.
+
+**Run 13, invocation 2 (the user re-ran the command after the first
+exited — a live RESUME-at-create measurement):** `cm_created`
+returned the SAME session_id with `status:2, phase:ready` — CloudMatch
+hands a live READY session back to a repeat create (no queue, no
+SESSION_LIMIT; the reference's attach path, R23-adjacent, measured).
+The rig accepted a FRESH certificate in the re-ANNOUNCE (fingerprints
+are not cached rig-side), DTLS completed again (293 ms; records_in 7 /
+out 3 — a different flight shape, likely the HVR cookie round), and
+PLAY 400'd identically, again with exactly one post-ready inbound app
+record (dtls_in 8 vs 7).
+
+**The 400 in context — what the reference has that we still don't at
+PLAY time (re-read this round):**
+1. **SCTP INIT**: the reference's bundle worker calls
+   `start_sctp(true)` the instant DTLS connects (nvst.rs:8214-8223 —
+   the client initiates the association); by PLAY the rig has our
+   INIT. We send no app data (R3-C = usrsctp is the planned fix; the
+   captured app record will show whether the rig also initiates).
+2. **The pre-PLAY Mjolnir keepalive**: the reference arms BOTH
+   workers before `finish()` (lib.rs:937 bundle → :990 mjolnir →
+   :1117 finish) — the video socket fires its NATT keepalives from
+   port N at 20 ms BEFORE PLAY (:8849-8905, "the pings are what ROUTES
+   video here"). Run 13 left the announced video port 49005 silent
+   until the (never-reached) media loop.
+3. (Ruled out this round: the PLAY request shape — `finish()`
+   (nvst_rtsp.rs:787-800) sends PLAY to the base target with
+   common_headers + Session, byte-identical to ours; and `wait_for_play`
+   (:738-743) is a state FLAG, not a blocker — the reference workers
+   really do run pre-PLAY.)
+
+**Round XXXII delta (measurement-maximizing; no protocol guesses —
+"measure first, then code"):**
+* **`rtsp_response` capture**: every non-200 RTSP answer now dumps its
+  reason phrase, ALL headers, and a sanitized 240-byte body excerpt
+  (kn_rtsp_response already parsed everything; run 14 reads the rig's
+  own words about the 400 instead of guessing).
+* **`rig_info`**: the DESCRIBE response's `Server` header (§16 open
+  question 5 — correlating refusal modes with rig software versions).
+* **The first DTLS app record is captured verbatim** (≤64 B head +
+  the true length) in kn_dtls stats and printed as hex in
+  `ice_preplay` (`app_records`/`app_bytes`/`app_first_len`/
+  `app_first`) — names the rig's post-handshake protocol (SCTP INIT
+  chunks start with the SCTP common header; the first bytes will show
+  it) = R3-C's design input.
+* **The pre-PLAY video-socket keepalive** (fidelity item 2 above): the
+  pump thread now ALSO sends the Mjolnir NATT keepalive from the video
+  socket at 20 ms (send-only — it never recvs there; inbound media
+  queues in the 8 MiB socket buffer for the media loop) until main
+  raises `vid_handoff` at media-loop entry. Non-unified mode only
+  (unified: the bundle pings already cover the shared socket).
+  `vid_ka` counter in ice_preplay.
+* `pump_ms` accumulates live (the persist snapshot reads the true
+  total now); test_kndtls 31→**32** checks (the first-app capture is
+  asserted byte-exact against the test server's record).
+* Deliberately NOT shipped: a hand-rolled SCTP INIT probe. A malformed
+  INIT could poison rig state (the SETUP-sweep poison precedent,
+  nvst_rtsp.rs :455-470) and R3-C (usrsctp) is the faithful path —
+  run 14's captured 400 body + app-record hex decide whether SCTP is
+  even the gate.
+
+**What run 14 tests (same command):** the decision matrix —
+(a) `rtsp_response` names the 400's cause → the targeted fix ships
+next round; (b) 400 persists with everything captured → R3-C
+(usrsctp) is promoted with the app_first hex as its design input;
+(c) PLAY 200 (the video-socket keepalive was the missing routing
+piece) → the media loop on 49005: `natt_keepalive.sent`, the summary's
+datagrams/aus/frames = R32's final stage-2 gate. In ALL cases the rig
+now talks back — the silence era is over.

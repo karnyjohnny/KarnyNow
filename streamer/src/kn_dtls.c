@@ -218,6 +218,15 @@ static void dtls_drain_app(kn_dtls *d)
         if (n > 0) {
             d->st.app_records++;
             d->st.app_bytes += (unsigned)n;
+            if (d->st.app_records == 1) {
+                /* capture the first record's head — R3-C's design input
+                 * (run 13: the rig sends exactly one app record after
+                 * the handshake; its shape names the protocol) */
+                size_t cap = (size_t)n < KN_DTLS_FIRST_APP_CAP
+                                 ? (size_t)n : KN_DTLS_FIRST_APP_CAP;
+                memcpy(d->st.first_app, buf, cap);
+                d->st.first_app_len = (unsigned)n;
+            }
             continue;
         }
         if (n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)

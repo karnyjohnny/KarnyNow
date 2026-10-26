@@ -2186,7 +2186,8 @@ static uint64_t sess_now(void *c) { (void)c; return kn_sock_now_ms(); }
  * code, and the text/binary frame counters), so a failed step is wire
  * EVIDENCE instead of a bare rc (R7 run-5's DESCRIBE -2/0 taught that). */
 static void sess_rtsp_detail(const char *step, const kn_rtsp_client *rtc,
-                             const kn_ws_client *wsc)
+                             const kn_ws_client *wsc,
+                             const kn_rtsp_response *resp)
 {
     char esc[192];
     lb_json_path(esc, sizeof esc, rtc->err);
@@ -2199,6 +2200,37 @@ static void sess_rtsp_detail(const char *step, const kn_rtsp_client *rtc,
            wsc->frames_in_binary, wsc->pings_in, wsc->pongs_in,
            wsc->pongs_out, wsc->closes_in, wsc->frames_out);
     fflush(stdout);
+    /* Round XXXII: when the rig DID answer with a non-200 (run 13's
+     * PLAY 400 — an explicit refusal, unlike runs 9-12's silence), the
+     * response itself is the evidence: reason phrase, EVERY header, and
+     * a bounded body excerpt (sanitized per the round-XVIII rule). The
+     * rig's own words name the missing piece — never guess when you can
+     * read. */
+    if (resp && resp->status != 200) {
+        char nesc[64], vesc[192], resc[64], besc[320];
+        int h;
+        printf("{\"mode\":\"session\",\"event\":\"rtsp_response\","
+               "\"step\":\"%s\",\"status\":%d,", step, resp->status);
+        lb_json_path(resc, sizeof resc, resp->status_text);
+        printf("\"reason\":\"%s\",\"headers\":[", resc);
+        for (h = 0; h < resp->hdr_count && h < KN_RTSP_MAX_HEADERS; ++h) {
+            lb_json_path(nesc, sizeof nesc, resp->names[h]);
+            lb_json_path(vesc, sizeof vesc, resp->values[h]);
+            printf("%s{\"n\":\"%s\",\"v\":\"%s\"}", h ? "," : "",
+                   nesc, vesc);
+        }
+        printf("],");
+        {
+            size_t bl = resp->body_len < 240 ? resp->body_len : 240;
+            char btmp[256];
+            memcpy(btmp, resp->body ? resp->body : "", bl);
+            btmp[bl] = '\0';
+            lb_json_path(besc, sizeof besc, btmp);
+            printf("\"body_len\":%lu,\"body\":\"%s\"}\n",
+                   (unsigned long)(resp->body_len % 1000000ul), besc);
+        }
+        fflush(stdout);
+    }
 }
 
 /* ---- round XXV: the pre-PLAY ICE/NATT pump (deviation D-s2) ----
@@ -2227,6 +2259,12 @@ typedef struct {
     unsigned dtls_in, dtls_out;
     int      dtls_last_rc, dtls_verify;
     uint64_t dtls_ready_ms;
+    /* round XXXII: the rig's post-handshake app data (run 13: exactly
+     * one extra inbound record after dtls_ready — its head, captured
+     * verbatim by kn_dtls, is R3-C's design input) */
+    unsigned dtls_app_records, dtls_app_bytes, dtls_first_app_len;
+    uint8_t  dtls_first_app[64];
+    unsigned vid_ka_sent;
     uint64_t pump_ms;
 } sess_ice_stats;
 
@@ -2261,6 +2299,22 @@ typedef struct {
      * main frees it AFTER the join — single-owner discipline). NULL =
      * not armed (honest STUN/NATT-only pumping, like runs 9-12). */
     struct kn_dtls *dtls;
+    /* Round XXXII: the pre-PLAY Mjolnir NATT keepalive — the reference
+     * arms BOTH workers before finish()/PLAY (lib.rs:937/:990): the
+     * bundle worker (STUN+DTLS, above) AND the raw video worker whose
+     * keepalive pings from port N are "WHAT ROUTES VIDEO HERE"
+     * (:8849-8905). Run 13 left the announced video port silent before
+     * PLAY — this closes that gap. SEND-ONLY on the video socket (the
+     * thread never recvs there — inbound media stays queued in the 8
+     * MiB socket buffer for the media loop); main raises vid_handoff
+     * right before the media loop takes the socket over (a brief
+     * duplicate-ping overlap is harmless by design). */
+    kn_sock_udp *vid_sock;
+    uint32_t vid_ip;
+    uint16_t vid_port;
+    char vid_payload[64];
+    volatile int vid_handoff;
+    unsigned vid_ka_sent;
     /* the stats snapshot channel: while the thread runs, main cannot
      * read st directly (torn 64-bit reads on i686, half-updated
      * counters) — it raises snap_req, the thread copies st into snap
@@ -2291,6 +2345,8 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
     uint64_t t0 = kn_sock_now_ms();
     uint64_t t_end = budget_ms ? t0 + budget_ms : ~(uint64_t)0;
     uint64_t last_burst = t0 - 20u;            /* fire at once (:7438) */
+    uint64_t last_vid_ka = t0 - 20u;           /* and the video leg too */
+    const uint64_t ms_base = p->st.pump_ms;    /* sequential merges */
     while (!p->stop && !g_knv_stop && kn_sock_now_ms() < t_end) {
         uint8_t tx[KN_SOCK_STUN_MAX_PKT];
         uint8_t tid[12];
@@ -2298,9 +2354,34 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
         size_t plen;
         int i, n;
         unsigned cadence;
+        /* live total (round XXXII: the persist-mode snapshot used to
+         * read 0 — pump_ms only landed at thread exit) */
+        p->st.pump_ms = ms_base + (kn_sock_now_ms() - t0);
         if (p->snap_req && !p->snap_done) {    /* main wants the stats */
             p->snap = p->st;
             p->snap_done = 1;
+        }
+        /* the pre-PLAY Mjolnir NATT keepalive from the video socket
+         * (:8849-8905 — the same shape the media loop sends post-PLAY;
+         * 20 ms until handoff, send-only, never recv here) */
+        if (p->vid_sock && !p->vid_handoff &&
+            kn_sock_now_ms() - last_vid_ka >= 20u) {
+            last_vid_ka = kn_sock_now_ms();
+            snprintf(uname, sizeof uname, "%s:%s", p->vid_payload,
+                     p->local_ufrag);
+            if (kn_ws_rand(tid, sizeof tid) == 0 &&
+                kn_sock_stun_build(tx, sizeof tx, &plen,
+                                   KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                   (const uint8_t *)p->remote_pwd,
+                                   strlen(p->remote_pwd),
+                                   KN_SOCK_STUN_ATTR_USERNAME,
+                                   (const uint8_t *)uname,
+                                   strlen(uname)) == KN_SOCK_OK &&
+                kn_sock_udp_sendto(p->vid_sock, p->vid_ip, p->vid_port,
+                                   tx, plen) == KN_SOCK_OK) {
+                p->vid_ka_sent++;
+                p->st.vid_ka_sent = p->vid_ka_sent;
+            }
         }
         /* the reference bundle worker's cadence (:7837-7846): 20 ms of
          * 3xSTUN+1xNATT until dtls_ready, then NATT-only every 100 ms
@@ -2367,6 +2448,11 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
                     p->st.dtls_in = ds.records_in;
                     p->st.dtls_out = ds.records_out;
                     p->st.dtls_verify = ds.verify_result;
+                    p->st.dtls_app_records = ds.app_records;
+                    p->st.dtls_app_bytes = ds.app_bytes;
+                    p->st.dtls_first_app_len = ds.first_app_len;
+                    memcpy(p->st.dtls_first_app, ds.first_app,
+                           sizeof p->st.dtls_first_app);
                     (void)kn_dtls_ciphersuite(p->dtls, cs, sizeof cs);
                     printf("{\"mode\":\"session\",\"event\":\"dtls_ready\","
                            "\"ms\":%llu,\"version\":\"%.16s\","
@@ -2403,6 +2489,11 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
             kn_dtls_stats_get(p->dtls, &ds);
             p->st.dtls_in = ds.records_in;
             p->st.dtls_out = ds.records_out;
+            p->st.dtls_app_records = ds.app_records;
+            p->st.dtls_app_bytes = ds.app_bytes;
+            p->st.dtls_first_app_len = ds.first_app_len;
+            memcpy(p->st.dtls_first_app, ds.first_app,
+                   sizeof p->st.dtls_first_app);
         }
         {   /* drain inbound: answer the rig's binding requests, count
              * its binding successes (handle_stun_datagram :5151-5172),
@@ -2478,7 +2569,7 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
             }
         }
     }
-    p->st.pump_ms += kn_sock_now_ms() - t0;
+    p->st.pump_ms = ms_base + (kn_sock_now_ms() - t0);
     if (p->snap_req && !p->snap_done) {        /* a late request still
                                                   gets an answer */
         p->snap = p->st;
@@ -2606,8 +2697,15 @@ static int sess_reserve_pair(kn_sock_udp *vid, kn_sock_udp *bun,
         }
         kn_sock_udp_close(vid);
     }
-    if (err && errsz && err[0] == '\0')
-        snprintf(err, errsz, "no adjacent UDP pair available");
+    if (err && errsz && err[0] == '\0') {
+        /* bounded copy, not snprintf: the paranoid =2 gate on this file
+         * cannot prove errsz > 1 (the round-XI discipline) */
+        static const char m[] = "no adjacent UDP pair available";
+        size_t n = sizeof m - 1;
+        if (n > errsz - 1) n = errsz - 1;
+        memcpy(err, m, n);
+        err[n] = '\0';
+    }
     return KN_SOCK_ERR_SOCKET;
 }
 
@@ -3284,7 +3382,8 @@ static int run_session(const char *token, const char *device_id,
            "\"rc\":%d,\"status\":%d}\n", rc, rc == KN_RTSP_OK ? resp.status : 0);
     fflush(stdout);
     if (rc != KN_RTSP_OK || resp.status != 200) {
-        sess_rtsp_detail("OPTIONS", &rtc, &wsc);
+        sess_rtsp_detail("OPTIONS", &rtc, &wsc,
+                                     rc == KN_RTSP_OK ? &resp : NULL);
         goto teardown;
     }
     {
@@ -3299,8 +3398,27 @@ static int run_session(const char *token, const char *device_id,
            "\"rc\":%d,\"status\":%d}\n", rc, rc == KN_RTSP_OK ? resp.status : 0);
     fflush(stdout);
     if (rc != KN_RTSP_OK || resp.status != 200) {
-        sess_rtsp_detail("DESCRIBE", &rtc, &wsc);
+        sess_rtsp_detail("DESCRIBE", &rtc, &wsc,
+                                     rc == KN_RTSP_OK ? &resp : NULL);
         goto teardown;
+    }
+    {   /* round XXXII evidence: the rig's Server header (RTSP.md §16
+         * open question 5 — do the 455/timeout/400 refusal modes
+         * correlate with rig software versions? every run now says) */
+        int h;
+        for (h = 0; h < resp.hdr_count; ++h) {
+            if (resp.names[h][0] == 'S' || resp.names[h][0] == 's') {
+                if ((resp.names[h][1] == 'e' || resp.names[h][1] == 'E') &&
+                    (resp.names[h][2] == 'r' || resp.names[h][2] == 'R')) {
+                    char sesc[192];
+                    lb_json_path(sesc, sizeof sesc, resp.values[h]);
+                    printf("{\"mode\":\"session\",\"event\":\"rig_info\","
+                           "\"server\":\"%s\"}\n", sesc);
+                    fflush(stdout);
+                    break;
+                }
+            }
+        }
     }
     if (kn_rtsp_extract_describe(&resp, &desc) != KN_RTSP_OK) {
         printf("{\"mode\":\"session\",\"error\":\"describe_extract\"}\n");
@@ -3372,7 +3490,8 @@ static int run_session(const char *token, const char *device_id,
                setup.rounds_slept);
         fflush(stdout);
         if (rc != KN_RTSP_OK) {
-            sess_rtsp_detail("SETUP", &rtc, &wsc);
+            sess_rtsp_detail("SETUP", &rtc, &wsc,
+                                     rc == KN_RTSP_OK ? &resp : NULL);
             goto teardown_sock;
         }
 
@@ -3538,7 +3657,8 @@ static int run_session(const char *token, const char *device_id,
                (unsigned long)(nlen % 1000000ul));
         fflush(stdout);
         if (rc != KN_RTSP_OK || resp.status != 200) {
-            sess_rtsp_detail("ANNOUNCE", &rtc, &wsc);
+            sess_rtsp_detail("ANNOUNCE", &rtc, &wsc,
+                                     rc == KN_RTSP_OK ? &resp : NULL);
             goto teardown_sock;
         }
         /* ---- round XXV: pre-PLAY ICE burst (D-s2) ----
@@ -3667,6 +3787,24 @@ static int run_session(const char *token, const char *device_id,
             pump_set_str(pump.local_pwd, sizeof pump.local_pwd, pwd);
             pump_set_str(pump.natt, sizeof pump.natt, ice_natt);
             if (dtls) pump.st.dtls_armed = 1;
+            if (!unified_mode) {
+                /* the reference arms the Mjolnir worker BEFORE PLAY
+                 * (lib.rs:990) — its NATT keepalives from port N route
+                 * the video (:8849-8905). Run 13 left the announced
+                 * video port silent pre-PLAY; the pump thread now
+                 * send-only pings it at 20 ms until the media loop
+                 * takes over (vid_handoff). */
+                uint32_t vip = 0;
+                if (kn_sock_ipv4_parse(setup.peer_ip, &vip) == 0 &&
+                    setup.peer_port) {
+                    pump.vid_sock = &sock;
+                    pump.vid_ip = vip;
+                    pump.vid_port = setup.peer_port;
+                    pump_set_str(pump.vid_payload, sizeof pump.vid_payload,
+                                 setup.have_ping_payload ? setup.ping_payload
+                                                         : "PING");
+                }
+            }
         }
         /* R3-B: in the NON-unified layout the pump thread becomes the
          * reference's bundle worker for the WHOLE session (it keeps
@@ -3726,6 +3864,21 @@ static int run_session(const char *token, const char *device_id,
             if (ice_enabled) ice_st = pump.st;
         }
         if (ice_enabled) {
+            char app_hex[4 * 64 + 1];   /* x4: -Wformat-truncation=2
+                                         * cannot bound hex digits at
+                                         * 16 (they are); the slack
+                                         * silences the over-approx */
+            {   /* the first app record's captured head, as hex (the
+                 * rig's post-DTLS message — R3-C's design input) */
+                static const char hx[] = "0123456789abcdef";
+                unsigned hb, hn = ice_st.dtls_first_app_len;
+                if (hn > 64) hn = 64;
+                for (hb = 0; hb < hn; ++hb) {
+                    app_hex[2 * hb]     = hx[ice_st.dtls_first_app[hb] >> 4];
+                    app_hex[2 * hb + 1] = hx[ice_st.dtls_first_app[hb] & 0xFu];
+                }
+                app_hex[2 * hn] = '\0';
+            }
             printf("{\"mode\":\"session\",\"event\":\"ice_preplay\","
                    "\"stun_sent\":%u,\"natt_sent\":%u,\"req_in\":%u,"
                    "\"answered\":%u,\"ok_in\":%u,\"invalid_in\":%u,"
@@ -3733,7 +3886,9 @@ static int run_session(const char *token, const char *device_id,
                    "\"play_attempts\":%d,\"thread\":%d,\"persist\":%d,"
                    "\"dtls_armed\":%u,\"dtls_started\":%u,"
                    "\"dtls_ready\":%u,\"dtls_ms\":%llu,\"dtls_in\":%u,"
-                   "\"dtls_out\":%u,\"dtls_fail_rc\":%u}\n",
+                   "\"dtls_out\":%u,\"dtls_fail_rc\":%u,\"vid_ka\":%u,"
+                   "\"app_records\":%u,\"app_bytes\":%u,"
+                   "\"app_first_len\":%u,\"app_first\":\"%s\"}\n",
                    ice_st.stun_sent, ice_st.natt_sent, ice_st.req_in,
                    ice_st.answered, ice_st.ok_in, ice_st.invalid_in,
                    ice_st.send_errors, ice_st.pongs_sent,
@@ -3742,11 +3897,15 @@ static int run_session(const char *token, const char *device_id,
                    ice_st.dtls_armed, ice_st.dtls_started,
                    ice_st.dtls_ready,
                    (unsigned long long)ice_st.dtls_ready_ms,
-                   ice_st.dtls_in, ice_st.dtls_out, ice_st.dtls_fail_rc);
+                   ice_st.dtls_in, ice_st.dtls_out, ice_st.dtls_fail_rc,
+                   ice_st.vid_ka_sent, ice_st.dtls_app_records,
+                   ice_st.dtls_app_bytes, ice_st.dtls_first_app_len,
+                   app_hex);
             fflush(stdout);
         }
         if (!desc.disable_play && (rc != KN_RTSP_OK || resp.status != 200)) {
-            sess_rtsp_detail("PLAY", &rtc, &wsc);
+            sess_rtsp_detail("PLAY", &rtc, &wsc,
+                                     rc == KN_RTSP_OK ? &resp : NULL);
             goto teardown_sock;
         }
         /* the handoff line — shapes and LENGTHS only, never key material
@@ -3879,6 +4038,11 @@ static int run_session(const char *token, const char *device_id,
          * socket — "the NATT keepalive pings are WHAT ROUTES VIDEO
          * HERE", :8849-8905). */
         ms = unified_mode ? &bsock : &sock;
+        pump.vid_handoff = 1;       /* the thread stops pinging the video
+                                     * socket; the media loop's own ka
+                                     * takes over (a duplicate ping or
+                                     * two during the overlap is
+                                     * harmless) */
         if (!unified_mode) {
             if (kn_sock_ipv4_parse(setup.peer_ip, &vid_peer_ip) == 0) {
                 vid_peer_port = setup.peer_port;
