@@ -1,0 +1,33 @@
+# KarnyNow TUI dependencies — Python 3.8.20 (cp38), Windows 7.
+#
+# STATUS: RESOLVED BY T8 on the target machine (2026-10-21, rc=0 for all 14
+# packages). These exact versions are what pip selected for THIS interpreter
+# (pip honours Requires-Python, so every wheel below declares 3.8 support).
+# The wheels themselves are cached on the target in tests\t8_wheels\ — offline
+# install (R15 mitigation):
+#     pip install --no-index --find-links tests\t8_wheels -r python\requirements.txt
+# Regular install:
+#     pip install -r python\requirements.txt
+#
+# Notes for stage 4 (do not skip):
+#   - httpx 0.28.x removed the `proxies=` argument -> use `proxy=`/`mounts=`.
+#   - textual 6.x: verify at runtime that Textual(mouse=False) and
+#     color_system="standard" still behave per D10/R19; API churn vs 0.x/1.x
+#     docs is significant — code against the installed version, not memory.
+#   - anyio 4.5.2 / h11 0.16: check httpx transport compat once at stage 4.
+#   - Re-run tests/T8_python_deps.py before any upgrade; never bump blindly.
+#
+textual==6.2.1
+rich==14.3.4
+pygments==2.19.2
+markdown-it-py==3.0.0
+mdurl==0.1.2
+platformdirs==4.3.6
+typing-extensions==4.13.2
+httpx==0.28.1
+httpcore==1.0.9
+h11==0.16.0
+anyio==4.5.2
+sniffio==1.3.1
+idna==3.15
+certifi==2026.10.19

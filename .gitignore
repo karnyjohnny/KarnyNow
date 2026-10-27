@@ -1,0 +1,81 @@
+# ==============================================================
+#  KarnyNow .gitignore
+#  Layout conventions (see README.md):
+#    - every build output lives under build/   (ignored, EXCEPT the
+#      user-supplied FFmpeg tree build/ffmpeg/, which IS tracked)
+#    - every log / test-evidence file lives under logs/ (ignored)
+#    - third_party/ is staged locally at pinned commits, not committed
+#      (staging recipe: README.md §Third-party dependencies)
+# ==============================================================
+
+# --- builds ----------------------------------------------------
+/build/*
+!/build/ffmpeg/
+/build-*/
+
+# --- logs & test evidence --------------------------------------
+/logs/
+*.log
+
+# --- vendored third-party sources (staged per README) ------------
+/third_party/
+
+# --- local session / capture artifacts ---------------------------
+/aus_real_test/
+/aus/
+/cap*.hex
+/cap*.json
+/replay*.jsonl
+/knvstd_*.json
+/selftest_render_check.json
+
+# --- python ------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.env.*
+dist/
+*.egg-info/
+/tests/t8_wheels/
+
+# --- T-harness scratch (temp dirs + verdicts beside the scripts) --
+/T*_tmp/
+/tests/T*_tmp/
+/tests/T4_skrot.txt
+/tests/T4_wynik.json
+/tests/T8_skrot.txt
+/tests/T8_wynik.txt
+/tests/T9_skrot.txt
+/tests/T9_wynik.txt
+
+# --- agent/workspace scratch --------------------------------------
+/uploads/
+/txt_dla_agenta/
+/tools.txt
+/tools/for_ai.py
+/artifacts/
+
+# --- legacy pre-cleanup dirs (obsolete; safe to delete locally) ---
+/t10logs/
+/t11logs/
+/t12logs/
+/t13logs/
+/t13work/
+/testlogs/
+/testlogs2/
+/testdiag/
+/knvstd_testlogs/
+/T10_wynik.txt
+/T10_skrot.txt
+/T13_wynik.txt
+/T13_skrot.txt
+
+# --- IDE / OS ------------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+*.sqlite3
