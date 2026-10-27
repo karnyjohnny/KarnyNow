@@ -25,6 +25,7 @@
 #include "kn/kn_d3d.h"
 #include "kn/kn_decode.h"
 #include "kn/kn_gs.h"
+#include "kn/kn_input.h"
 #include "kn/kn_net.h"
 #include "kn/kn_sha1.h"
 #include "kn/kn_sock.h"
@@ -33,6 +34,7 @@
 
 #include "knfec_kat_vectors.h"
 #include "kn_gs_kat_vectors.h"
+#include "kn_input_kat_vectors.h"
 #include "knsrtp_kat_vectors.h"
 #include "kn_rx_kat_runner.h"   /* rx.vectors battery (stage 2) */
 /* The bundled clip for decode.synthetic (§7.9 "decode a BUNDLED .264").
@@ -1779,6 +1781,148 @@ static int st_rx_vectors(kn_st_result *r)
     return 0;
 }
 
+/* ========================================================= input.vectors
+ * Round XXXVII. The input activation chain is the item runs 16 AND 17 both
+ * lacked (docs/INPUT.md §1-3): the reference sends eight control messages
+ * on sid 0 the instant the control channel opens and INPUT_VERSION arrives
+ * (nvst.rs:6554-6591 -> nvst_input.rs:1318-1329), and its own comment says
+ * an all-zero window state "leaves the session looking INACTIVE"
+ * (:1376-1381). Run 17 proved receiver feedback is NOT our stall cause —
+ * the whole sender set flew for 242 s (rr 242 / qos 4701 / ka 81 / ack 331
+ * / dropped 0) and video still died at 10.99 s, the same shape as run 16's
+ * 10.2 s with no feedback.
+ *
+ * This runner re-proves the SHIPPED BINARY's builders against the
+ * reference client's OWN byte-exact Rust goldens (nvst_input.rs:1768-1800),
+ * transcribed into tools/input_reference.py, which self-proves against them
+ * before emitting kn_input_kat_vectors.h. Three implementations agree:
+ * Rust reference -> Python model -> this C binary. Vectors-only, portable,
+ * no sockets — it runs identically on the host and on Win7. */
+
+typedef struct {
+    kn_input_cursor_cmd cmds[24];
+    size_t n;
+} st_cursor_sink;
+
+static int st_cursor_sink_send(void *ctx, kn_input_cursor_cmd cmd)
+{
+    st_cursor_sink *k = (st_cursor_sink *)ctx;
+    if (k->n < sizeof k->cmds / sizeof k->cmds[0]) k->cmds[k->n++] = cmd;
+    return 1;
+}
+
+static int st_input_vectors(kn_st_result *r)
+{
+    st_tally t;
+    uint8_t chain[KN_INPUT_ACTIVATION_N][KN_INPUT_CMD_MAX];
+    size_t lens[KN_INPUT_ACTIVATION_N];
+    size_t i, total = 0;
+
+    memset(&t, 0, sizeof t);
+
+    /* the eight activation messages, byte-exact */
+    STV(t, kn_input_activation_chain(KN_INPUT_KAT_TS_US, chain, lens) ==
+               (int)KN_INPUT_ACTIVATION_N, "chain builds 8 messages");
+    for (i = 0; i < KN_INPUT_ACTIVATION_N; ++i) {
+        const kn_input_cmd_kat *k = &kn_input_kat_activation[i];
+        STV(t, lens[i] == k->len, "chain message length");
+        STV(t, lens[i] == k->len &&
+               memcmp(chain[i], k->bytes, k->len) == 0, "chain message bytes");
+        total += lens[i];
+    }
+    STV(t, total == 170u, "chain total is 170 bytes");
+
+    /* the singles (keepalive + both cursor commands + the state changes) */
+    for (i = 0; i < kn_input_kat_singles_n; ++i) {
+        const kn_input_cmd_kat *k = &kn_input_kat_singles[i];
+        uint8_t buf[KN_INPUT_CMD_MAX];
+        int n = -1;
+        if (strcmp(k->what, "keepalive0") == 0)
+            n = kn_input_keepalive(0u, buf, sizeof buf);
+        else if (strcmp(k->what, "capture_on") == 0)
+            n = kn_input_cursor_capture(1, buf, sizeof buf);
+        else if (strcmp(k->what, "capture_off") == 0)
+            n = kn_input_cursor_capture(0, buf, sizeof buf);
+        else if (strcmp(k->what, "tracking_on") == 0)
+            n = kn_input_cursor_tracking(1, buf, sizeof buf);
+        else if (strcmp(k->what, "tracking_off") == 0)
+            n = kn_input_cursor_tracking(0, buf, sizeof buf);
+        else if (strcmp(k->what, "window19") == 0)
+            n = kn_input_state_change(KN_INPUT_CMD_WINDOW_STATE,
+                                      KN_INPUT_WINDOW_STATE_ACTIVE, 0u,
+                                      buf, sizeof buf);
+        else if (strcmp(k->what, "system0") == 0)
+            n = kn_input_state_change(KN_INPUT_CMD_SYSTEM_STATE, 0u, 0u,
+                                      buf, sizeof buf);
+        else if (strcmp(k->what, "enable_off") == 0)
+            n = kn_input_enable_input(1u, 0, buf, sizeof buf);
+        else if (strcmp(k->what, "enable_on") == 0)
+            n = kn_input_enable_input(1u, 1, buf, sizeof buf);
+        else if (strcmp(k->what, "haptics") == 0)
+            n = kn_input_haptics(KN_INPUT_KAT_TS_US, 1, buf, sizeof buf);
+        else if (strcmp(k->what, "descriptor") == 0)
+            n = kn_input_device_descriptor(KN_INPUT_KAT_TS_US, 0u, buf,
+                                           sizeof buf);
+        STV(t, n > 0 && (size_t)n == k->len &&
+               memcmp(buf, k->bytes, k->len) == 0, "single golden");
+    }
+
+    /* the keepalive is the exact 8 bytes knvstd_main.c pushes every 3 s */
+    {
+        static const uint8_t want[8] = {
+            0x00, 0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00
+        };
+        uint8_t ka[8];
+        STV(t, kn_input_keepalive(0u, ka, sizeof ka) == 8 &&
+               memcmp(ka, want, sizeof want) == 0,
+            "keepalive golden 0002040000000000");
+    }
+
+    /* the version parser, incl. run 17's LIVE rig bytes (0e0202000300 -> 3)
+     * and both reference fallbacks */
+    for (i = 0; i < kn_input_kat_versions_n; ++i)
+        STV(t, kn_input_protocol_version(kn_input_kat_versions[i].bytes,
+                                         kn_input_kat_versions[i].len) ==
+                   kn_input_kat_versions[i].want, "version vector");
+    for (i = 0; i < kn_input_kat_cursor_n; ++i)
+        STV(t, kn_input_has_cursor_notification(kn_input_kat_cursor[i].bytes,
+                                                kn_input_kat_cursor[i].len) ==
+                   kn_input_kat_cursor[i].want, "cursor-notify vector");
+
+    /* the cursor machine's silent-host sequence (nvst_cursor.rs:204-227):
+     * (MAX_ATTEMPTS-1) x [capture(true), tracking], then the 3 s deadline
+     * hands off IN THE SAME update() call */
+    {
+        kn_input_cursor c;
+        st_cursor_sink sink;
+        uint64_t now = 0u;
+        int tick, handoff;
+        memset(&sink, 0, sizeof sink);
+        kn_input_cursor_init(&c);
+        kn_input_cursor_activate(&c, now);
+        for (tick = 0; tick < 12; ++tick)
+            (void)kn_input_cursor_update(&c,
+                                         now + (uint64_t)KN_INPUT_CURSOR_RETRY_MS *
+                                                   (uint64_t)tick,
+                                         st_cursor_sink_send, &sink);
+        STV(t, sink.n == (size_t)(KN_INPUT_CURSOR_MAX_ATTEMPTS - 1u) * 2u,
+            "silent host emits 14 enable commands");
+        handoff = kn_input_cursor_update(&c,
+                                         now + KN_INPUT_CURSOR_SILENT_HOST_MS,
+                                         st_cursor_sink_send, &sink);
+        STV(t, handoff == 1, "silent host reports the handoff");
+        STV(t, sink.n == 15u &&
+               sink.cmds[14] == KN_INPUT_CURSOR_CMD_CAPTURE_OFF,
+            "the 15th command is capture(false)");
+        STV(t, c.state == KN_INPUT_CURSOR_LOCAL, "cursor reaches local");
+    }
+
+    finish_tally(r, &t,
+                 "\"vectors\":\"kn_input_kat_vectors.h "
+                 "(tools/input_reference.py)\",\"chain\":8");
+    return 0;
+}
+
 typedef int (*kn_st_fn)(kn_st_result *r);
 
 static const struct {
@@ -1788,6 +1932,7 @@ static const struct {
     /* phase A — offline, host-testable */
     { "fec.vectors",      st_fec_vectors },
     { "srtp.vectors",     st_srtp_vectors },
+    { "input.vectors",    st_input_vectors },
     /* phase B — offline/Win32, no network (gs.parse is portable: KAT
      * vectors everywhere, optional real capture on the target) */
     { "clock.resolution", st_clock_resolution },

@@ -417,7 +417,8 @@ def main():
     suites = ["test_knlog", "test_knring", "test_knfec", "test_knsrtp",
               "test_kndiag", "test_knselftest", "test_kngs", "test_knaudio",
               "test_knrx", "test_knsock", "test_knws", "test_knrtsp",
-              "test_kncm", "test_kncert", "test_kndtls", "test_knsctp"]
+              "test_kncm", "test_kncert", "test_kndtls", "test_knsctp",
+              "test_kninput"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out
@@ -431,9 +432,9 @@ def main():
         names = json.loads(out.strip().splitlines()[-1])["selftests"]
     except Exception as exc:                       # noqa: BLE001
         log("  cannot parse list: %s" % exc)
-    check(rc == 0 and len(names) == 14, results,
-          "registry lists 14 self-tests (12 from §7.9 + rx.vectors + "
-          "sock.loopback)")
+    check(rc == 0 and len(names) == 15, results,
+          "registry lists 15 self-tests (12 from §7.9 + rx.vectors + "
+          "sock.loopback + input.vectors)")
 
     # R25 milestone 0: d3d.present runs STANDALONE first — its own process,
     # so even a hard driver fault cannot take the rest of the run's evidence
@@ -486,8 +487,13 @@ def main():
         # sock.loopback (round XVII) joins this list: it is PORTABLE (real
         # winsock on the target, real BSD sockets on a posix dry-run), so
         # "ok" is required on every platform — a skip would be a stub.
+        # input.vectors (round XXXVII) joins this list: the control/input
+        # plane's KAT battery is pure wire-format code with no backend
+        # split, so it runs identically in the target binary and in the
+        # sandbox — a skip or a failure there means the SHIPPED builders
+        # disagree with the reference's own goldens (docs/INPUT.md §3).
         for nm in ("fec.vectors", "srtp.vectors", "gs.parse", "rx.vectors",
-                   "sock.loopback"):
+                   "sock.loopback", "input.vectors"):
             r = by_name.get(nm)
             check(r and r["status"] == "ok" and r["failures"] == 0, results,
                   "%s ok in the target binary" % nm)

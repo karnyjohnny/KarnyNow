@@ -57,3 +57,4 @@ logs/
 /build-mbedtls/
 /t13logs/
 /t13work/
+/aus_real_test/

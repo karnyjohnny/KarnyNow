@@ -68,6 +68,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     fi
     $CC $CFLAGS -c streamer/src/kn_dtls.c  -o build/cross/kn_dtls_$arch.o
     $CC $CFLAGS -c streamer/src/kn_sctp.c  -o build/cross/kn_sctp_$arch.o
+    $CC $CFLAGS -c streamer/src/kn_input.c -o build/cross/kn_input_$arch.o
     # round XXXIII (R3-C): the kn_sctp REAL body + the test's real section
     # must survive the exact target flags whenever the usrsctp tree exists
     if [ -d third_party/usrsctp/usrsctplib ]; then
@@ -152,6 +153,8 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         $LDFLAGS -o build/cross/test_kndtls_$arch.exe -lws2_32
     $CC $CFLAGS streamer/src/kn_sctp.c streamer/tests/test_knsctp.c \
         $LDFLAGS -o build/cross/test_knsctp_$arch.exe
+    $CC $CFLAGS streamer/src/kn_input.c streamer/tests/test_kninput.c \
+        $LDFLAGS -o build/cross/test_kninput_$arch.exe
     $CC $CFLAGS streamer/src/kn_aes.c streamer/src/kn_sha1.c streamer/src/knsrtp.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c \
         streamer/tests/test_knsrtp.c $LDFLAGS -o build/cross/test_knsrtp_$arch.exe
@@ -166,7 +169,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_ws.c streamer/src/kn_rtsp.c \
         streamer/src/kn_json.c streamer/src/kn_http.c streamer/src/kn_cm.c \
         streamer/src/kn_cert.c streamer/src/kn_dtls.c \
-        streamer/src/kn_sctp.c \
+        streamer/src/kn_sctp.c streamer/src/kn_input.c \
         third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
     $CC $CFLAGS $KCORE streamer/tests/test_kndiag.c \
         $LDFLAGS -o build/cross/test_kndiag_$arch.exe -lwinmm -ld3d9 -lole32 \

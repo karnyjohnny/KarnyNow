@@ -1796,3 +1796,181 @@ fields (D-t10) or the input activation chain (nvst_input.rs:1318-1328
 next fidelity candidate, deferred until measured). Presentation wiring
 (frames → the G1-proven kn_d3d presenter = video ON SCREEN) is the
 parallel track for G2.
+
+---
+
+## 24. Round XXXVII — R7 run 17: **the feedback hypothesis is DISPROVED** (the full sender set flew for 242 s and video still died at 10.99 s) → the input ACTIVATION CHAIN ships as the new prime suspect
+
+Target first: `T10 VERDICT: ALL PASS (76 checks)` on the round-XXXVI tree,
+zero warnings — the eighth consecutive clean target build. **After this
+round the expectation is 78** (+1 for the `test_kninput` suite, +1 for the
+`input.vectors` target-binary assertion).
+
+Run 17 used the same command with `--session-seconds=300`; the user
+Ctrl-C'd at 242 s because nothing was on screen ("Na web kliencie nie ma
+sesji" — expected, the browser client was not in the loop).
+
+### 24.1 Everything up to PLAY was at least as good as run 16
+
+```
+dtls_ready    ms:102  DTLSv1.2  TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256  verify:0  srtp_prof:1
+sctp_up       ms:36                    (run 16: 52 ms)
+sctp_channels opened:8 acked:8 rig_opened:0
+PLAY          rc:0 status:200 attempt:1
+handoff       AEAD_AES_256_GCM_8 tag 8 key 32 local, rtcp_on_sctp:1, unified:0, ping 6
+```
+
+New this run — the rig's **own SCTP INIT** was captured as the first DTLS
+app record (`app_first_len:44`), which parses cleanly as a textbook
+sctp-proto INIT and independently confirms our parameter choices:
+
+| field | value | note |
+|---|---|---|
+| ports | 5000 → 5000 | RFC 8831 / our wire params |
+| chunk | `01` INIT, length 30 | |
+| initiate tag | `e2acdc88` | |
+| a_rwnd | `0x00500000` = 5 242 880 | the rig advertises 5 MiB (we send 1 MiB — legal, it is a per-direction limit) |
+| OS / MIS | 128 / 128 | we offer 65535/65535; the negotiated pair is the minimum, as always |
+| initial TSN | `931b3eb2` | |
+| param `0xC000` len 4 | **FORWARD-TSN-SUPPORTED** (RFC 3758) | the rig supports PR-SCTP — our per-sid TTL/RTX policies are meaningful |
+| param `0x8008` len 6 → `82 c0` | **SUPPORTED-EXTENSIONS** (RFC 4805) listing chunk types `0x82` PAD and `0xC0` FORWARD-TSN | |
+| trailer | `00 00` | even-length padding |
+
+`app_records:25 / app_bytes:3984`, `sctp_out:17 / sctp_in:25`,
+`sctp_first sid:0 ppi:53 len:6 "0e0202000300"`, `peer_closed:0`,
+`post_first` again an epoch-1 application record (`17 fefd …`) — the
+run-16 reading reconfirmed a third time.
+
+### 24.2 The measurement that matters: feedback flew, video still died
+
+```
+summary: datagrams 3027, authenticated 3027, aus 331, frames 331, keyframes 10,
+         frames_decoded 331, frames_failed 0, decode_errors 0, q_overflows 0,
+         fec_repaired 4, stale 0, gaps 0, withheld 0, kf_requests 1,
+         recv_timeouts 22711, recv_errors 0, wall_ms 242173,
+         feedback { rr 242, ack 331, pacing 167, qos 4701, ka 81,
+                    nack 0, idr 1, pli 1, rfi 0, pushed 5524, dropped 0 }
+```
+
+| quantity | value | reading |
+|---|---|---|
+| video span | ts 867936 → 1856990 = 989054 ticks = **10.99 s** | run 16: ~10.2 s |
+| frame rate | 331 AUs / 10.99 s = **30.12 fps** | a clean 30 fps stream, then silence |
+| RR coverage | 242 messages ≈ **242 s** at 1 s | flew the WHOLE session, including 231 s after the stall |
+| QoS coverage | 4701 ≈ **235 s** at 50 ms | same |
+| keepalive coverage | 81 ≈ **243 s** at 3 s | same |
+| pacing coverage | 167 × 55.556 ms = **9.28 s** | frame-gated — stops with the video, exactly like the reference's (`take_completed_frame()` loop, nvst.rs:7913-7935) |
+| ack | 331 = one per AU | correct |
+| dropped | **0** | the outbox was never saturated |
+| recovery | `kf_request sent:1`, `idr 1`, `pli 1` | **flew this time** (run 16: `sent:false`) — and the rig never answered |
+
+Two conclusions, and they are the round:
+
+1. **The round-XXXVI sender set is correct and was never starved.** RR,
+   QoS and keepalive demonstrably covered all 242 s; the frame-gated
+   pacing stopped *because* the video stopped, not before it.
+2. **Receiver feedback is NOT what our rig is waiting for.** The stall
+   moved 10.2 s → 10.99 s, i.e. not at all. `progress_stall` fired at
+   `idle_ms:5002`, `recovery_timeout` at `idle_ms:5024`, and the IDR+PLI
+   we then sent drew nothing — the rig had already torn the video down.
+
+Side observation, deliberately **not** over-read: AU sizes fall monotonically
+over the burst (18 356 → 13 912 → … → 4 378 → 2 946 → 2 862 B). That is
+consistent both with a rate controller ramping down and with a static
+desktop compressing better after its first keyframe; 10 keyframes in 331
+AUs (~1 per 1.1 s) is a periodic-IDR pattern. No conclusion drawn — the
+QoS estimator fields (D-t10) stay the secondary suspect.
+
+### 24.3 The elimination, and what it left
+
+The reference's complete control-plane inventory was swept for a
+device-less session (docs/INPUT.md §2). Exactly one **startup** item was
+missing from both runs 16 and 17:
+
+**the eight-message input activation chain** — `enable_input(off)` →
+`device_descriptor` → `cursor_capture(true)` → `cursor_tracking(true)` →
+`window_state 19` → `system_state 0` → `enable_input(on)` →
+`haptics(true)` — sent once, on sid 0, the instant the control channel is
+open and `INPUT_VERSION` has arrived (nvst.rs:6554-6591 →
+nvst_input.rs:1318-1329).
+
+The reference documents the consequence of not sending the window state
+itself (nvst_input.rs:1376-1381): an all-zero window state *"leaves the
+session looking **inactive**"*. Run 17 gave us the version to negotiate —
+`0e 02 02 00 03 00` parses as `0x020e` with a 2-byte payload, **input
+protocol version 3** — and we never answered it, nor any of the rig's 20
+control messages.
+
+### 24.4 What round XXXVII ships
+
+* **`kn_input.{h,c}`** — the control/input plane: TLV framing, all eight
+  chain builders, the record-list walker, `input_protocol_version` with
+  **both** reference fallbacks, cursor-notification detection, a bounded
+  command histogram with a JSONL-safe serializer, and the full
+  cursor-capture handoff machine (nvst_cursor.rs:3-126).
+* **`tools/input_reference.py`** — the independent Python model. It
+  self-proves against the reference's OWN byte-exact Rust goldens
+  (nvst_input.rs:1768-1800, `timestamp_us = 20 102 193`) and its parser
+  vectors (:1698-1712) **before** emitting
+  `streamer/src/kn_input_kat_vectors.h`. The chain is therefore pinned by
+  three implementations, not by our reading of the Rust. One real trap was
+  caught this way: for `0e 02 ff 00 03` the reference returns **255**
+  (fallback #1 reads `data[2..4]` verbatim), not the command code.
+* **`test_kninput`** — 446 checks: 8/8 chain goldens + 11 singles,
+  7 parser vectors (including run 17's live bytes), 7 cursor-notification
+  vectors, all **five** reference cursor tests replayed as C command
+  sequences, buffer/NULL contracts, and an every-truncation sweep of every
+  golden (ASan-clean).
+* **Pump-thread wiring** (`sess_ctrl_*` in knvstd_main.c) — the handshake
+  latch, the chain, the cursor machine, and the evidence set that closes
+  run 17's blind spot: `ctrl_msg` (the first 8 inbound messages verbatim
+  with named codes), `input_version`, `input_activation`,
+  `cursor_handoff`, `ctrl_in` (30 s histogram beat) and `ctrl_summary`.
+* Deviations **D-t11** (unbatched control records — wire-compatible, the
+  reference batches) and **D-t12** (the chain retry is bounded at 8
+  attempts instead of unbounded) are recorded in docs/INPUT.md §7.
+* **NEW `input.vectors` self-test** (48 checks, phase A, gated) — the §7.9
+  discipline: the SHIPPED `knvstd` binary re-proves the same goldens, so
+  the target run verifies the builders on Win7 and not only in the
+  sandbox. The registry goes **14 → 15**; `test_knselftest` (117 checks)
+  and the T10 harness counts follow, and T10 now asserts
+  `input.vectors ok in the target binary`.
+
+Gates: native **17** suites PASS (test_kninput **446**, test_knselftest
+**117**) · cross ×2 PASS zero warnings · ctest **19/19 ×2** backends ·
+ASan+UBSan+LSan clean on both (zero diagnostics from `streamer/` code) ·
+OpenSSL interop ×2 legs PASS · E2E **43/43** · T10 POSIX dry **68** ·
+T13 **63** · paranoid knvstd ×9 (−O0/−O2/−O3 × bare/mbedTLS/usrsctp) +
+kn_input ×3 clean.
+
+> Pre-existing, NOT this round's and NOT gated: `-Wformat-truncation=2` over
+> `kn_selftest.c` flags `st_decode_synthetic` (:871) and `st_net_tls`
+> (:1622). The paranoid gate covers the knvstd legs and T10 does not use
+> `=2`, so the target build is unaffected; recorded in INTEGRATION.md rev 27
+> so extending the gate later is not a surprise.
+
+### 24.5 What run 18 decides
+
+Same command, `--session-seconds=180`. The new evidence lines answer it
+directly:
+
+* **Video sustains** (aus ≈ 30/s × seconds, no `progress_stall`) →
+  **stage 2 is done**; the activation chain was the gate, and the
+  presentation wiring (frames → the G1-proven `kn_d3d_vp` presenter =
+  G2 video ON SCREEN) becomes the main track.
+* **`input_activation sent:8 failed:0 ready:1` but the stall persists at
+  ~11 s** → the activation hypothesis dies too, and the suspects narrow to
+  the QoS estimator fields (D-t10 / `nvst_bandwidth.rs` — the server PID
+  reads them, nvst.rs:7924-7927) and whatever `ctrl_summary.codes` shows
+  the rig asking for that we still ignore. **Paste `ctrl_summary` and the
+  `ctrl_msg` lines — that is the whole point of this round's
+  instrumentation.**
+* **`cursor` reaching `local` via `cursor-notification`** → the rig's
+  ServerControl path answered us, which is itself new information (run 17
+  never proved the rig reacts to anything we send on sid 0).
+* **`version:-1`** → the rig withheld `0x020e` this time; the chain cannot
+  fire and the handshake timeout gap (docs/INPUT.md G1) becomes relevant.
+
+Paste: `dtls_ready`, `sctp_up`, `sctp_channels`, `PLAY`, the `ctrl_msg`
+lines, `input_version`, `input_activation`, one `ctrl_in`, `handoff`, the
+FULL summary and `ctrl_summary`.

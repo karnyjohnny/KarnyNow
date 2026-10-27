@@ -1,4 +1,137 @@
-# INTEGRATION NOTES — Round XXXVI delta, rev 26 (R7 run 16 = PLAY 200 — THE FIRST REAL GFN VIDEO THROUGH THE FULL STACK: 4900/4900 authenticated, 307 frames decoded, R32's final stage-2 gate PASSED; the ~10 s feedback stall → the reference's FULL sender set ships: RR/frame-ack/pacing/QoS/keepalive/IDR+PLI/NACK/RFI over the live channels)
+# INTEGRATION NOTES — Round XXXVII delta, rev 27 (R7 run 17 = THE FEEDBACK HYPOTHESIS DISPROVED: the complete sender set flew for all 242 s — rr 242 / qos 4701 / ka 81 / ack 331 / dropped 0 — and video still died at exactly 10.99 s / 331 AUs, the same shape as run 16's 10.2 s with NO feedback; the IDR+PLI we then sent drew no answer → the one startup item BOTH runs lacked ships: the eight-message INPUT ACTIVATION CHAIN, plus the cursor-capture handoff machine and the inbound-control evidence that run 17's blind spot demanded)
+
+> **Rev 27 supersedes rev 1-26.** Canonical state: `PROJECT-STATE.md`.
+> Design records: **`docs/INPUT.md`** (NEW — the control/input plane:
+> the full inventory, the chain byte-for-byte, the handshake gate, the
+> cursor machine, deviations D-t11/D-t12 and gaps G1-G5),
+> **`docs/RTSP.md` §24** (run 17 — the elimination),
+> `docs/SCTP.md` (the association layer, unchanged this round).
+>
+> **Round XXXVII headline: run 17 is a NEGATIVE result with a decisive
+> shape.** The reference's stated cause ("without any receiver feedback
+> the server stops video after an initial burst", nvst.rs:4320-4323) does
+> NOT explain our stall: RR covered 242 s, QoS 235 s, keepalive 243 s,
+> ack one per AU, the outbox never dropped — and the stall moved
+> 10.2 s -> 10.99 s, i.e. not at all. Pacing covered 9.28 s because it is
+> frame-gated in the reference too, so it stopped WITH the video, not
+> before it. Recovery finally flew (`kf_request sent:1`, idr 1, pli 1) and
+> the rig ignored it. Sweeping the reference's complete control-plane
+> inventory for a device-less session left exactly one missing STARTUP
+> item: the activation chain of nvst_input.rs:1318-1329, whose
+> window-state member the reference documents as the difference between a
+> session that looks active and one that does not ("leaves the session
+> looking inactive", :1376-1381). Run 17 even handed us the version to
+> negotiate — `0e0202000300` = `0x020e`, **input protocol version 3** —
+> and we answered nothing, then or for the rig's other 19 messages.
+>
+> **Bonus live datum:** the rig's own SCTP INIT was captured verbatim
+> (`app_first_len:44`) and parses as a textbook sctp-proto INIT — ports
+> 5000/5000, a_rwnd 5 MiB, OS/MIS 128/128, FORWARD-TSN-SUPPORTED
+> (`0xC000`) and SUPPORTED-EXTENSIONS (`0x8008` -> chunk types `0x82` PAD,
+> `0xC0` FORWARD-TSN). Our PR-SCTP policies are meaningful to this rig.
+
+## New files
+
+| file | what | provenance |
+|---|---|---|
+| `streamer/include/kn/kn_input.h` | the control/input plane API: 17 command codes, 5 cadence constants, 8 builders, the TLV walker, the version parser, the histogram, the cursor machine | every constant carries its reference line (nvst_input.rs:11-12/:25-42, nvst_cursor.rs:3-5) |
+| `streamer/src/kn_input.c` | the implementation — pure wire-format code, no sockets/threads/allocation, identical in every build | nvst_input.rs:1318-1391 + :404-441 + :956-995, nvst_cursor.rs:52-126 |
+| `streamer/src/kn_input_kat_vectors.h` | **GENERATED** — do not edit; regeneration is byte-identical | emitted by `tools/input_reference.py` after self-proof |
+| `tools/input_reference.py` | the independent Python model (the two-implementations rule) | self-proves against nvst_input.rs:1768-1800 goldens + :1698-1712 parser vectors BEFORE emitting |
+| `streamer/tests/test_kninput.c` | **446 checks** — the 17th suite | replays the goldens AND all five nvst_cursor.rs tests as C |
+| `docs/INPUT.md` | the layer's design record | NEW |
+
+## Changed files
+
+| file | change |
+|---|---|
+| `streamer/src/knvstd_main.c` | (a) `#include "kn/kn_input.h"`; (b) `sess_ice_stats` gains 13 control-plane fields incl. `char ctrl_hist[768]`; (c) new `sess_ctrl_raw` type + 9 pump fields (`cursor`, `ctrl_hist`, `input_version = -1`, `activation_sent/attempts`, `origin_us`, `next_ctrl_log_ms`, `ctrl_raw[8]`); (d) NEW `sess_ctrl_open/send`, `sess_cursor_send`, `sess_ctrl_hist_cb`, `sess_ctrl_names{,_cb}`, `sess_ctrl_refresh_hist`, `sess_ctrl_ingest`, `sess_ctrl_try_activate`, `sess_ctrl_service`; (e) `sess_sctp_msg`'s non-DCEP branch now calls `sess_ctrl_ingest` (the D-t4 "never silently dropped" discipline, extended from capture-the-first to name-every-record); (f) the pump loop calls `sess_ctrl_service(p)` right after `sess_sctp_service(p)`; (g) pump init sets the origin/latches/histogram; (h) NEW `ctrl_summary` evidence line before the session summary, from a FRESH `sess_pump_snapshot` (the pump thread still owns the stats at that point) |
+| `CMakeLists.txt` | `streamer/src/kn_input.c` into `kncore`; `kninput` into the test `foreach` |
+| `tools/build_native_tests.sh` | `kn_input.c` into `$KNCORE`; new `test_kninput` compile + run leg (`rc21`) and FAIL-message entry |
+| `tools/cross_check.sh` | `kn_input.c` `-c` leg per arch; `test_kninput_$arch.exe` link leg; `kn_input.c` into `$KCORE` (the F1 link leg) |
+| `streamer/src/kn_selftest.c` | NEW **`input.vectors`** self-test (phase A, 48 checks) — re-proves the SHIPPED BINARY's eight chain builders, the version parser (incl. run 17's live bytes) and the cursor machine's silent-host sequence against the same goldens; `#include "kn/kn_input.h"` + `kn_input_kat_vectors.h`; registry **14 -> 15** |
+| `streamer/include/kn/kn_selftest.h` | the documented phase-A list gains `input.vectors` with its "separates what" line |
+| `streamer/tests/test_knselftest.c` | registry count 14 -> **15**, `run_all` 14 -> 15, host `ok_count` 5 -> **6**, and `input.vectors` joins the portable-must-be-OK set (**117 checks**) |
+| `tests/T10_build_and_test.py` | `"test_kninput"` into the `suites` list, the registry assertion 14 -> **15**, and `"input.vectors"` into the "ok in the target binary" list — **the target check count goes 76 -> 78** (+1 suite, +1 self-test assertion) |
+| `docs/RTSP.md` | §24 (run 17 — the elimination, the INIT decode, the gate table) |
+| `PROJECT-STATE.md` | status header, stage table, risk register (R35 NEW), Next steps, session log |
+
+## Integration notes / traps for the next agent
+
+1. **`test_kninput` is backend-independent.** `kn_input.c` has no stub/real
+   split (unlike `kn_cert`/`kn_dtls`/`kn_sctp`) — it is pure wire-format
+   code, so the sandbox run and the target run execute the SAME 446
+   checks. No CMake define needed.
+2. **The timestamp endianness split is a live trap.** `device_descriptor`
+   writes `timestamp_us` **BE** (nvst_input.rs:1360); the haptics
+   `remote_input_message` writes it **LE** (:973). Both are pinned by
+   dedicated checks (`descriptor timestamp is BE`, `haptics timestamp is
+   LE`) — do not "unify" them.
+3. **`input_protocol_version` has TWO fallbacks and the first is
+   counter-intuitive.** For `0e 02 ff 00 03` the reference returns **255**
+   (it reads `data[2..4]` verbatim), not `0x020e`. `tools/input_reference.py`
+   caught our own wrong expectation here before the C port did.
+4. **`0x0308` is NOT a cursor notification.** Our own `capture(true)`
+   command shares the "cursor" vocabulary with the rig's server-cursor
+   notifications `0x010f`/`0x0110`; the detector must only fire on the
+   latter (checked both ways in `test_kninput`).
+5. **The cursor machine's deadline check runs BEFORE the state match, in
+   the same call** (nvst_cursor.rs:82-89) — so the silent-host fallback
+   sends `capture(false)` in the very `update()` that trips the deadline.
+   The 15-command sequence in `t_cursor_silent_host` pins it.
+6. **`ctrl_hist` is embedded as a raw JSON value, not a string.** It
+   contains `[["020e",1],...]` with real quotes, emitted as `"codes":%s`.
+   `kn_input_hist_json` REFUSES (returns −1) rather than truncate, and
+   `sess_ctrl_refresh_hist` substitutes `["hist-too-large"]` — so a
+   `ctrl_in`/`ctrl_summary` line can never be malformed JSONL.
+7. **The activation runs on the PUMP thread**, not the main one: that
+   thread owns the SCTP socket and the mbedTLS context (single-owner
+   discipline). Main reads the control-plane state only through
+   `sess_pump_snapshot`. D21 is untouched — the media loop stays
+   single-threaded.
+8. **`origin_us` is set at pump init**, before the thread starts, so the
+   chain's `ts_us` is elapsed-since-transport-origin like the reference's
+   `transport_origin.elapsed()` (nvst.rs:6564-6567) — not wall clock.
+
+## Gate results (sandbox, this round)
+
+| gate | result |
+|---|---|
+| `tools/build_native_tests.sh` | **NATIVE TESTS PASS** — 17 suites (test_kninput **446**, test_knselftest **117**), jsonl + zip validation, paranoid knvstd leg |
+| `tools/cross_check.sh` | **CROSS-CHECK PASS** ×2 (x86_64 + i686), zero warnings under `-Wall -Wextra -Werror`, incl. the usrsctp real-body leg and the F1 link leg (`test_kninput_{x86_64,i686}.exe` built) |
+| ctest, mbedTLS backend | **19/19 PASS**, zero build warnings |
+| ctest, schannel backend | **19/19 PASS**, zero build warnings |
+| ASan+UBSan+LSan on `test_kninput` | **446/446, zero diagnostics** |
+| ASan+UBSan+LSan on `test_knselftest` | **117/117, zero diagnostics** from `streamer/` code (the only runtime error is the documented pre-existing formal UB in the hash-pinned `third_party/crypto-algorithms-sha1/sha1.c:26` — R33 policy) |
+| `tools/dtls_openssl_check.py` | **PASS** ×2 legs (srtp_profile 0x0000 and 0x0001) |
+| `tools/sandbox_session_e2e` | **43/43 PASS** (no regression) |
+| `tests/T10_build_and_test.py` (POSIX dry) | **ALL PASS (68 checks)** — was 66: +1 for the new suite, +1 for the new "input.vectors ok in the target binary" assertion; `knvstd --selftest=input.vectors` reports **48 checks, 0 failures, gated** |
+| `tests/T13_udp_e2e.py` | **ALL PASS (63 checks)** — unchanged |
+| paranoid matrix | knvstd ×9 (−O0/−O2/−O3 × bare/mbedTLS/usrsctp) + kn_input ×3, all clean with `-Wunused-but-set-variable -Wformat-truncation=2` |
+
+> **Pre-existing finding, NOT introduced this round and NOT gated:** running
+> the paranoid level over `streamer/src/kn_selftest.c` surfaces two
+> `-Wformat-truncation=2` diagnostics in code this round did not touch —
+> `st_decode_synthetic` (:871, an unbounded `%.1f` fps) and `st_net_tls`
+> (:1622, a `%s` tail). The project's paranoid gate is declared over the
+> **knvstd legs** only, and T10 does not use `=2`, so neither affects the
+> target build; both merely clip a human-readable `reason` string.
+> Recorded so that extending the paranoid gate to `kn_selftest.c` is not a
+> surprise failure later — fixing them needs the R28 value-range bounding
+> treatment and belongs in its own round.
+
+**Next (user side):** sync the changed files, run
+`python tests\T10_build_and_test.py` → expect **ALL PASS 78**, zero
+warnings (the 15th self-test `input.vectors` must report `ok` with 48
+checks in the TARGET binary too — that is the proof the shipped builders
+match the reference's goldens on Win7, not just in the sandbox). Then **R7 run 18** (`--session-seconds=180`) and paste
+`ctrl_msg` / `input_version` / `input_activation` / one `ctrl_in` /
+`ctrl_summary` / the full summary — see docs/RTSP.md §24.5 for the
+decision matrix.
+
+---
+
+# Round XXXVI delta, rev 26 (R7 run 16 = PLAY 200 — THE FIRST REAL GFN VIDEO THROUGH THE FULL STACK: 4900/4900 authenticated, 307 frames decoded, R32's final stage-2 gate PASSED; the ~10 s feedback stall → the reference's FULL sender set ships: RR/frame-ack/pacing/QoS/keepalive/IDR+PLI/NACK/RFI over the live channels)
 
 > **Rev 26 supersedes rev 1-25.** Canonical state: `PROJECT-STATE.md`.
 > Design records: **`docs/RTSP.md` §23** (run 16 — the breakthrough —

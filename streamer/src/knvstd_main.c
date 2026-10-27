@@ -38,6 +38,7 @@
 #include "kn/kn_diag.h"
 #include "kn/knfec.h"
 #include "kn/kn_http.h"
+#include "kn/kn_input.h"
 #include "kn/kn_net.h"
 #include "kn/kn_perf.h"
 #include "kn/kn_rtsp.h"
@@ -2485,6 +2486,24 @@ typedef struct {
      * bundle — rtcAudioOnNativeBundle:1; counted separately now,
      * consumed at the audio stage) + the feedback-outbox send counter */
     unsigned bundle_rtp_in, bundle_rtcp_in, fb_sent;
+    /* round XXXVII: the control/input plane (docs/INPUT.md). Run 17
+     * disproved the round-XXXVI hypothesis — the whole feedback set flew
+     * for 242 s (rr 242 / qos 4701 / ka 81 / ack 331 / dropped 0) and
+     * video still died at exactly 10.99 s, the same shape as run 16's
+     * 10.2 s with NO feedback. What both runs lacked is the input
+     * activation chain (nvst.rs:6554-6591). These counters say whether
+     * it flew, and what the rig said back — run 17 left its 20 control
+     * messages uninterpreted, which must never happen again. */
+    int      input_version;        /* the rig's negotiated 0x020e, -1 = none */
+    unsigned input_ready;          /* control open + version + chain sent */
+    unsigned ctrl_msgs;            /* inbound non-DCEP messages */
+    unsigned ctrl_records;         /* TLV records walked inside them */
+    unsigned activation_sent, activation_fail, activation_attempts;
+    unsigned cursor_state;         /* kn_input_cursor_state */
+    unsigned cursor_enables, cursor_trackings, cursor_disables;
+    unsigned cursor_handoffs;
+    unsigned ctrl_hist_overflow;
+    char     ctrl_hist[768];       /* [["020e",1],...] — the code histogram */
     uint64_t pump_ms;
 } sess_ice_stats;
 
@@ -2506,6 +2525,16 @@ typedef struct {
  * tick). Thread APIs: kernel32 CreateThread/WaitForSingleObject/
  * CloseHandle (already in the F1 import set) / POSIX pthread (the
  * native build already links -pthread). */
+/* round XXXVII: one inbound control message, captured verbatim (the
+ * run-17 evidence gap: the rig sent 20 messages and we could only name
+ * the first). Head-only capture, bounded, no allocation. */
+#define SESS_CTRL_RAW_HEAD  48u   /* captured bytes per inbound message */
+#define SESS_CTRL_RAW_MAX    8u   /* how many are dumped verbatim */
+typedef struct {
+    unsigned sid, ppi, len, head_len;
+    uint8_t  head[SESS_CTRL_RAW_HEAD];
+} sess_ctrl_raw;
+
 typedef struct {
     kn_sock_udp *sock;
     uint32_t dest_ip;
@@ -2547,6 +2576,20 @@ typedef struct {
      * read st directly (torn 64-bit reads on i686, half-updated
      * counters) — it raises snap_req, the thread copies st into snap
      * at its next loop pass (<= ~25 ms) and raises snap_done. */
+    /* round XXXVII: the control/input plane. It lives HERE, in the pump
+     * thread — that thread owns the SCTP socket and the mbedTLS context
+     * (single-owner discipline), and the reference runs the same logic in
+     * its bundle worker (nvst.rs:7515-7531 / :7756-7766). Main only ever
+     * reads the snapshot. */
+    kn_input_cursor cursor;
+    kn_input_hist   ctrl_hist;
+    int      input_version;          /* -1 until the rig's 0x020e lands */
+    unsigned activation_sent;        /* latch: the chain flies once */
+    unsigned activation_attempts;
+    uint64_t origin_us;              /* transport origin (chain timestamps) */
+    uint64_t next_ctrl_log_ms;
+    unsigned ctrl_raw_n;
+    sess_ctrl_raw ctrl_raw[SESS_CTRL_RAW_MAX];
     volatile int snap_req, snap_done;
     sess_ice_stats snap;
     volatile int stop;
@@ -2585,6 +2628,237 @@ static int sess_sctp_write(void *ctx, const uint8_t *data, size_t len)
     return kn_dtls_write_app(p->dtls, data, len) == KN_DTLS_OK ? 0 : -1;
 }
 
+/* ---- round XXXVII: the control/input plane (docs/INPUT.md) ---- */
+
+/* The reference's control_is_open() (nvst_input.rs:357-359) is "the
+ * reliable control channel exists". Our equivalent: the association is
+ * up and every DCEP OPEN we sent was ACKed (run 17: opened 8 acked 8). */
+static int sess_ctrl_open(sess_pump *p)
+{
+    return p->st.sctp_opened > 0u && p->st.sctp_acked >= p->st.sctp_opened;
+}
+
+/* sid 0 = CONTROL_RELIABLE_LABEL: ordered, reliable, no PR-SCTP policy
+ * (nvst_input.rs:72-78). Every activation/cursor message rides here. */
+static int sess_ctrl_send(sess_pump *p, const uint8_t *msg, size_t len)
+{
+    if (!p->sctp || !kn_sctp_established(p->sctp)) return 0;
+    return kn_sctp_send(p->sctp, 0, KN_SCTP_PPI_BINARY, 1, msg, len)
+               == KN_SCTP_OK;
+}
+
+/* the cursor machine's sink (nvst_cursor.rs emits Capture(bool)/Tracking) */
+static int sess_cursor_send(void *ctx, kn_input_cursor_cmd cmd)
+{
+    sess_pump *p = (sess_pump *)ctx;
+    uint8_t buf[KN_INPUT_CMD_MAX];
+    int n = -1;
+    if (cmd == KN_INPUT_CURSOR_CMD_CAPTURE_ON)
+        n = kn_input_cursor_capture(1, buf, sizeof buf);
+    else if (cmd == KN_INPUT_CURSOR_CMD_CAPTURE_OFF)
+        n = kn_input_cursor_capture(0, buf, sizeof buf);
+    else if (cmd == KN_INPUT_CURSOR_CMD_TRACKING)
+        n = kn_input_cursor_tracking(1, buf, sizeof buf);
+    if (n <= 0) return 0;
+    return sess_ctrl_send(p, buf, (size_t)n);
+}
+
+/* the TLV histogram sink: every record the rig sends gets counted */
+static void sess_ctrl_hist_cb(void *ctx, uint16_t code,
+                              const uint8_t *payload, size_t plen)
+{
+    sess_pump *p = (sess_pump *)ctx;
+    (void)payload; (void)plen;
+    kn_input_hist_add(&p->ctrl_hist, code);
+}
+
+/* a compact "020e:input-version,0200:keepalive" rendering for evidence */
+typedef struct { char *buf; size_t cap, used; } sess_ctrl_names;
+
+static void sess_ctrl_names_cb(void *ctx, uint16_t code,
+                               const uint8_t *payload, size_t plen)
+{
+    sess_ctrl_names *n = (sess_ctrl_names *)ctx;
+    const char *nm = kn_input_command_name(code);
+    char tmp[48];
+    int k;
+    (void)payload; (void)plen;
+    if (nm)
+        k = snprintf(tmp, sizeof tmp, "%s%04x:%s", n->used ? "," : "",
+                     (unsigned)code, nm);
+    else
+        k = snprintf(tmp, sizeof tmp, "%s%04x", n->used ? "," : "",
+                     (unsigned)code);
+    if (k <= 0 || (size_t)k >= sizeof tmp) return;
+    if (n->used + (size_t)k + 1u > n->cap) return;
+    memcpy(n->buf + n->used, tmp, (size_t)k);
+    n->used += (size_t)k;
+    n->buf[n->used] = '\0';
+}
+
+static void sess_ctrl_refresh_hist(sess_pump *p)
+{
+    if (kn_input_hist_json(&p->ctrl_hist, p->st.ctrl_hist,
+                           sizeof p->st.ctrl_hist) < 0)
+        pump_set_str(p->st.ctrl_hist, sizeof p->st.ctrl_hist,
+                     "[\"hist-too-large\"]");
+    p->st.ctrl_hist_overflow = p->ctrl_hist.overflow;
+}
+
+/* One inbound non-DCEP message: capture it verbatim (bounded), name its
+ * records, count them, and react — INPUT_VERSION latches the negotiated
+ * version (nvst_input.rs:339-351), a cursor notification drives the
+ * handoff machine (nvst.rs:8322-8326). */
+static void sess_ctrl_ingest(sess_pump *p, uint16_t sid, uint32_t ppi,
+                             const uint8_t *data, size_t len)
+{
+    static const char hx[] = "0123456789abcdef";
+    char hex[2 * SESS_CTRL_RAW_HEAD + 1];
+    char names[256];
+    sess_ctrl_names nc;
+    size_t recs;
+    unsigned slot;
+
+    p->st.ctrl_msgs++;
+    recs = kn_input_scan(data, len, sess_ctrl_hist_cb, p);
+    p->st.ctrl_records += (unsigned)recs;
+    sess_ctrl_refresh_hist(p);
+
+    nc.buf = names; nc.cap = sizeof names; nc.used = 0; names[0] = '\0';
+    (void)kn_input_scan(data, len, sess_ctrl_names_cb, &nc);
+
+    slot = p->ctrl_raw_n;
+    if (slot < SESS_CTRL_RAW_MAX) {
+        size_t c = len < sizeof p->ctrl_raw[slot].head
+                       ? len : sizeof p->ctrl_raw[slot].head;
+        size_t i;
+        p->ctrl_raw[slot].sid = sid;
+        p->ctrl_raw[slot].ppi = ppi;
+        p->ctrl_raw[slot].len = (unsigned)len;
+        p->ctrl_raw[slot].head_len = (unsigned)c;
+        memcpy(p->ctrl_raw[slot].head, data, c);
+        for (i = 0; i < c; ++i) {
+            hex[2 * i]     = hx[p->ctrl_raw[slot].head[i] >> 4];
+            hex[2 * i + 1] = hx[p->ctrl_raw[slot].head[i] & 0xFu];
+        }
+        hex[2 * c] = '\0';
+        p->ctrl_raw_n++;
+        printf("{\"mode\":\"session\",\"event\":\"ctrl_msg\",\"n\":%u,"
+               "\"sid\":%u,\"ppi\":%u,\"len\":%u,\"records\":%u,"
+               "\"codes\":\"%.255s\",\"hex\":\"%.96s\"}\n",
+               slot + 1u, (unsigned)sid, (unsigned)ppi, (unsigned)len,
+               (unsigned)recs, names, hex);
+        fflush(stdout);
+    }
+
+    /* the handshake only negotiates on the reliable control stream
+     * (nvst_input.rs:339-351 checks id == channels.control_reliable) */
+    if (sid != 0u) return;
+    if (p->input_version < 0) {
+        int v = kn_input_protocol_version(data, len);
+        if (v >= 0) {
+            p->input_version = v;
+            p->st.input_version = v;
+            printf("{\"mode\":\"session\",\"event\":\"input_version\","
+                   "\"version\":%d,\"sid\":%u,\"len\":%u,\"records\":%u}\n",
+                   v, (unsigned)sid, (unsigned)len, (unsigned)recs);
+            fflush(stdout);
+        }
+    }
+    if (kn_input_has_cursor_notification(data, len))
+        kn_input_cursor_notify(&p->cursor, kn_sock_now_ms());
+}
+
+/* finish_nvst_input_handshake (nvst.rs:6554-6591): once the control
+ * channel is open AND the version has arrived, send all eight activation
+ * messages, arm the cursor machine, and mark input ready. The reference
+ * retries the WHOLE chain when any message fails to queue; we bound that
+ * at 8 attempts so a dead association cannot spin (a failed association
+ * is already reported through sctp_fail). */
+static void sess_ctrl_try_activate(sess_pump *p)
+{
+    uint8_t chain[KN_INPUT_ACTIVATION_N][KN_INPUT_CMD_MAX];
+    size_t lens[KN_INPUT_ACTIVATION_N];
+    uint64_t now_ms = kn_sock_now_ms();
+    uint64_t ts_us;
+    unsigned i, sent = 0, fail = 0, bytes = 0;
+
+    if (p->activation_sent) return;
+    if (p->input_version < 0) return;
+    if (!sess_ctrl_open(p)) return;
+    if (p->activation_attempts >= 8u) return;
+    p->activation_attempts++;
+    p->st.activation_attempts = p->activation_attempts;
+
+    ts_us = kn_sock_now_us() - p->origin_us;
+    if (kn_input_activation_chain(ts_us, chain, lens) !=
+            (int)KN_INPUT_ACTIVATION_N) {
+        p->st.activation_fail = (unsigned)KN_INPUT_ACTIVATION_N;
+        printf("{\"mode\":\"session\",\"event\":\"input_activation\","
+               "\"sent\":0,\"failed\":%u,\"detail\":\"build\"}\n",
+               (unsigned)KN_INPUT_ACTIVATION_N);
+        fflush(stdout);
+        return;
+    }
+    for (i = 0; i < KN_INPUT_ACTIVATION_N; ++i) {
+        if (sess_ctrl_send(p, chain[i], lens[i])) {
+            sent++;
+            bytes += (unsigned)lens[i];
+        } else {
+            fail++;
+        }
+    }
+    p->st.activation_sent = sent;
+    p->st.activation_fail = fail;
+    if (fail == 0u) {
+        p->activation_sent = 1u;
+        p->st.input_ready = 1u;
+        /* nvst.rs:7519-7522 — the cursor machine arms with the chain */
+        kn_input_cursor_activate(&p->cursor, now_ms);
+    }
+    printf("{\"mode\":\"session\",\"event\":\"input_activation\","
+           "\"sent\":%u,\"failed\":%u,\"bytes\":%u,\"ts_us\":%llu,"
+           "\"version\":%d,\"attempt\":%u,\"ready\":%u}\n",
+           sent, fail, bytes, (unsigned long long)ts_us, p->input_version,
+           p->activation_attempts, p->st.input_ready);
+    fflush(stdout);
+}
+
+/* one pump pass of the control plane: the handshake, then the cursor
+ * machine (nvst.rs:7515-7531 and :7756-7766), then a 30 s evidence beat
+ * so a long session shows the rig's command mix without a flood. */
+static void sess_ctrl_service(sess_pump *p)
+{
+    uint64_t now_ms;
+    if (!p->sctp) return;
+    sess_ctrl_try_activate(p);
+    now_ms = kn_sock_now_ms();
+    if (kn_input_cursor_update(&p->cursor, now_ms, sess_cursor_send, p)) {
+        printf("{\"mode\":\"session\",\"event\":\"cursor_handoff\","
+               "\"reason\":\"%.32s\",\"enables\":%u,\"disables\":%u}\n",
+               p->cursor.reason ? p->cursor.reason : "",
+               p->cursor.enables, p->cursor.disables);
+        fflush(stdout);
+    }
+    p->st.cursor_state = (unsigned)p->cursor.state;
+    p->st.cursor_enables = p->cursor.enables;
+    p->st.cursor_trackings = p->cursor.trackings;
+    p->st.cursor_disables = p->cursor.disables;
+    p->st.cursor_handoffs = p->cursor.handoffs;
+    if (now_ms >= p->next_ctrl_log_ms) {
+        p->next_ctrl_log_ms = now_ms + 30000u;
+        sess_ctrl_refresh_hist(p);
+        printf("{\"mode\":\"session\",\"event\":\"ctrl_in\",\"t_ms\":%llu,"
+               "\"msgs\":%u,\"records\":%u,\"version\":%d,\"ready\":%u,"
+               "\"activation\":%u,\"cursor\":\"%s\",\"codes\":%s}\n",
+               (unsigned long long)now_ms, p->st.ctrl_msgs,
+               p->st.ctrl_records, p->input_version, p->st.input_ready,
+               p->st.activation_sent,
+               kn_input_cursor_state_name(p->cursor.state), p->st.ctrl_hist);
+        fflush(stdout);
+    }
+}
+
 static void sess_sctp_msg(void *ctx, uint16_t sid, uint16_t ssn,
                           uint32_t ppi, int unordered,
                           const uint8_t *data, size_t len)
@@ -2618,10 +2892,12 @@ static void sess_sctp_msg(void *ctx, uint16_t sid, uint16_t ssn,
             return;
         }
     }
-    /* any other message: the rig's control/rtcp payload — stage 3+
-     * interprets it; until then capture the first one's head as
-     * evidence (never silently dropped, the D-t4 discipline) */
+    /* any other message: the rig's control/rtcp payload. Round XXXVII
+     * interprets it instead of only capturing the first one's head — the
+     * D-t4 discipline (never silently dropped) now extends to naming
+     * every TLV record and driving the input handshake from it. */
     p->st.sctp_msgs_in++;
+    sess_ctrl_ingest(p, sid, ppi, data, len);
     if (p->st.sctp_first_len == 0 && p->st.sctp_first_ppi == 0) {
         size_t c = len < sizeof p->st.sctp_first
                        ? len : sizeof p->st.sctp_first;
@@ -2912,6 +3188,7 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
             }
             if (p->sctp)
                 sess_sctp_service(p);
+            sess_ctrl_service(p);        /* round XXXVII */
         }
         {   /* drain inbound: answer the rig's binding requests, count
              * its binding successes (handle_stun_datagram :5151-5172),
@@ -4204,6 +4481,18 @@ static int run_session(const char *token, const char *device_id,
          * session stays resumable (phase B-E policy). */
         memset(&pump, 0, sizeof pump);
         sess_fb_init(&fb);
+        /* round XXXVII: the control/input plane's initial state. The
+         * transport origin feeds the activation chain's timestamps
+         * (nvst.rs:6564-6567 uses transport_origin.elapsed()), and the
+         * version starts "not negotiated" exactly like the reference's
+         * Option<u16>::None. */
+        pump.input_version = -1;
+        pump.st.input_version = -1;
+        pump.origin_us = kn_sock_now_us();
+        pump.next_ctrl_log_ms = kn_sock_now_ms() + 10000u;
+        kn_input_cursor_init(&pump.cursor);
+        kn_input_hist_init(&pump.ctrl_hist);
+        pump_set_str(pump.st.ctrl_hist, sizeof pump.st.ctrl_hist, "[]");
         if (ice_enabled) {
             pump.fb = &fb;            /* the feedback drain (XXXVI) */
             pump.sock = &bsock;       /* R3-B: the pump owns the BUNDLE
@@ -4794,6 +5083,33 @@ static int run_session(const char *token, const char *device_id,
         if (ka_on) {
             printf("{\"mode\":\"session\",\"event\":\"natt_keepalive\","
                    "\"sent\":%llu}\n", ka_sent % 1000000000ull);
+            fflush(stdout);
+        }
+
+        /* round XXXVII: the control/input plane's final state, from a
+         * FRESH snapshot (the pump thread still owns it). Run 17's
+         * summary could not say whether the rig had talked to us at all
+         * after the stall — this closes that gap: every TLV code the rig
+         * sent, counted, plus the activation/cursor outcome. */
+        if (ice_enabled) {
+            sess_pump_snapshot(&pump, &ice_st);
+            printf("{\"mode\":\"session\",\"event\":\"ctrl_summary\","
+                   "\"msgs\":%u,\"records\":%u,\"version\":%d,"
+                   "\"input_ready\":%u,\"activation_sent\":%u,"
+                   "\"activation_fail\":%u,\"activation_attempts\":%u,"
+                   "\"cursor\":\"%s\",\"cursor_enables\":%u,"
+                   "\"cursor_trackings\":%u,\"cursor_disables\":%u,"
+                   "\"cursor_handoffs\":%u,\"hist_overflow\":%u,"
+                   "\"codes\":%s}\n",
+                   ice_st.ctrl_msgs, ice_st.ctrl_records,
+                   ice_st.input_version, ice_st.input_ready,
+                   ice_st.activation_sent, ice_st.activation_fail,
+                   ice_st.activation_attempts,
+                   kn_input_cursor_state_name(
+                       (kn_input_cursor_state)ice_st.cursor_state),
+                   ice_st.cursor_enables, ice_st.cursor_trackings,
+                   ice_st.cursor_disables, ice_st.cursor_handoffs,
+                   ice_st.ctrl_hist_overflow, ice_st.ctrl_hist);
             fflush(stdout);
         }
 

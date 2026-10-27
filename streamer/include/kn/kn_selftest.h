@@ -8,13 +8,21 @@
  *   - non-interactive and bounded in time (worst case ~1 s each; SHA-1 TEST3
  *                           hashes 1M bytes, clock.resolution sleeps ~50 ms)
  *
- * The §7.9 names plus the stage-2 additions (rx.vectors, sock.loopback),
+ * The §7.9 names plus the stage-2 additions (rx.vectors, sock.loopback,
+ * input.vectors),
  * by phase:
  *   A (offline, host-testable — IMPLEMENTED):
  *     fec.vectors     Cauchy RS encode/reconstruct against KAT vectors
  *                     (separates: our matrix vs a Vandermonde mistake)
  *     srtp.vectors    AES/HMAC/KDF/IV/protect/replay against KAT vectors
  *                     (separates: wrong key material vs wrong IV vs wrong ROC)
+ *     input.vectors   the NVST control/input plane: the eight activation-
+ *                     chain messages byte-exact vs the reference client's
+ *                     OWN Rust goldens, the version parser (incl. run 17's
+ *                     live rig bytes + both fallbacks) and the cursor
+ *                     handoff machine's command sequence
+ *                     (separates: control-plane wire bugs from the media
+ *                     pipeline; docs/INPUT.md)
  *   B (offline/Win32, no network — ALL IMPLEMENTED):
  *     clock.resolution  timeBeginPeriod effect on Sleep(1) + wall granularity
  *                       (separates: timer granularity for jitter/pacing)
