@@ -525,6 +525,29 @@ static void test_real_mode(void)
                   g_cli_data_sid == 14 &&
                   memcmp(g_cli_data, msg, sizeof msg - 1) == 0,
                   "and the return path works on the rtcp stream (sid 14)");
+            /* round XXXVI: the PR-SCTP send path (SCTP_SENDV_SPA) —
+             * an unordered TTL-300 message on sid 6 (the partial-
+             * reliable control channel's sender-side policy) */
+            {
+                const uint8_t prm[] = "pr-msg";
+                unsigned before = scb.data_msgs;
+                CHECK(kn_sctp_send_pr(r.cli, 6, KN_SCTP_PPI_BINARY, 0,
+                                      KN_SCTP_PR_TTL, 300, prm,
+                                      sizeof prm - 1) == KN_SCTP_OK,
+                      "send_pr (SPA: sndinfo+prinfo) accepts the TTL-300 "
+                      "unordered send");
+                t_end = kn_sock_now_ms() + 3000u;
+                while (kn_sock_now_ms() < t_end &&
+                       scb.data_msgs == before) {
+                    (void)kn_sctp_poll(r.cli, cli_msg, NULL, NULL, NULL);
+                    (void)kn_sctp_poll(r.srv, srv_msg, &scb, NULL, NULL);
+                }
+                CHECK(scb.data_msgs > before && scb.last_data_sid == 6 &&
+                      scb.last_data_len == sizeof prm - 1 &&
+                      memcmp(scb.last_data, prm, sizeof prm - 1) == 0,
+                      "the PR message arrives on sid 6 (the feedback "
+                      "senders' path: RR/ACK/QoS all ride it)");
+            }
         }
 
         /* ---- 4. retransmission: drop the client's next packet (a
@@ -535,8 +558,14 @@ static void test_real_mode(void)
             r.drop_c2s = 1;
             (void)kn_sctp_send(r.cli, 2, KN_SCTP_PPI_BINARY, 1,
                                msg2, sizeof msg2 - 1);
-            (void)kn_sctp_poll(r.cli, cli_msg, NULL, NULL, NULL);
-            (void)kn_sctp_poll(r.srv, srv_msg, &scb, NULL, NULL);
+            /* poll until the drop actually fires (the DATA chunk may
+             * leave on a later flush — usrsctp bundles/delays output
+             * under traffic; the one-shot flag persists until then) */
+            t_end = kn_sock_now_ms() + 2000u;
+            while (kn_sock_now_ms() < t_end && r.dropped == 0) {
+                (void)kn_sctp_poll(r.cli, cli_msg, NULL, NULL, NULL);
+                (void)kn_sctp_poll(r.srv, srv_msg, &scb, NULL, NULL);
+            }
             CHECK(r.dropped == 1, "the one-shot drop fired");
             t_end = kn_sock_now_ms() + 8000u;
             while (kn_sock_now_ms() < t_end &&

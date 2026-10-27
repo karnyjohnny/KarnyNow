@@ -222,6 +222,19 @@ int kn_sctp_established(const kn_sctp *s);
 int kn_sctp_send(kn_sctp *s, uint16_t sid, uint32_t ppi, int ordered,
                  const uint8_t *data, size_t len);
 
+/* The PR-SCTP form (round XXXVI): per-send partial-reliability policy,
+ * mirroring the channel profile's reliability on the SENDER side (the
+ * reference's configure_reliability per stream, str0m sctp/mod.rs
+ * :844-851): KN_SCTP_PR_TTL with pr_value = lifetime ms (the profile's
+ * 300 ms channels), KN_SCTP_PR_RTX with pr_value = max retransmits
+ * (2 / 0). policy 0 = reliable (kn_sctp_send equivalent). usrsctp
+ * carries both via SCTP_SENDV_SPA. */
+#define KN_SCTP_PR_TTL 0x0001u   /* usrsctp SCTP_PR_SCTP_TTL */
+#define KN_SCTP_PR_RTX 0x0003u   /* usrsctp SCTP_PR_SCTP_RTX */
+int kn_sctp_send_pr(kn_sctp *s, uint16_t sid, uint32_t ppi, int ordered,
+                    uint16_t pr_policy, uint32_t pr_value,
+                    const uint8_t *data, size_t len);
+
 void kn_sctp_stats_get(const kn_sctp *s, kn_sctp_stats *out);
 
 /* DCEP bookkeeping for the evidence lines (no-op counters in the stub). */

@@ -1603,6 +1603,47 @@ void kn_rx_rtcp_pli(uint32_t sender_ssrc, uint32_t media_ssrc,
     rx_put_be32(out + 8, media_ssrc);
 }
 
+/* The reference's build_rtcp_receiver_report (nvst.rs:2983-2997), byte
+ * for byte: 0x81 | 201 | len 7 | sender | media | fraction | cumulative
+ * (24-bit, clamped like report_snapshot :1233) | highest | jitter |
+ * LSR 0 | DLSR 0. Sent on the rtcp1 channel every 1 s (:97/:8041). */
+void kn_rx_rtcp_rr(uint32_t sender_ssrc, uint32_t media_ssrc,
+                   uint8_t fraction_lost, int32_t cumulative_lost,
+                   uint32_t highest_sequence, uint32_t jitter,
+                   uint8_t out[32])
+{
+    uint32_t cum;
+    if (!out) return;
+    if (cumulative_lost > 0x7FFFFF) cumulative_lost = 0x7FFFFF;
+    if (cumulative_lost < -0x800000) cumulative_lost = -0x800000;
+    cum = (uint32_t)cumulative_lost & 0xFFFFFFu;
+    out[0] = 0x81u;                      /* V=2 P=0 RC=1 */
+    out[1] = 201u;                       /* PT = Receiver Report */
+    rx_put_be16(out + 2, 7u);
+    rx_put_be32(out + 4, sender_ssrc);
+    rx_put_be32(out + 8, media_ssrc);
+    out[12] = fraction_lost;
+    out[13] = (uint8_t)(cum >> 16);
+    out[14] = (uint8_t)(cum >> 8);
+    out[15] = (uint8_t)cum;
+    rx_put_be32(out + 16, highest_sequence);
+    rx_put_be32(out + 20, jitter);
+    rx_put_be32(out + 24, 0u);           /* LSR  — the reference never */
+    rx_put_be32(out + 28, 0u);           /* DLSR — fills these (:2994) */
+}
+
+int kn_rx_video_rr_snapshot(const kn_rx_video *v, uint32_t *ssrc,
+                            uint32_t *base, uint32_t *highest,
+                            uint64_t *received)
+{
+    if (!v || !v->have_bound_ssrc || !v->have_base_sequence) return 0;
+    if (ssrc)     *ssrc = v->bound_ssrc;
+    if (base)     *base = v->base_sequence;
+    if (highest)  *highest = v->highest_sequence_received;
+    if (received) *received = v->authenticated_packets;
+    return 1;
+}
+
 size_t kn_rx_rtcp_nack(uint32_t sender_ssrc, uint32_t media_ssrc,
                        uint64_t first_missing, uint64_t last_missing,
                        uint8_t *out, size_t out_len)
@@ -2272,6 +2313,12 @@ static void process_authenticated(kn_rx_video *v, uint64_t index,
     seq32 = (uint32_t)(index & 0xFFFFFFFFull);
     /* `reordered` (4692-4694) feeds only the statistics plane in the
      * reference; keep the highest-sequence bookkeeping for stats parity. */
+    if (!v->have_base_sequence) {   /* round XXXVI: the RR expected-count
+                                     * anchor (the reference's base_sequence,
+                                     * nvst.rs:1225 — first extended seq) */
+        v->base_sequence = seq32;
+        v->have_base_sequence = 1;
+    }
     if (seq32 > v->highest_sequence_received)
         v->highest_sequence_received = seq32;
     if (kn_rx_nack_resolve(&v->nack, index))

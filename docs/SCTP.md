@@ -192,23 +192,31 @@ stage 3 sends the kn_rx NACK-v2/IDR/RFI encoders there.
   `kn_sctp_open_peer`) is TEST infrastructure — production never
   listens (the rig is always the SCTP server, `start_sctp(true)`).
 
-## 8. Open questions — run 15 ANSWERED the first one negatively
+## 8. Open questions — runs 15/16 ANSWERED all three
 
 1. ~~Does the rig's 400 disappear once the association is up?~~ —
-   **MEASURED (run 15, RTSP.md §21): the association never came up.**
-   The INIT left (dtls_out 3→4, sctp_arm armed:1 — usrsctp live on
-   Win7) and the rig stayed SILENT (sctp_up:0 after the full bounded
-   wait, app_records:0, no COMM_LOST) → PLAY 400 #4. A well-formed
-   client INIT alone does not move it. The round-XXXIV response: ICE
-   NOMINATION (USE-CANDIDATE, D-t8) — the hypothesis is that the rig's
-   SCTP endpoint arms only on a SELECTED pair (run 16 decides), with
-   the mystery post-ready DTLS record (now printed as `post_first`) as
-   the fallback clue: an alert would point at the record layer /
-   use_srtp instead.
+   **Run 15: the association never came up** (the INIT left, the rig
+   stayed silent, PLAY 400 #4 — a well-formed client INIT alone does
+   not move it). **Run 16: with the nomination (D-t8) AND use_srtp
+   (D-t9) on the wire, the rig ANSWERED the INIT (`sctp_up ms:52`),
+   ACKed all 8 channels, and PLAY returned 200 — THE FIRST REAL GFN
+   VIDEO FLOWED (4900/4900 authenticated, 307 frames decoded
+   1280×720).** Which of the two unlocked it stays formally open
+   (both flew together); both are reference-faithful and both stay.
+   The mystery post-ready record was also named: `post_first 0x17…` =
+   APPLICATION DATA epoch 1 — the rig's own SCTP, benign.
 2. Does the rig open channels of its own (odd sids) or send control
-   messages right after COMM_UP? (`sctp_rig_opened` / `sctp_msgs_in` /
-   `sctp_first*` in ice_preplay answer it.)
-3. Does PLAY 200 + media flow follow immediately, or does the rig also
-   want an RTCP RR / keepalive on `rtcp_on_sctp_private` before video
-   starts? (stage-3 senders are built and KAT'd — wiring is a small
-   step once the channel is proven live.)
+   messages right after COMM_UP? — **ANSWERED (run 16):** it opens NO
+   channels of its own (`rig_opened:0`) but SENDS on ours: 22
+   messages, the first `sid 0, ppi 53, "0e0202000300"` =
+   COMMAND_INPUT_VERSION 0x020e (nvst_input.rs:31) — the input layer
+   announces itself and awaits the stage-3 activation chain
+   (:1318-1328).
+3. Does PLAY 200 + media flow follow immediately? — **ANSWERED (run
+   16): video flows but ONLY ~10 s** — "without any receiver feedback
+   the server stops video after an initial burst" (nvst.rs:4320-4323;
+   the stall arrived with kf_request still unsent). The round-XXXVI
+   sender set (RR 1 s sid 14 / frame-ACK per frame / pacing 55.556 ms
+   / QoS 50 ms sid 6 / keepalive 3 s sid 0 / IDR+PLI+NACK+RFI, all
+   through the outbox with the profile's PR policies) is the answer;
+   run 17 verifies sustainability.

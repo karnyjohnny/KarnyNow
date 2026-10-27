@@ -483,6 +483,21 @@ int kn_rx_ctrl_qos_report(const kn_rx_qos *q,
 /* RTCP PLI (RFC 4585 PSFB; nvst.rs:3001-3009). Writes 12 bytes. */
 void kn_rx_rtcp_pli(uint32_t sender_ssrc, uint32_t media_ssrc, uint8_t out[12]);
 
+/* RTCP Receiver Report, ONE report block — byte-exact with the
+ * reference's build_rtcp_receiver_report (nvst.rs:2983-2997): 0x81 /
+ * PT 201 / length 7, sender ssrc, media ssrc, fraction_lost (u8, the
+ * 256-scaled interval ratio), cumulative_lost (24-bit two's-complement,
+ * clamped to [-0x800000, 0x7fffff] like report_snapshot :1233),
+ * highest extended sequence, jitter, and LSR=DLSR=0 (the reference
+ * never fills them — RTCP-over-SCTP has no NTP exchange). Writes 32
+ * bytes. Sent on the rtcp1 channel every SRTCP_RR_INTERVAL (1 s,
+ * :97/:8041-8060) — "so the peer keeps the video flowing" (:4320). */
+void kn_rx_rtcp_rr(uint32_t sender_ssrc, uint32_t media_ssrc,
+                   uint8_t fraction_lost, int32_t cumulative_lost,
+                   uint32_t highest_sequence, uint32_t jitter,
+                   uint8_t out[32]);
+
+
 /* RTCP generic NACK (RFC 4585 §6.2.1; nvst.rs:3015-3048): FCI entries
  * PID+BLP over the extended-index range truncated to 64 packets / 4 entries.
  * Returns the packet length (12 + 4*entries). */
@@ -588,6 +603,9 @@ typedef struct kn_rx_video {
 
     int      state;                /* kn_rx_state */
     uint32_t bound_ssrc;    int have_bound_ssrc;
+    uint32_t base_sequence; int have_base_sequence;  /* round XXXVI: the
+        FIRST extended sequence of the bound stream — the RR report's
+        expected-count anchor (the reference's base_sequence, :1225) */
     uint32_t highest_sequence_received;
     uint64_t authenticated_packets;
     uint32_t last_stream_packet_index; int have_last_spi;
@@ -669,6 +687,17 @@ const kn_rx_event *kn_rx_video_events(const kn_rx_video *v, uint32_t *n);
 /* The keyframe-request flag: take-and-clear (the control sender calls this
  * when it emits IDR 0x0302 / RTCP PLI). */
 int kn_rx_video_take_keyframe_request(kn_rx_video *v);
+
+/* The reference's report_snapshot inputs (nvst.rs:1223-1250): returns
+ * 1 when the stream is bound (all fields filled: the media SSRC, the
+ * FIRST extended sequence seen, the highest extended sequence, and the
+ * authenticated packet count), 0 before the first packet. The caller
+ * derives expected = highest - base + 1, cumulative = expected -
+ * received, and the 256-scaled fraction over its own prior snapshot
+ * (the reference's update_interval arithmetic). NULL-safe. */
+int kn_rx_video_rr_snapshot(const kn_rx_video *v, uint32_t *ssrc,
+                            uint32_t *base, uint32_t *highest,
+                            uint64_t *received);
 
 /* SET the keyframe-request flag from outside the pipeline (stage-2 decode
  * glue: encoded-queue overflow => the decoder never saw a frame later

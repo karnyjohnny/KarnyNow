@@ -1,4 +1,102 @@
-# INTEGRATION NOTES — Round XXXV delta, rev 25 (sandbox-only round between runs: the reference re-read found fidelity gap #2 — str0m negotiates DTLS-SRTP (use_srtp) and the bundle audio's keys come from it → MBEDTLS_SSL_DTLS_SRTP enabled via user-config, kn_dtls offers 0x0001 (D-t9), wire-pinned by an independent parser + negotiated through OpenSSL)
+# INTEGRATION NOTES — Round XXXVI delta, rev 26 (R7 run 16 = PLAY 200 — THE FIRST REAL GFN VIDEO THROUGH THE FULL STACK: 4900/4900 authenticated, 307 frames decoded, R32's final stage-2 gate PASSED; the ~10 s feedback stall → the reference's FULL sender set ships: RR/frame-ack/pacing/QoS/keepalive/IDR+PLI/NACK/RFI over the live channels)
+
+> **Rev 26 supersedes rev 1-25.** Canonical state: `PROJECT-STATE.md`.
+> Design records: **`docs/RTSP.md` §23** (run 16 — the breakthrough —
+> + the feedback round + the run-17 matrix), `docs/SCTP.md` §8 (all
+> three questions answered), `docs/RX.md`/`docs/SRTP.md` (R32 CLOSED
+> in the risk register).
+>
+> **Round XXXVI headline: run 16 broke the wall — `srtp_prof:1` (the
+> rig negotiated use_srtp) + `nom_sent:18` → `sctp_up ms:52` (the rig
+> answered the INIT run 15 ignored) → `sctp_channels 8/8 acked` →
+> **PLAY 200, the first in 16 runs** → handoff (AEAD_AES_256_GCM_8,
+> local key) → **4900/4900 datagrams authenticated, 307 AUs, 307
+> frames decoded 1280×720, ffprobe-verified h264 High bt709 — R32's
+> FINAL STAGE-2 GATE PASSED.** The stream stalled at ~10.2 s exactly
+> as the reference documents ("without any receiver feedback the
+> server stops video", nvst.rs:4320-4323) with our kf_request still
+> unsent — so this round ships the COMPLETE feedback sender set. New
+> facts: the mystery post-ready record = app data epoch 1 (benign
+> SCTP); run 15's invalid_in:175 = the rig's AUDIO RTP on the bundle
+> (now classified); the rig sent COMMAND_INPUT_VERSION 0x020e + 21
+> more control messages on sid 0 (the stage-3 input layer awaits).**
+>
+> ## Changed files (round XXXVI)
+> 1. `streamer/{include/kn,src}/kn_rx.*` — NEW `kn_rx_rtcp_rr()` (the
+>    reference's build_rtcp_receiver_report :2983-2997 byte-for-byte:
+>    0x81/201/len-7, sender "ONOW" 0x4F4E4F57, 24-bit clamped
+>    cumulative, LSR=DLSR=0) + NEW `kn_rx_video_rr_snapshot()` and the
+>    `base_sequence`/`have_base_sequence` anchor in kn_rx_video (the
+>    reference's :1225 expected-count base; set at the first
+>    authenticated packet beside the existing highest-seq bookkeeping).
+> 2. `streamer/{include/kn,src}/kn_sctp.{h,c}` — NEW
+>    `kn_sctp_send_pr()` (SCTP_SENDV_SPA: sndinfo+prinfo in one
+>    sendv) for the sender-side PR-SCTP policies; `kn_sctp_send` stays
+>    the reliable wrapper (unchanged semantics).
+> 3. `streamer/src/knvstd_main.c` —
+>    * **the feedback outbox** (`sess_fb_outbox`: 64×704 bounded mutex
+>      ring, drop-new counted; push = the media loop/main, pop = the
+>      pump thread's `sess_sctp_service`) + `sess_fb_sid_params` (the
+>      profile's ordered/PR mapping: sid 4 RTX 2, sid 6/10 TTL 300,
+>      the rest ordered-reliable). The media loop ENCODES (kn_rx's
+>      single owner — D21 untouched), the pump SHIPS (SCTP's single
+>      owner).
+>    * **cadences** (all the reference's): RR 1 s → sid 14 (fraction =
+>      the :1234-1247 interval-delta arithmetic over the snapshot);
+>      frame ACK 0x0204 per assembled AU + pacing 0x0203 @55 556 µs
+>      neutral-error (:7928-7933) → sid 6, hooked in dec_frame_in_cb;
+>      QoS 0x0207 @50 ms → sid 6 (D-t10: estimator zeros +
+>      measured-downlink estimate); keepalive 0x0200 @3 s → sid 0 (the
+>      byte-exact golden of nvst_input.rs:1769).
+>    * **the recovery senders fly**: dec_take_kf → IDR 0x0302 (sid 6)
+>      + PLI (sid 14); the NACK drain (kn_rx_nack_take's own policy) →
+>      NACK-v2 (sid 6) + RTCP NACK (sid 14) per :3075-3078; RFI 0x0301
+>      (sid 6) with restore-on-drop. The "unsent (stage-3)" notes are
+>      GONE; kf_request lines now report sent:true/false honestly.
+>    * **bundle demux**: RTP/RTCP-looking (v==2, pt ranges) →
+>      `bundle_rtp_in`/`bundle_rtcp_in` instead of `invalid_in` (the
+>      rig's audio on 49006 — the audio stage's input).
+>    * Evidence: session_stats += fb_rr/fb_ack/fb_qos; the summary +=
+>      the `feedback` block (rr/ack/pacing/qos/ka/nack/idr/pli/rfi/
+>      pushed/dropped); ice_preplay += bundle_rtp/bundle_rtcp/fb_sent;
+>      sess_ice_stats carries the snapshot-safe copies. Teardown
+>      destroys the outbox after the join (both paths).
+> 4. `streamer/tests/test_knrx.c` — 215→**219**: the RR goldens
+>    (independent Python transcription of the reference builder:
+>    negative-loss two's-complement, BOTH clamps, LSR/DLSR zeros) +
+>    the NULL-safe snapshot guard.
+> 5. `streamer/tests/test_knsctp.c` — 33→**35**: the send_pr legs
+>    (SPA path: unordered TTL-300 on sid 6 arrives intact); the loss
+>    leg hardened (polls until the one-shot drop actually fires —
+>    usrsctp may delay/bundle output under traffic; timing-not-
+>    semantics fix caught by the first ctest run).
+> 6. Docs: `docs/RTSP.md` §23, `docs/SCTP.md` §8 (answered),
+>    `PROJECT-STATE.md` (round XXXVI + **R32 CLOSED** in the risk
+>    register), this file.
+>
+> ## Verification status (what ran WHERE, round XXXVI)
+> * Sandbox: native 16 suites PASS (test_knrx 219); cross x64+i686
+>   -Werror PASS; paranoid knvstd legs clean ×3 with both defines;
+>   ctest **18/18 ×2** (fresh); ASan+UBSan+LSan test_knsctp **35/35**;
+>   test_kndtls 39/39; the OpenSSL interop ×2 PASS; E2E **43/43**; T10
+>   POSIX dry **66**; T13 **63**.
+> * Target (round XXXVI's evidence, user-reported): T10 ALL PASS
+>   **76** zero warnings; **R7 run 16 — PLAY 200 + real video** (docs/
+>   RTSP.md §23) + the ffprobe verification of the dumped keyframe.
+> * Target (PENDING — round XXXVII asks for): T10 (expect **76**) +
+>   **R7 run 17** — the SUSTAINED-stream run (matrix in PROJECT-STATE
+>   Next steps 2; paste the session_stats progression + the FULL
+>   summary with the feedback block).
+>
+> ## Notes for the target build
+> * Sync list (round XXXVI): kn_rx.{h,c}, kn_sctp.{h,c},
+>   knvstd_main.c, test_knrx.c, test_knsctp.c + docs. The T10 harness
+>   is UNCHANGED (expectation **76**).
+> * No new libraries/imports: the outbox uses the same kernel32/
+>   pthread primitives as the pump thread; send_pr is one more usrsctp
+>   entry point (statically linked already).
+
+# Round XXXV delta, rev 25 (sandbox-only round between runs: the reference re-read found fidelity gap #2 — str0m negotiates DTLS-SRTP (use_srtp) and the bundle audio's keys come from it → MBEDTLS_SSL_DTLS_SRTP enabled via user-config, kn_dtls offers 0x0001 (D-t9), wire-pinned by an independent parser + negotiated through OpenSSL)
 
 > **Rev 25 supersedes rev 1-24.** Canonical state: `PROJECT-STATE.md`.
 > Design records: **`docs/RTSP.md` §22** (the finding + the shipped

@@ -1509,6 +1509,135 @@ typedef struct dec_q_slot {
     int      kf, contig;
 } dec_q_slot;
 
+/* ---- round XXXVI: the feedback outbox (main -> pump thread) ----
+ * The media loop (main thread, the kn_rx single owner) ENCODES every
+ * feedback message; the pump thread (the SCTP single owner) SENDS it.
+ * Bounded mutex queue, drop-new + counted (the kn_sock discipline);
+ * 704-byte slots cover the worst encoder output (nack_v2 <= 647,
+ * kn_rx.h). This is the same thread-boundary pattern as the kn_sctp
+ * tx queue, one level up. */
+#define SESS_FB_SLOTS   64u
+#define SESS_FB_MAXLEN  704u
+typedef struct {
+    uint8_t  payload[SESS_FB_MAXLEN];
+    uint16_t len;
+    uint16_t sid;
+} sess_fb_msg;
+typedef struct sess_fb_outbox {
+    sess_fb_msg q[SESS_FB_SLOTS];
+    unsigned head, count;
+    unsigned dropped, pushed;
+#ifdef _WIN32
+    CRITICAL_SECTION lock;
+#else
+    pthread_mutex_t lock;
+#endif
+    int inited;
+} sess_fb_outbox;
+
+static void sess_fb_init(sess_fb_outbox *b)
+{
+    memset(b, 0, sizeof *b);
+#ifdef _WIN32
+    InitializeCriticalSection(&b->lock);
+#else
+    pthread_mutex_init(&b->lock, NULL);
+#endif
+    b->inited = 1;
+}
+
+static void sess_fb_destroy(sess_fb_outbox *b)
+{
+    if (!b->inited) return;
+#ifdef _WIN32
+    DeleteCriticalSection(&b->lock);
+#else
+    pthread_mutex_destroy(&b->lock);
+#endif
+    b->inited = 0;
+}
+
+static int sess_fb_push(sess_fb_outbox *b, uint16_t sid,
+                        const uint8_t *data, size_t len)
+{
+    int rc = 0;
+    if (!b || !b->inited || !data || len == 0 || len > SESS_FB_MAXLEN)
+        return -1;
+#ifdef _WIN32
+    EnterCriticalSection(&b->lock);
+#else
+    pthread_mutex_lock(&b->lock);
+#endif
+    if (b->count >= SESS_FB_SLOTS) {
+        b->dropped++;
+        rc = -2;
+    } else {
+        unsigned slot = (b->head + b->count) % SESS_FB_SLOTS;
+        memcpy(b->q[slot].payload, data, len);
+        b->q[slot].len = (uint16_t)len;
+        b->q[slot].sid = sid;
+        b->count++;
+        b->pushed++;
+    }
+#ifdef _WIN32
+    LeaveCriticalSection(&b->lock);
+#else
+    pthread_mutex_unlock(&b->lock);
+#endif
+    return rc;
+}
+
+static int sess_fb_pop(sess_fb_outbox *b, sess_fb_msg *out)
+{
+    int got = 0;
+    if (!b || !b->inited) return 0;
+#ifdef _WIN32
+    EnterCriticalSection(&b->lock);
+#else
+    pthread_mutex_lock(&b->lock);
+#endif
+    if (b->count) {
+        *out = b->q[b->head];
+        b->head = (b->head + 1u) % SESS_FB_SLOTS;
+        b->count--;
+        got = 1;
+    }
+#ifdef _WIN32
+    LeaveCriticalSection(&b->lock);
+#else
+    pthread_mutex_unlock(&b->lock);
+#endif
+    return got;
+}
+
+/* The NVST channel profile's SENDER-side reliability (nvst_input.rs
+ * NVST_CHANNEL_PROFILE + str0m configure_reliability): ordered flags
+ * and the PR-SCTP policy per stream id. */
+static void sess_fb_sid_params(uint16_t sid, int *ordered,
+                               uint16_t *pr_pol, uint32_t *pr_val)
+{
+    switch (sid) {
+    case 4:  *ordered = 1; *pr_pol = KN_SCTP_PR_RTX; *pr_val = 2;   break;
+    case 6:  *ordered = 0; *pr_pol = KN_SCTP_PR_TTL; *pr_val = 300; break;
+    case 8:  *ordered = 0; *pr_pol = KN_SCTP_PR_RTX; *pr_val = 0;   break;
+    case 10: *ordered = 0; *pr_pol = KN_SCTP_PR_TTL; *pr_val = 300; break;
+    default: *ordered = 1; *pr_pol = 0;               *pr_val = 0;  break;
+    }
+}
+
+/* the reference's RTCP sender ssrc: 0x4F4E4F57 = "ONOW" (nvst.rs:96) */
+#define SESS_RTCP_SENDER_SSRC 0x4F4E4F57u
+/* SRTCP_RR_INTERVAL 1 s (:97), QOS_REPORT_INTERVAL 50 ms (nvst_control.rs
+ * :19), FRAME_PACING_INTERVAL 55556 us (:18), CONTROL_KEEPALIVE_INTERVAL
+ * 3 s (nvst_input.rs:11), DEFAULT_FRAME_TIME_US 16666 (:17). The
+ * keepalive bytes are the reference test's golden (:1769:
+ * control_keepalive(0) == 0002040000000000). */
+#define SESS_RR_INTERVAL_MS      1000u
+#define SESS_QOS_INTERVAL_MS     50u
+#define SESS_PACING_INTERVAL_US  55556ull
+#define SESS_KA_INTERVAL_MS      3000u
+#define SESS_FRAME_TIME_US       16666u
+
 typedef struct dec_ctx {
     kn_rx_video *v;
     uint64_t     now_ms;          /* set before every pipeline call */
@@ -1529,6 +1658,17 @@ typedef struct dec_ctx {
     unsigned long long aus, key_aus, au_write_errors, event_lines,
                        event_lines_capped, kf_request_lines;
     unsigned long long rx_events_logged;
+    /* round XXXVI: the feedback sender state (session mode only —
+     * --decode leaves fb NULL and stays silent, honestly) */
+    sess_fb_outbox *fb;
+    uint64_t next_rr_ms, next_qos_ms, next_ka_ms, next_pacing_us;
+    uint32_t rr_prior_expected, rr_prior_received;
+    uint32_t qos_seq, last_fi;
+    unsigned long long fb_bytes_total;
+    uint64_t qos_prior_ms;
+    unsigned long long qos_prior_bytes;
+    unsigned long long fb_rr, fb_ack, fb_pacing, fb_qos, fb_ka,
+                       fb_nack, fb_idr, fb_pli, fb_rfi;
 } dec_ctx;
 
 static uint8_t g_dec_qbytes[DEC_QUEUE_CAP][DEC_AU_CAP];
@@ -1564,6 +1704,35 @@ static void dec_frame_in_cb(const kn_rx_frame *f, void *ud)
     c->qslot[tail].contig = f->contiguous;
     c->q_count++;
     c->q_pushed++;
+    /* ---- round XXXVI: per-assembled-frame feedback (the reference's
+     * control_reports path — the rig holds a pending-frame-ack window,
+     * MAX_PENDING_FRAME_ACKS 512, nvst.rs:106). Frame ACK 0x0204 on
+     * EVERY assembled frame (sid 6, send_partial_control); the pacing
+     * report 0x0203 at the reference's 55556-us gate with a NEUTRAL
+     * error (:7928-7933 — feeding network jitter into the server PID
+     * is explicitly wrong per the reference comment). Both ride the
+     * outbox; overflow drops are counted, never queued unbounded. */
+    c->last_fi = f->frame_index;
+    c->fb_bytes_total += (unsigned long long)f->bytes_len;
+    if (c->fb) {
+        uint8_t fb[4 + KN_RX_CTRL_FRAME_ACK_PAYLOAD_LEN];
+        int n = kn_rx_ctrl_frame_ack(f->frame_index, NULL,
+                                     (uint32_t)f->bytes_len, fb);
+        if (n > 0) {
+            if (sess_fb_push(c->fb, 6, fb, (size_t)n) == 0) c->fb_ack++;
+        }
+        {
+            uint64_t now_us = kn_sock_now_us();
+            if (now_us >= c->next_pacing_us) {
+                uint8_t pb[4 + KN_RX_CTRL_FRAME_PACING_PAYLOAD_LEN];
+                int pn = kn_rx_ctrl_frame_pacing(f->frame_index,
+                                                 SESS_FRAME_TIME_US, 0, pb);
+                if (pn > 0 && sess_fb_push(c->fb, 6, pb, (size_t)pn) == 0)
+                    c->fb_pacing++;
+                c->next_pacing_us = now_us + SESS_PACING_INTERVAL_US;
+            }
+        }
+    }
 }
 
 /* decoded-frame callback (kn_decode stream session) */
@@ -1628,15 +1797,37 @@ static void dec_drain_events(dec_ctx *c)
 static void dec_take_kf(dec_ctx *c)
 {
     if (kn_rx_video_take_keyframe_request(c->v)) {
+        int sent = 0;
         c->kf_request_lines++;
-        printf("{\"mode\":\"decode\",\"event\":\"kf_request\","
-               "\"sent\":false,\"note\":\"control channel is stage 3\"}\n");
+        /* round XXXVI: the request now FLIES — IDR (0x0302) on the
+         * partial-reliable control channel (sid 6, the nvst_control
+         * command space) + a plain RTCP PLI on the rtcp1 channel
+         * (sid 14, nvst.rs:8101 build_rtcp_pli via send_rtcp). The
+         * stage-2 "unsent" note was the honest placeholder; run 16's
+         * stall (progress_stall -> kf_request sent:false) is exactly
+         * the gap this closes. */
+        if (c->fb) {
+            uint8_t idr[6];
+            int n = kn_rx_ctrl_idr_request(idr);
+            if (n > 0 && sess_fb_push(c->fb, 6, idr, (size_t)n) == 0) {
+                c->fb_idr++;
+                sent = 1;
+            }
+            if (c->v->have_bound_ssrc) {
+                uint8_t pli[12];
+                kn_rx_rtcp_pli(SESS_RTCP_SENDER_SSRC, c->v->bound_ssrc,
+                               pli);
+                if (sess_fb_push(c->fb, 14, pli, sizeof pli) == 0) {
+                    c->fb_pli++;
+                    sent = 1;
+                }
+            }
+        }
         if (c->kf_request_lines <= 20) {
-            kn_lctx b;
-            kn_lctx_init(&b, KN_CH_TRANSPORT, KN_INFO, "keyframe_request");
-            kn_lctx_i64(&b, "n", (long long)(c->kf_request_lines % 1000000));
-            kn_lctx_str(&b, "transport", "unsent (stage-3 control channel)");
-            kn_log_emit(&b);
+            printf("{\"mode\":\"decode\",\"event\":\"kf_request\","
+                   "\"sent\":%d,\"n\":%llu}\n", sent,
+                   (unsigned long long)(c->kf_request_lines % 1000000ull));
+            fflush(stdout);
         }
     }
 }
@@ -2289,6 +2480,11 @@ typedef struct {
     unsigned dtls_peer_closed, dtls_post_first_len;
     uint8_t  dtls_post_first[32];
     unsigned sctp_out, sctp_in;
+    /* round XXXVI: bundle-socket media classification (run 16's
+     * invalid_in:175 was almost certainly the rig's AUDIO RTP on the
+     * bundle — rtcAudioOnNativeBundle:1; counted separately now,
+     * consumed at the audio stage) + the feedback-outbox send counter */
+    unsigned bundle_rtp_in, bundle_rtcp_in, fb_sent;
     uint64_t pump_ms;
 } sess_ice_stats;
 
@@ -2328,6 +2524,9 @@ typedef struct {
      * owner contract as dtls) */
     struct kn_sctp *sctp;
     int sctp_tried;
+    /* round XXXVI: the feedback outbox (main pushes, this thread drains
+     * into kn_sctp — the media loop's encoded feedback flies here) */
+    struct sess_fb_outbox *fb;
     /* Round XXXII: the pre-PLAY Mjolnir NATT keepalive — the reference
      * arms BOTH workers before finish()/PLAY (lib.rs:937/:990): the
      * bundle worker (STUN+DTLS, above) AND the raw video worker whose
@@ -2469,6 +2668,23 @@ static void sess_sctp_service(sess_pump *p)
     if (kn_sctp_poll(p->sctp, sess_sctp_msg, p,
                      sess_sctp_event, p) == KN_SCTP_ERR_LOST)
         p->st.sctp_fail = 1;
+    /* the feedback outbox drain (bounded per pass — the cadences live
+     * on the main thread; this only ships what it queued). kn_sctp_send
+     * refuses before COMM_UP, so pre-association pushes are dropped at
+     * the source (sess_fb_push stays counted, the send counter honest). */
+    if (p->fb && kn_sctp_established(p->sctp)) {
+        sess_fb_msg m;
+        guard = 0;
+        while (sess_fb_pop(p->fb, &m) && ++guard <= 32) {
+            int ord;
+            uint16_t pol;
+            uint32_t val;
+            sess_fb_sid_params(m.sid, &ord, &pol, &val);
+            if (kn_sctp_send_pr(p->sctp, m.sid, KN_SCTP_PPI_BINARY, ord,
+                                pol, val, m.payload, m.len) == KN_SCTP_OK)
+                p->st.fb_sent++;
+        }
+    }
     {   /* mirror the counters for the snapshot / evidence lines */
         kn_sctp_stats ss;
         kn_sctp_stats_get(p->sctp, &ss);
@@ -2724,6 +2940,17 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
                 if (kn_dtls_peek(p->rx, rlen) && p->dtls) {
                     (void)kn_dtls_inject(p->dtls, p->rx, rlen);
                     /* a fresh record may advance the handshake at once */
+                    continue;
+                }
+                /* round XXXVI: RTP/RTCP on the bundle = the rig's AUDIO
+                 * (rtcAudioOnNativeBundle:1 — the reference admits it via
+                 * audio_streams, :8620-8627; our audio stage comes later)
+                 * — classified, not "invalid" (run 16: invalid_in:175). */
+                if (rlen >= 12 && (p->rx[0] >> 6) == 2) {
+                    if (p->rx[1] >= 192 && p->rx[1] <= 223)
+                        p->st.bundle_rtcp_in++;
+                    else
+                        p->st.bundle_rtp_in++;
                     continue;
                 }
                 p->st.invalid_in++;
@@ -3171,6 +3398,7 @@ static int run_session(const char *token, const char *device_id,
     unsigned long long ka_sent = 0;
     unsigned relearns = 0;                /* cm_control re-learn events */
     static sess_pump pump;
+    static sess_fb_outbox fb;           /* round XXXVI: main -> pump */
     sess_ice_stats ice_st;
     char ufrag[24], pwd[32], fp[128];
     char key_hex[65], salt_hex[25];
@@ -3975,7 +4203,9 @@ static int run_session(const char *token, const char *device_id,
          * refusal). A failed PLAY goes to TEARDOWN as before; the
          * session stays resumable (phase B-E policy). */
         memset(&pump, 0, sizeof pump);
+        sess_fb_init(&fb);
         if (ice_enabled) {
+            pump.fb = &fb;            /* the feedback drain (XXXVI) */
             pump.sock = &bsock;       /* R3-B: the pump owns the BUNDLE
                                        * socket (ICE + DTLS live there);
                                        * the video socket is untouched
@@ -4271,6 +4501,17 @@ static int run_session(const char *token, const char *device_id,
         kn_rx_video_set_srtp(&v, &srtp_sess);
         have_sess = 1;
         c.v = &v;
+        /* round XXXVI: the feedback sender arms with the pipeline (the
+         * cadence anchors at 0 fire on the first media tick) */
+        c.fb = &fb;
+        c.next_rr_ms = 0;
+        c.next_qos_ms = 0;
+        c.next_ka_ms = 0;
+        c.next_pacing_us = 0;
+        c.qos_prior_ms = 0;
+        c.qos_prior_bytes = 0;
+        c.rr_prior_expected = 0;
+        c.rr_prior_received = 0;
         c.decode_available = kn_decode_available();
         if (c.decode_available) {
             char derr[128];
@@ -4381,6 +4622,135 @@ static int run_session(const char *token, const char *device_id,
                 dec_drain_queue(&c);
                 next_poll_ms = now_ms + KN_SOCK_POLL_INTERVAL_MS;
             }
+            /* ---- round XXXVI: the periodic feedback senders. Every
+             * cadence/byte is the reference's (RR 1 s sid 14 :8041-8060;
+             * QoS 50 ms sid 6; keepalive 3 s sid 0, the byte-exact
+             * golden of nvst_input.rs:1769; NACK-v2 sid 6 + RTCP NACK
+             * sid 14 from the kn_rx tracker's own interval policy; RFI
+             * sid 6). Run 16 PROVED the rig stops video without them
+             * (~10 s, 307 frames, then progress_stall — "without any
+             * receiver feedback the server stops video", :4320-4323).
+             * Encoding happens HERE (main = the kn_rx single owner);
+             * the pump thread ships it (D21 untouched). */
+            if (c.fb) {
+                uint32_t f_ssrc = 0, f_base = 0, f_high = 0;
+                uint64_t f_recv = 0;
+                int have_rr = kn_rx_video_rr_snapshot(&v, &f_ssrc, &f_base,
+                                                      &f_high, &f_recv);
+                if (have_rr && now_ms >= c.next_rr_ms) {
+                    uint32_t expected = f_high - f_base + 1u;
+                    uint32_t rec32 = (uint32_t)(f_recv & 0xFFFFFFFFull);
+                    uint32_t de = expected - c.rr_prior_expected;
+                    uint32_t dr = rec32 - c.rr_prior_received;
+                    uint8_t frac = 0;
+                    uint8_t rr[32];
+                    if (c.rr_prior_expected && de > 0) {
+                        uint64_t lost = de > dr ? (uint64_t)(de - dr) : 0;
+                        uint64_t f256 = (lost << 8) / de;
+                        frac = f256 > 255u ? 255u : (uint8_t)f256;
+                    }
+                    kn_rx_rtcp_rr(SESS_RTCP_SENDER_SSRC, f_ssrc, frac,
+                                  (int32_t)((int64_t)expected -
+                                            (int64_t)rec32),
+                                  f_high, 0u, rr);
+                    if (sess_fb_push(c.fb, 14, rr, sizeof rr) == 0)
+                        c.fb_rr++;
+                    c.rr_prior_expected = expected;
+                    c.rr_prior_received = rec32;
+                    c.next_rr_ms = now_ms + SESS_RR_INTERVAL_MS;
+                }
+                if (now_ms >= c.next_qos_ms) {
+                    kn_rx_qos q;
+                    uint8_t qb[4 + KN_RX_CTRL_QOS_PAYLOAD_LEN];
+                    unsigned long long kbps = 0;
+                    int n;
+                    memset(&q, 0, sizeof q);
+                    if (c.qos_prior_ms && now_ms > c.qos_prior_ms) {
+                        unsigned long long db =
+                            c.fb_bytes_total - c.qos_prior_bytes;
+                        kbps = (db * 8ull) / (now_ms - c.qos_prior_ms);
+                    }
+                    q.sequence = ++c.qos_seq;
+                    q.sender_frame_number = c.last_fi;
+                    q.bytes_received =
+                        (uint32_t)(c.fb_bytes_total & 0xFFFFFFFFull);
+                    if (have_rr) {
+                        uint32_t expected = f_high - f_base + 1u;
+                        uint32_t rec32 = (uint32_t)(f_recv & 0xFFFFFFFFull);
+                        q.have_packet_snapshot = 1;
+                        q.snap_ssrc = f_ssrc;
+                        q.snap_base = f_base;
+                        q.snap_highest = f_high;
+                        q.snap_received = rec32;
+                        if (expected && expected > rec32)
+                            q.loss_per_ten_thousand = (uint16_t)
+                                (((uint64_t)(expected - rec32) * 10000ull)
+                                 / expected);
+                    }
+                    q.client_time_90khz =
+                        (uint32_t)((kn_sock_now_us() / 11111ull) &
+                                   0xFFFFFFFFull);
+                    /* D-t10: the estimator fields stay honest zeros
+                     * until the BWE stage; the estimate is the MEASURED
+                     * downlink rate (bytes*8/ms == kbit/s) */
+                    q.bw_estimate_kbps = (uint32_t)kbps;
+                    n = kn_rx_ctrl_qos_report(&q, qb);
+                    if (n > 0 && sess_fb_push(c.fb, 6, qb, (size_t)n) == 0)
+                        c.fb_qos++;
+                    c.qos_prior_ms = now_ms;
+                    c.qos_prior_bytes = c.fb_bytes_total;
+                    c.next_qos_ms = now_ms + SESS_QOS_INTERVAL_MS;
+                }
+                if (now_ms >= c.next_ka_ms) {
+                    static const uint8_t ka_msg[8] =
+                        { 0x00, 0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                    if (sess_fb_push(c.fb, 0, ka_msg, sizeof ka_msg) == 0)
+                        c.fb_ka++;
+                    c.next_ka_ms = now_ms + SESS_KA_INTERVAL_MS;
+                }
+                if (have_rr) {
+                    uint64_t nf = 0, nl = 0;
+                    int guard = 0;
+                    while (guard++ < 8 &&
+                           kn_rx_nack_take(&v.nack, now_ms, 0, &nf,
+                                           &nl) == 1) {
+                        uint16_t miss[64];
+                        uint8_t nb[704], rn[64];
+                        uint32_t cnt = 0;
+                        uint64_t i2;
+                        int n2;
+                        size_t rl;
+                        for (i2 = nf; i2 <= nl && cnt < 64u; ++i2)
+                            miss[cnt++] = (uint16_t)(i2 & 0xFFFFull);
+                        n2 = kn_rx_ctrl_nack_v2(0, miss, cnt, nb, sizeof nb);
+                        if (n2 > 0 &&
+                            sess_fb_push(c.fb, 6, nb, (size_t)n2) == 0)
+                            c.fb_nack++;
+                        rl = kn_rx_rtcp_nack(SESS_RTCP_SENDER_SSRC, f_ssrc,
+                                           nf, nl, rn, sizeof rn);
+                        if (rl && sess_fb_push(c.fb, 14, rn, rl) == 0)
+                            c.fb_nack++;
+                    }
+                }
+                {
+                    uint64_t rf = 0, rlast = 0;
+                    if (kn_rx_inval_take_rfi(&v.inval, &rf, &rlast)) {
+                        uint8_t ob[4 +
+                            KN_RX_CTRL_FRAME_INVALIDATION_PAYLOAD_LEN];
+                        int n3 = kn_rx_ctrl_frame_invalidation(
+                                     rf, rlast,
+                                     (uint16_t)v.last_stream_packet_index,
+                                     ob);
+                        if (n3 > 0) {
+                            if (sess_fb_push(c.fb, 6, ob, (size_t)n3) == 0)
+                                c.fb_rfi++;
+                            else
+                                kn_rx_inval_restore_rfi(&v.inval, rf,
+                                                        rlast);
+                        }
+                    }
+                }
+            }
             if (ka_on && now_ms >= next_ka_ms) {
                 uint8_t ktid[12], ktx[KN_SOCK_STUN_MAX_PKT];
                 size_t ktlen;
@@ -4460,7 +4830,11 @@ static int run_session(const char *token, const char *device_id,
                    "\"recv_errors\":%llu,\"event_lines_capped\":%llu,"
                    "\"au_write_errors\":%llu,\"srtp_profile\":\"%.24s\","
                    "\"rx_state\":%d,\"decoder\":\"%.64s\",\"video\":\"%dx%d\","
-                   "\"wall_ms\":%llu,\"drops\":{%s}}}\n",
+                   "\"wall_ms\":%llu,\"drops\":{%s},"
+                   "\"feedback\":{\"rr\":%llu,\"ack\":%llu,\"pacing\":%llu,"
+                   "\"qos\":%llu,\"ka\":%llu,\"nack\":%llu,\"idr\":%llu,"
+                   "\"pli\":%llu,\"rfi\":%llu,\"pushed\":%llu,"
+                   "\"dropped\":%llu}}}\n",
                    stop_reason, sess.session_id,
                    datagrams % 10000000000ull,
                    (unsigned long long)(v.authenticated_packets %
@@ -4488,7 +4862,13 @@ static int run_session(const char *token, const char *device_id,
                    c.last_w % 100000, c.last_h % 100000,
                    (unsigned long long)((kn_sock_now_ms() - t_start) %
                                         1000000000ull),
-                   drops);
+                   drops,
+                   c.fb_rr % 1000000ull, c.fb_ack % 1000000000ull,
+                   c.fb_pacing % 1000000000ull, c.fb_qos % 1000000000ull,
+                   c.fb_ka % 1000000ull, c.fb_nack % 1000000ull,
+                   c.fb_idr % 1000000ull, c.fb_pli % 1000000ull,
+                   c.fb_rfi % 1000000ull, fb.pushed % 1000000000ull,
+                   fb.dropped % 1000000ull);
             fflush(stdout);
         }
         {
@@ -4532,6 +4912,7 @@ static int run_session(const char *token, const char *device_id,
          * bsock, the dtls + sctp contexts while running), then close
          * sctp (its write path is dtls), then free dtls, then sockets */
         sess_pump_stop(&pump);
+        sess_fb_destroy(&fb);
         if (pump.sctp) { kn_sctp_close(pump.sctp); pump.sctp = NULL; }
         if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
         if (have_sock)  { kn_sock_udp_close(&sock);  have_sock = 0; }
@@ -4540,6 +4921,7 @@ static int run_session(const char *token, const char *device_id,
 
     teardown_sock:
         sess_pump_stop(&pump);          /* idempotent (started flag) */
+        sess_fb_destroy(&fb);
         if (pump.sctp) { kn_sctp_close(pump.sctp); pump.sctp = NULL; }
         if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
         if (have_sock)  { kn_sock_udp_close(&sock);  have_sock = 0; }

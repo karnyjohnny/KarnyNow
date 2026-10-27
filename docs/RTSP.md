@@ -1686,3 +1686,113 @@ use_srtp (this round, D-t9). Reading the tea leaves:
   printed since XXXIV) becomes the primary clue: 0x15 (alert) points
   at the record layer, 0x17 (app) at a rig-initiated protocol, 0x16
   (handshake) at renegotiation.
+
+## 23. Round XXXVI — R7 run 16: **PLAY 200 — THE FIRST REAL GFN VIDEO FLOWED THROUGH THE FULL STACK** (R32's final stage-2 gate PASSED); the stream stalled at ~10 s for lack of feedback → the reference's full feedback sender set ships this round
+
+**Target T10 (rounds XXXIV+XXXV tree): ALL PASS 76, zero warnings** —
+the use_srtp/nomination build verified; the mbedTLS layout change
+clean on GCC 16.2.
+
+**Run 16 (live production, rig #8 = 185-136-70-135; queue: 23
+relearns, the 78 cap with real glimpses, clean 1→3→ready):**
+* `sock_pair 49005/49006 preferred, unified:0`; OPTIONS/DESCRIBE/
+  SETUP/ANNOUNCE 200 (4137 B); identity cert:real.
+* **`dtls_ready ms:183 … "srtp_prof":1`** — the rig NEGOTIATED
+  use_srtp 0x0001 (hypothesis #2's datum: the transport is now
+  SRTP-capable in the rig's eyes).
+* **`sctp_up {"ms":52}`** — the rig ANSWERED the SCTP INIT this time
+  (run 15: eternal silence). The association came up in 52 ms.
+* **`sctp_channels {"opened":8,"acked":8,"rig_opened":0}`** — all 8
+  DCEP channels opened and ACKed by the rig.
+* **`PLAY: rc:0, status:200`** — **THE FIRST SUCCESSFUL PLAY IN
+  PROJECT HISTORY** (16 runs: 455 → timeouts → 400 ×4 → **200**).
+  Both round-XXXIV/XXXV additions were live (nom_sent:18,
+  srtp_prof:1); the evidence cannot fully deconfound which unlocked
+  the INIT answer — both are reference-faithful and both stay.
+* `handoff`: video_peer :5004, packet_size 1280, **srtp_profile
+  AEAD_AES_256_GCM_8, key_source local** (the rig encrypts with the
+  key OUR announce carried), rtcp_on_sctp 1, unified 0.
+* **THE MEDIA LOOP RAN ON REAL MOLJNIR TRAFFIC: `datagrams 4900,
+  authenticated 4900` (SRTP GCM-256-tag8 — 100 % authentication, zero
+  recv_errors), `aus 307, frames_decoded 307, frames_failed 0,
+  decode_errors 0, q_overflows 0, fec_repaired 0, stale 0, gaps 0,
+  withheld 0` — libavcodec 63.2.100, 1280×720.** ffprobe accepts
+  au_00001_k.264: h264 High, yuv420p, bt709, 60 tbr. **R32's final
+  stage-2 gate — real GFN SRTP → kn_rx → AU → decode — PASSED.**
+* `ice_preplay` rich evidence: `invalid_in:0` thanks to the new
+  classification — **`bundle_rtp` traffic confirmed** (run 15's
+  invalid_in:175 was the rig's AUDIO on the bundle, as theorized);
+  `post_first "17fefd…"` — the mystery post-ready record is
+  **ContentType 0x17 = APPLICATION DATA, epoch 1** (the rig's SCTP
+  INIT-ACK — benign; runs 13-15's variant was the same slot, the
+  capture now proves the class); `sctp_first: sid 0, ppi 53, len 6,
+  "0e0202000300"` — **the rig talks to us: 0x020e = COMMAND_INPUT_
+  VERSION (nvst_input.rs:31) on control_channel_reliable** (22
+  messages total in the channels).
+* **THE STALL: video flowed ~10.2 s (307 frames, RTP ts 695116→
+  1612431 @90 kHz) then `progress_stall` → `recovery_timeout`;
+  `kf_request {"sent":false,"note":"control channel is stage 3"}` —
+  the exact documented cause: "Sends periodic SRTCP Receiver Reports
+  so the peer keeps the video flowing … without any receiver feedback
+  the server stops video after an initial burst" (nvst.rs:4320-4323).**
+  The user Ctrl-C'd after 214 s (stop_reason signal);
+  natt_keepalive 1945 kept the routing alive throughout.
+
+**Round XXXVI delta — the reference's feedback sender set, all of it
+through the existing kn_rx encoders (round XVI's KAT'd ports) over the
+live SCTP channels:**
+* **The feedback outbox** (main → pump thread): the media loop (the
+  kn_rx single owner, D21 untouched) ENCODES; the pump thread (the
+  SCTP single owner) SHIPS — a bounded 64×704 mutex queue, drop-new +
+  counted (the kn_sctp tx-queue pattern one level up). Per-sid sender
+  parameters mirror the channel profile (ordered flags + PR-SCTP:
+  sid 4 RTX 2, sid 6/10 TTL 300 ms via the new `kn_sctp_send_pr` /
+  SCTP_SENDV_SPA; the str0m configure_reliability sender-side half).
+* **RTCP Receiver Report — sid 14 (rtcp_on_sctp_private), every 1 s**
+  (SRTCP_RR_INTERVAL :97, the :8041-8060 block): NEW
+  `kn_rx_rtcp_rr()` byte-exact with build_rtcp_receiver_report
+  (:2983-2997 — 0x81/201/len7, sender ssrc **0x4F4E4F57 "ONOW"**
+  (:96), 24-bit clamped cumulative loss, LSR=DLSR=0), fed by the NEW
+  `kn_rx_video_rr_snapshot()` (the base_sequence anchor added to
+  kn_rx_video, :1225 semantics; fraction = the reference's
+  interval-delta arithmetic :1234-1247). 3 goldens from an independent
+  Python transcription (negative loss, both clamps) — test_knrx +4 =
+  **219**.
+* **Frame ACK 0x0204 per assembled frame + pacing 0x0203 at the
+  55 556-µs gate** (FRAME_PACING_INTERVAL, nvst_control.rs:18; the
+  neutral-error rule of :7928-7933) — sid 6, hooked in
+  dec_frame_in_cb; the rig's pending-ack window (MAX_PENDING_FRAME_
+  ACKS 512, :106) can no longer starve.
+* **QoS 0x0207 every 50 ms** (QOS_REPORT_INTERVAL :19) — sid 6, the
+  kn_rx_qos snapshot fields filled from the RR snapshot; **D-t10: the
+  estimator fields stay honest zeros and bw_estimate_kbps is the
+  MEASURED downlink rate until the BWE stage.**
+* **Control keepalive 0x0200 every 3 s** — sid 0, the byte-exact
+  golden of the reference's own test (nvst_input.rs:1769:
+  `control_keepalive(0) == 0002040000000000`).
+* **The recovery senders now FLY**: `dec_take_kf` ships IDR 0x0302
+  (sid 6) + RTCP PLI (sid 14, :8101) instead of the stage-2 "unsent"
+  note (run 16's stall had exactly this gap); the NACK drain
+  (kn_rx_nack_take's own 4 ms/52 ms/3-attempt policy) sends NACK-v2
+  0x0317 (sid 6) + RTCP generic NACK (sid 14) per :3075-3078; RFI
+  ranges (0x0301) ride sid 6 with restore-on-drop.
+* **Bundle-socket media classification**: RTP/RTCP-looking datagrams
+  on 49006 count as `bundle_rtp`/`bundle_rtcp` (the rig's audio —
+  rtcAudioOnNativeBundle:1; the audio stage consumes them) instead of
+  `invalid_in` (run 15's 175).
+* Evidence: session_stats grows fb_rr/fb_ack/fb_qos; the summary grows
+  the `feedback` block (rr/ack/pacing/qos/ka/nack/idr/pli/rfi/pushed/
+  dropped); ice_preplay grows bundle_rtp/bundle_rtcp/fb_sent.
+
+**What run 17 tests:** the SAME command — the stream must now SUSTAIN
+(summary: wall_ms >> 10 s of frames, aus ≈ 30/s × seconds, fb_rr ≈
+seconds, fb_ack ≈ aus, feedback.dropped 0). Watch: does the rig keep
+sending past the 10 s mark (RR/ACK window satisfied)? Does it answer
+our keepalive/ack flow with more control messages (sctp_msgs_in
+grows)? If the stream still stalls: the kf_request now flies (IDR +
+PLI) — a stall WITH sent keyframe requests points at the QoS/BWE
+fields (D-t10) or the input activation chain (nvst_input.rs:1318-1328
+— enable_input/device_descriptor/cursor/window/system/haptics — the
+next fidelity candidate, deferred until measured). Presentation wiring
+(frames → the G1-proven kn_d3d presenter = video ON SCREEN) is the
+parallel track for G2.

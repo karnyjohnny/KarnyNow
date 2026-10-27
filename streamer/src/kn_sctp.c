@@ -626,7 +626,13 @@ void *kn_sctp_key(const kn_sctp *s) { return s ? s->conn_key : NULL; }
 int kn_sctp_send(kn_sctp *s, uint16_t sid, uint32_t ppi, int ordered,
                  const uint8_t *data, size_t len)
 {
-    struct sctp_sndinfo si;
+    return kn_sctp_send_pr(s, sid, ppi, ordered, 0, 0, data, len);
+}
+
+int kn_sctp_send_pr(kn_sctp *s, uint16_t sid, uint32_t ppi, int ordered,
+                    uint16_t pr_policy, uint32_t pr_value,
+                    const uint8_t *data, size_t len)
+{
     ssize_t n;
     if (!s || (!data && len)) return KN_SCTP_ERR_ARGS;
     if (!s->established || s->lost || s->closed) return KN_SCTP_ERR_STATE;
@@ -634,15 +640,31 @@ int kn_sctp_send(kn_sctp *s, uint16_t sid, uint32_t ppi, int ordered,
      * fragments them into MTU-sized DATA chunks itself (str0m's
      * DEFAULT/LOCAL max message sizes: 64 KiB send / 256 KiB recv) */
     if (len > 65536u) return KN_SCTP_ERR_ARGS;
-    memset(&si, 0, sizeof si);
-    si.snd_sid = sid;
-    si.snd_flags = ordered ? 0 : SCTP_UNORDERED;
-    si.snd_ppid = htonl(ppi);   /* RFC 6458: the ppid travels in
-                                 * NETWORK order (usrsctp copies it
-                                 * verbatim onto the wire — the
-                                 * libdatachannel convention) */
-    n = usrsctp_sendv(s->so, data, len, NULL, 0, &si,
-                      (socklen_t)sizeof si, SCTP_SENDV_SNDINFO, 0);
+    if (pr_policy == 0) {
+        struct sctp_sndinfo si;
+        memset(&si, 0, sizeof si);
+        si.snd_sid = sid;
+        si.snd_flags = ordered ? 0 : SCTP_UNORDERED;
+        si.snd_ppid = htonl(ppi);   /* RFC 6458: the ppid travels in
+                                     * NETWORK order (usrsctp copies it
+                                     * verbatim onto the wire — the
+                                     * libdatachannel convention) */
+        n = usrsctp_sendv(s->so, data, len, NULL, 0, &si,
+                          (socklen_t)sizeof si, SCTP_SENDV_SNDINFO, 0);
+    } else {
+        /* PR-SCTP: the sender-side half of the channel profile's
+         * reliability (TTL ms / RTX count) via the combined SPA info */
+        struct sctp_sendv_spa spa;
+        memset(&spa, 0, sizeof spa);
+        spa.sendv_flags = SCTP_SEND_SNDINFO_VALID | SCTP_SEND_PRINFO_VALID;
+        spa.sendv_sndinfo.snd_sid = sid;
+        spa.sendv_sndinfo.snd_flags = ordered ? 0 : SCTP_UNORDERED;
+        spa.sendv_sndinfo.snd_ppid = htonl(ppi);
+        spa.sendv_prinfo.pr_policy = pr_policy;
+        spa.sendv_prinfo.pr_value = pr_value;
+        n = usrsctp_sendv(s->so, data, len, NULL, 0, &spa,
+                          (socklen_t)sizeof spa, SCTP_SENDV_SPA, 0);
+    }
     if (n < 0) {
         s->st.send_errors++;
         s->st.last_errno = errno;
@@ -760,6 +782,14 @@ int kn_sctp_send(kn_sctp *s, uint16_t sid, uint32_t ppi, int ordered,
     (void)sid; (void)ppi; (void)ordered;
     if (!s || (!data && len)) return KN_SCTP_ERR_ARGS;
     return KN_SCTP_ERR_BACKEND;
+}
+
+int kn_sctp_send_pr(kn_sctp *s, uint16_t sid, uint32_t ppi, int ordered,
+                    uint16_t pr_policy, uint32_t pr_value,
+                    const uint8_t *data, size_t len)
+{
+    (void)pr_policy; (void)pr_value;
+    return kn_sctp_send(s, sid, ppi, ordered, data, len);
 }
 
 const kn_sctp_channel_def kn_sctp_nvst_channels[KN_SCTP_NVST_N_CHANNELS] = {
