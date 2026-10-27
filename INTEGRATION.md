@@ -14,7 +14,7 @@
 > (vendored usrsctp c625e219, AF_CONN over the new kn_dtls app bridge,
 > sctp-proto-exact wire parameters, the full NVST channel profile) +
 > the independent Python reference + the 33-check suite + PLAY gated on
-> sctp_up (D-t5). Target expectation: T10 ALL PASS **75** (the harness
+> sctp_up (D-t5). Target expectation: T10 ALL PASS **76** (the harness
 > now fetches the pinned usrsctp tarball), then R7 run 15.**
 >
 > ## Changed files (round XXXIII)
@@ -83,7 +83,7 @@
 >    090b9d03bf068ce5989576c8e0ff6979d3031ea85e405acd263206f19166b41e;
 >    `tests/T10_build_and_test.py` downloads+verifies+extracts it
 >    (ensure_usrsctp_source, the mbedtls pattern) and gates the build
->    on it; suites += test_knsctp → target expectation **75**.
+>    on it; suites += test_knsctp → target expectation **76**.
 > 7. `CMakeLists.txt` — kn_sctp.c into kncore; knsctp into the foreach
 >    (ctest 17→18 ×2); the usrsctp block: add_subdirectory with
 >    sctp_debug/werror/invariants/programs/shared/fuzzer OFF + inet6
@@ -116,13 +116,24 @@
 >   POSIX dry ALL PASS **66**; T13 ALL PASS **63**.
 > * Target (round XXXIII's evidence, user-reported): T10 ALL PASS
 >   **74** (the round-XXXII tree); R7 run 14 (docs/RTSP.md §20).
-> * Target (PENDING — round XXXIV asks for): T10 (expect **75**, the
+> * Target (PENDING — round XXXIV asks for): T10 (expect **76**, the
 >   usrsctp download on first run) + **R7 run 15** (the decision
 >   matrix in PROJECT-STATE Next steps 2; paste sock_pair/dtls_ready/
 >   sctp_arm/sctp_up/sctp_channels/PLAY/rtsp_response/ice_preplay
 >   verbatim, + handoff/summary on PLAY 200).
 >
 > ## Notes for the target build
+> * **rev 23b HOTFIX (the sixth target catch):** the first target T10
+>   died at configure — our `target_link_libraries(usrsctp PUBLIC
+>   ws2_32)` mixed keyword signature with usrsctp's own PLAIN
+>   `target_link_libraries(usrsctp ws2_32 iphlpapi)` (its CMakeLists
+>   :195-198; WIN32-only branch — invisible to the POSIX sandbox).
+>   Fixed by DELETING our line (usrsctp links its own Win32 deps) and
+>   gated permanently: cross_check.sh now cross-builds usrsctp for
+>   mingw x64 and LINKS the real suite under the exact F1 flags —
+>   imports verified: KERNEL32/msvcrt/WS2_32/IPHLPAPI only, no
+>   winpthread DLL. Target expectation corrected 75 → **76** (the
+>   failed run's own 3/76 count proved it).
 > * First T10 run downloads the ~0.8 MB pinned usrsctp tarball
 >   (SHA-256 verified before extraction); the build grows by ~25 s
 >   (usrsctp static). The vendored target compiles with scoped `-w`

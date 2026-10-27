@@ -73,6 +73,29 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
             -c streamer/src/kn_sctp.c -o build/cross/kn_sctp_real_$arch.o
         $CC $CFLAGS -DKN_SCTP_BACKEND_USRSCTP=1 -Ithird_party/usrsctp/usrsctplib \
             -c streamer/tests/test_knsctp.c -o build/cross/test_knsctp_real_$arch.o
+        # round XXXIII hotfix leg (the SIXTH target catch): the T10
+        # configure failed on a WIN32-only CMake branch the POSIX sandbox
+        # never executes (plain-vs-keyword target_link_libraries on the
+        # usrsctp target). Compile legs cannot see LINK closure — so for
+        # x86_64 (the target arch) also CROSS-BUILD usrsctp and LINK the
+        # real suite with the exact F1 flags: proves the static closure
+        # (ws2_32/iphlpapi, no winpthread DLL) before the target ever
+        # configures. i686 keeps the compile-only legs.
+        if [ "$arch" = "x86_64" ]; then
+            printf 'set(CMAKE_SYSTEM_NAME Windows)\nset(CMAKE_SYSTEM_PROCESSOR x86_64)\nset(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)\n' > build/cross/mingw64-toolchain.cmake
+            cmake -S third_party/usrsctp -B build/cross/usrsctp-x64 -G Ninja \
+                -DCMAKE_TOOLCHAIN_FILE="$PWD/build/cross/mingw64-toolchain.cmake" \
+                -DCMAKE_BUILD_TYPE=Release -Dsctp_debug=0 -Dsctp_werror=0 \
+                -Dsctp_build_programs=0 -Dsctp_build_shared_lib=0 > /dev/null
+            cmake --build build/cross/usrsctp-x64 > /dev/null
+            $CC $CFLAGS -DKN_SCTP_BACKEND_USRSCTP=1 -Ithird_party/usrsctp/usrsctplib \
+                streamer/tests/test_knsctp.c streamer/src/kn_sctp.c \
+                streamer/src/kn_sock.c streamer/src/kn_sha1.c \
+                third_party/crypto-algorithms-sha1/sha1.c \
+                build/cross/usrsctp-x64/usrsctplib/libusrsctp.a \
+                $LDFLAGS -o build/cross/test_knsctp_real_x86_64.exe \
+                -lws2_32 -liphlpapi
+        fi
     else
         echo "SKIP kn_sctp real-body cross-compile (third_party/usrsctp absent)"
     fi

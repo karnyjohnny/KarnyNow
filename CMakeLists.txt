@@ -234,9 +234,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/usrsctp/usrsctplib/CMakeLists
   target_compile_options(usrsctp PRIVATE -w)
   target_compile_definitions(kncore PRIVATE KN_SCTP_BACKEND_USRSCTP=1)
   target_link_libraries(kncore PUBLIC usrsctp)
-  if(WIN32)
-    target_link_libraries(usrsctp PUBLIC ws2_32)
-  endif()
+  # NOTE: do NOT add target_link_libraries(usrsctp ...) here — usrsctp's
+  # own CMakeLists uses the PLAIN signature (it links ws2_32+iphlpapi
+  # itself on WIN32, usrsctplib/CMakeLists.txt:195-198) and CMake
+  # forbids mixing plain with keyword signatures on one target. The
+  # target T10 configure caught this (round XXXIII hotfix) — the POSIX
+  # sandbox never executes the WIN32 branch.
   target_compile_definitions(test_knsctp PRIVATE KN_SCTP_BACKEND_USRSCTP=1)
   message(STATUS "kn_sctp: usrsctp backend ENABLED (third_party/usrsctp)")
 else()

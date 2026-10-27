@@ -1,7 +1,7 @@
 # SCTP.md — kn_sctp: the SCTP-over-DTLS layer on the bundle (R3-C, round XXXIII)
 
 > Status: **SHIPPED in the sandbox (round XXXIII, 2026-10-27)** — awaiting
-> the target T10 (expect ALL PASS **75**) and R7 run 15. Provenance:
+> the target T10 (expect ALL PASS **76**) and R7 run 15. Provenance:
 > nvst.rs + nvst_input.rs @ a49b124, str0m vendored in the reference tree,
 > sctp-proto (crates.io, defaults read from the published source),
 > RFC 4960 / RFC 8831 / RFC 8832, usrsctp @ c625e219 (pinned). Runs 13/14
@@ -131,6 +131,18 @@ stage 3 sends the kn_rx NACK-v2/IDR/RFI encoders there.
    re-subscribes on the accepted socket anyway).
 7. The DCEP parser must REJECT channel types > 0x02 (RFC 8832 defines
    only 0x00/0x01/0x02) — the golden battery pins it.
+8. **BUILD (the SIXTH target catch, round XXXIII hotfix):** never call
+   `target_link_libraries(usrsctp …)` from OUR CMakeLists — usrsctp's
+   own CMakeLists uses the PLAIN signature (it links `ws2_32 iphlpapi`
+   itself on WIN32, usrsctplib/CMakeLists.txt:195-198) and CMake
+   forbids mixing plain with keyword signatures on one target. The
+   first target T10 died at configure on exactly this — a WIN32-only
+   branch the POSIX sandbox never executes (the round-XXII class).
+   **The permanent gate:** cross_check.sh now CROSS-BUILDS usrsctp for
+   mingw x64 and LINKS the real test suite with the exact F1 flags —
+   proving the static closure (imports: KERNEL32/msvcrt/WS2_32/
+   IPHLPAPI only — all Win7-built-in, no winpthread DLL) before the
+   target ever configures.
 
 ## 6. Verification (the two-implementations rule)
 
