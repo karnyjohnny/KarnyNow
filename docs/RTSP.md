@@ -1974,3 +1974,148 @@ directly:
 Paste: `dtls_ready`, `sctp_up`, `sctp_channels`, `PLAY`, the `ctrl_msg`
 lines, `input_version`, `input_activation`, one `ctrl_in`, `handoff`, the
 FULL summary and `ctrl_summary`.
+
+## 25. Round XXXVIII — R7 run 18: **the activation chain WORKED and the stall moved 11 s → 30.5 s** (562 AUs, 13 keyframes, 6665/6665 datagrams authenticated, zero decode errors) → the AU frame-size decay names the next gate: **the server's rate control is ramping us down because our QoS 0x0207 carries ZERO bandwidth-estimator fields** (D-t10), so the estimator ports and the whole evidence set ships
+
+### 25.1 What run 18 proved
+
+* **Activation closed.** `input_activation sent:8 failed:0 ready:1` on the
+  first attempt; the rig's `0x020e` version 3 was negotiated exactly as
+  round XXXVII designed. The stall moved from 10.99 s (run 17) to
+  **30.5 s** — the first time ANY change we made moved the number. The
+  session then ran the full 300 s budget (Ctrl-C at 5 min was the
+  operator, not the pipeline).
+* **The media plane is clean.** 562 AUs / 13 keyframes / 30.4 fps average
+  over the live window, `6665/6665` datagrams authenticated,
+  `decode_errors 0`, `fec_repaired` working. kn_rx has now survived three
+  consecutive live rigs without a single pipeline fault.
+* **SCTP died GRACEFULLY, not silently.** `sctp_fail:0` with the assoc
+  reaching SHUTDOWN_COMPLETE — the round-XXXVIII cause-code work turns
+  that from an inference into a printed fact on the next run.
+* **Feedback still flew the whole session** — `rr:258, ack:562,
+  pacing:298, qos:4932, ka:86, idr:1, pli:1` — but `pushed:6138,
+  dropped:890`: the 64-slot outbox overflowed under one-message-per-record
+  cadence. The reference does not send one message per record; it batches
+  (below).
+
+### 25.2 The root cause the log named: AU frame-size decay
+
+The per-AU sizes in the truncated log decay steadily across the live
+window while packet loss stays zero and RTT stays flat. That is not a
+network symptom — it is the server's rate controller *ramping down*, and
+the reference documents exactly what drives it: the server PID reads the
+client's bandwidth-estimator fields out of QoS report `0x0207`
+(nvst.rs:7924-7927 → nvst_control.rs:133-156). Ours were all zero — the
+`kn_rx_qos` struct carried the seven BWE fields but nothing ever computed
+them (deviation **D-t10**, open since round XXII). A GFN server seeing
+`estimate_kbps:0, utilization:0` forever concludes the client measures
+nothing and decays the encoder toward its floor. **The BWE port is the
+primary fix of this round.**
+
+### 25.3 What round XXXVIII ships (all target-verified pending)
+
+1. **`kn_bw.{h,c}` — the BandwidthEstimator + server-control decoder,
+   ported line-for-line from `nvst_bandwidth.rs`** (commit a49b124).
+   Integer-ns clock (the float-clock trap is recorded in PROJECT-STATE),
+   wrap-extended 90 kHz sender time, transit-min/jitter-EWMA/16-entry
+   ring, the lossy-frame 60-frame 0.5 ms bump, the frame-ms EMA
+   (.875/.125), `received_ms = max(dur − sender_gap, 0.5)`, utilization
+   clamp, the report zero-gate (`first_arrival && min && count`) and the
+   **100-observed-frame gate** before real estimates fly. NEW
+   `tools/bw_reference.py` is the independent Python model; it self-proves
+   against the reference's own Rust goldens before emitting
+   `kn_bw_kat_vectors.h`, so the port is pinned by TWO implementations +
+   the Rust test truths (minimum_server_time=270090, estimate_kbps=4800,
+   utilization=5, queue_delay_us=1000, reorder lossy=2, parity
+   receive_kbps=6400.0). NEW `test_knbw`: **387 checks**.
+2. **The feed + the QoS rewrite.** `kn_rx_video_process_datagram` feeds
+   the estimator on the authenticated-datagram path only
+   (`feed_bw=1`; the plaintext process_packet path feeds 0 — FINAL
+   decision, do not relitigate), at the reference's exact site: after
+   resolve_nack, before FEC/reorder, tuple only when
+   `!retransmitted && !reordered` AND RTP+GS parse; ssrc change resets;
+   parity packets take `observe_parity`. `qos_report_at` now fills ALL
+   SEVEN BWE fields with the reference's semantics (sender_frame = last
+   COMPLETED frame index, bytes_received = CUMULATIVE completed bytes,
+   loss = guarded DELTA snapshot, `client_time_90khz` = elapsed×90
+   wrapping since transport origin, both constant-1000 u16s at @30/@32).
+   The clock arrives via `cfg.now_ns` (µs socket clock ×1000) because
+   sub-ms arrival granularity is load-bearing (ms-granular arrivals clamp
+   to the 0.5 ms floor and double the receive-rate error).
+3. **`ControlReportBatch` (nvst.rs:455-560 → `sess_cb_*`).** MAX 1071 =
+   MAX_CONTROL_REPORT_BYTES; `queued_at` set on first record; flush_due =
+   QoS present OR age ≥ 50 ms (QOS_REPORT_INTERVAL); one flush = ONE
+   outbox push on sid 6; failure RETAINS the buffer. Frame-ack + pacing
+   records append; QoS appends + flushes immediately; the media loop
+   age-flushes each pass. Outbox maxlen raised 704 → 1071 to carry a
+   full batch. This is the structural fix for run 18's `dropped:890`:
+   ~1 message/50 ms instead of ~1 message/record.
+4. **Per-sid outbox evidence.** `pushed_per_sid[8]` / `dropped_per_sid[8]`
+   (sid/2 slots) + `refused`, surfaced in the summary's
+   `"outbox_by_sid"` object — the next run NAMES the channel that drops.
+5. **Server-control decoders live in the pump** (`kn_sctl_walk` from
+   kn_bw.c, decoder table FINAL from nvst_server_control.rs:107-146):
+   0x104/0x105 idle-timer, 0x109 termination (wire-code split
+   0x80030023→(0x38,0x80030007), 0x80040010→(0x37,0x80040010)), 0x112
+   frame-pacing latch (stream 0, mode 1 = enabled; default ENABLED per
+   nvst.rs:664). The pump mirrors two VOLATILE latches to the media loop:
+   `sctl_termination` ends the session with
+   `stop_reason:"server_termination"` (the reference's
+   `input_ready=false; break`), `sctl_pacing_enabled` gates the 0x0203
+   pacing reports — a server that disabled pacing no longer gets PID
+   feedback it explicitly switched off. Diagnostics counters + a 30 s
+   `sctl_stats` line mirror the reference's 10 s nvst-control line.
+6. **SCTP shutdown cause codes** (kn_sctp): assoc_state tracking +
+   `kn_sctp_assoc_state_name`, so `sctp_down` prints SHUTDOWN_COMPLETE vs
+   COMM_LOST vs the rest — run 18's graceful-death inference becomes a
+   logged fact.
+7. **AU wall-vs-RTP-ts telemetry** (dec_ctx): `drift_ms = wall_elapsed −
+   rtp_ts_delta/90` per AU with min/max + `ts_backwards` counter, in the
+   summary's `"au_clock"` block. If the rig's 90 kHz clock and our wall
+   ever disagree (the truncated-log ts anomaly we were told not to chase
+   without clean data), this measures it directly instead of guessing.
+8. **R3-D: the WSS control keepalive.** `kn_ws` now captures pong
+   payloads (`kn_ws_take_pong`, cursor-based consume-once; 5 new
+   test_knws checks) and the media loop services the reference's
+   control-ping worker semantics (nvst_rtsp.rs:844-935): 2 s interval,
+   u64-BE sequence as ping payload, pong match records the RTT sample,
+   5 s sample expiry, outstanding-ping expiry at the interval, bounded
+   1 ms drain per 50 ms service beat, hard error latches `dead`. Evidence:
+   `cping_*` fields on the 1 s session_stats beat + a `ctrl_ping_stop`
+   line at teardown. Run 18's WSS went silent after PLAY with nothing
+   noticing; the next run says whether the control channel lived.
+9. **The summary grows four blocks** — `"batch"`, `"outbox_by_sid"`,
+   `"bwe"` (estimator report + feed counters; `frames_observed < 100`
+   would mean the zeros are the reference's own gate, not a broken port),
+   `"au_clock"` — APPENDED after `"feedback"`, so
+   `make_rx_capture.py --verify` (which consumes the legacy prefix) is
+   untouched. JSON shape re-validated by extraction this round.
+
+### 25.4 What run 19 decides
+
+Same command, `--session-seconds=300`, log WITHOUT the ~76-char truncation
+if the terminal allows (or `> run19.log`).
+
+* **Video sustains** (aus ≈ 30/s × 300, no decay in the AU sizes,
+  `bwe.estimate_kbps > 0` after frame 100) → **D-t10 was the gate;
+  stage 2 is DONE** and the presentation wiring becomes the main track.
+* **Stall persists but `bwe.frames_observed ≥ 100` and
+  `estimate_kbps > 0`** → the estimator flew and the server still ramped
+  down: paste the `bwe` block + one `session_stats` line; the suspect
+  becomes the QoS wire values themselves (compare against the reference's
+  field-by-field) or the `utilization` gate.
+* **`bwe.frames_observed < 100`** → the feed is starved; the
+  `skip_*` counters in the same block say where (reordered /
+  retransmitted / no-video-parse).
+* **`dropped` still > 0** → `outbox_by_sid` now names the channel; if it
+  is sid 6 with the batch active, the batch flush cadence (50 ms) is
+  wrong somewhere.
+* **`stop_reason:"server_termination"`** → the rig sent 0x109; the
+  `sctl_stats` + `term_*` fields say which wire code and whether it
+  claims resumable.
+* **`cping_dead:1` or `cping_expired` growing** → the WSS control channel
+  died mid-session; correlate its timestamp with the video stall.
+
+Paste: `handoff`, one `session_stats` line (mid-session), `sctl_stats`,
+`ctrl_ping_stop`, `ctrl_summary`, the FULL summary (all four new blocks),
+and the `sctp_down`/`ice_summary` lines.

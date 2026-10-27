@@ -444,6 +444,30 @@ static void test_recv_frames(void)
           "pong skipped, binary message surfaced");
     CHECK(c.pongs_in == 1, "pong counter");
 
+    /* R3-D: pong payload capture (nvst_rtsp.rs:895-901 — the control
+     * worker matches the pong against its u64-BE ping sequence) */
+    {
+        const uint8_t seq[8] = { 0,0,0,0, 0,0,0,7 };
+        unsigned long long seen = 0;
+        uint8_t got[16];
+        size_t gotn = 0;
+        int took;
+        fl = sframe(f, 1, 0xA, seq, 8);
+        mio_queue(&h.m, f, fl);
+        fl = sframe(f, 1, 0x2, (const uint8_t *)"z", 1);
+        mio_queue(&h.m, f, fl);
+        rc = kn_ws_recv_msg(&c, 100, &op, &n);
+        CHECK(rc == KN_WS_OK && op == KN_WS_OP_BINARY && n == 1,
+              "R3-D: pong with payload skipped, message surfaced");
+        CHECK(c.pongs_in == 2, "R3-D: pong counter");
+        took = kn_ws_take_pong(&c, &seen, got, sizeof got, &gotn);
+        CHECK(took == 1 && gotn == 8 && memcmp(got, seq, 8) == 0,
+              "R3-D: take_pong returns the u64-BE payload once");
+        took = kn_ws_take_pong(&c, &seen, got, sizeof got, &gotn);
+        CHECK(took == 0, "R3-D: take_pong is consume-once (cursor)");
+    }
+
+
     /* protocol errors */
     fl = sframe(f, 1, 0x1, (const uint8_t *)"x", 1);
     f[1] |= 0x80;                       /* server frame with MASK bit */

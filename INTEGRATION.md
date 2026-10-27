@@ -1,133 +1,139 @@
-# INTEGRATION NOTES — Round XXXVII delta, rev 27 (R7 run 17 = THE FEEDBACK HYPOTHESIS DISPROVED: the complete sender set flew for all 242 s — rr 242 / qos 4701 / ka 81 / ack 331 / dropped 0 — and video still died at exactly 10.99 s / 331 AUs, the same shape as run 16's 10.2 s with NO feedback; the IDR+PLI we then sent drew no answer → the one startup item BOTH runs lacked ships: the eight-message INPUT ACTIVATION CHAIN, plus the cursor-capture handoff machine and the inbound-control evidence that run 17's blind spot demanded)
+# INTEGRATION NOTES — Round XXXVIII delta, rev 28 (R7 run 18 = THE ACTIVATION CHAIN WORKED: the stall moved 10.99 s -> 30.5 s for the first time — 562 AUs, 13 keyframes, 6665/6665 authenticated, 0 decode errors, feedback present the whole 300 s — and the AU frame-size decay under zero loss / flat RTT names the next gate: the server rate control ramping down against our ZERO bandwidth-estimator fields in QoS 0x0207 (D-t10). The nvst_bandwidth.rs port ships, plus the evidence set run 18 demanded: ControlReportBatch + per-sid outbox counters (the dropped:890 fix), server-control latches (0x109 termination / 0x112 pacing), SCTP cause codes, AU wall-vs-ts telemetry, R3-D the WSS control keepalive)
 
-> **Rev 27 supersedes rev 1-26.** Canonical state: `PROJECT-STATE.md`.
-> Design records: **`docs/INPUT.md`** (NEW — the control/input plane:
-> the full inventory, the chain byte-for-byte, the handshake gate, the
-> cursor machine, deviations D-t11/D-t12 and gaps G1-G5),
-> **`docs/RTSP.md` §24** (run 17 — the elimination),
-> `docs/SCTP.md` (the association layer, unchanged this round).
+> **Rev 28 supersedes rev 1-27.** Canonical state: **`START-HERE.md`** (the living handoff since round XXXVIII; `PROJECT-STATE.md` is the frozen rounds I–XXXVIII archive).
+> Design records: **`docs/RTSP.md` §25** (NEW — run 18, the diagnosis,
+> the round-XXXVIII evidence set, the run-19 decision matrix),
+> `docs/INPUT.md` (the control/input plane, unchanged),
+> `docs/SCTP.md` (the association layer + the new cause codes).
 >
-> **Round XXXVII headline: run 17 is a NEGATIVE result with a decisive
-> shape.** The reference's stated cause ("without any receiver feedback
-> the server stops video after an initial burst", nvst.rs:4320-4323) does
-> NOT explain our stall: RR covered 242 s, QoS 235 s, keepalive 243 s,
-> ack one per AU, the outbox never dropped — and the stall moved
-> 10.2 s -> 10.99 s, i.e. not at all. Pacing covered 9.28 s because it is
-> frame-gated in the reference too, so it stopped WITH the video, not
-> before it. Recovery finally flew (`kf_request sent:1`, idr 1, pli 1) and
-> the rig ignored it. Sweeping the reference's complete control-plane
-> inventory for a device-less session left exactly one missing STARTUP
-> item: the activation chain of nvst_input.rs:1318-1329, whose
-> window-state member the reference documents as the difference between a
-> session that looks active and one that does not ("leaves the session
-> looking inactive", :1376-1381). Run 17 even handed us the version to
-> negotiate — `0e0202000300` = `0x020e`, **input protocol version 3** —
-> and we answered nothing, then or for the rig's other 19 messages.
->
-> **Bonus live datum:** the rig's own SCTP INIT was captured verbatim
-> (`app_first_len:44`) and parses as a textbook sctp-proto INIT — ports
-> 5000/5000, a_rwnd 5 MiB, OS/MIS 128/128, FORWARD-TSN-SUPPORTED
-> (`0xC000`) and SUPPORTED-EXTENSIONS (`0x8008` -> chunk types `0x82` PAD,
-> `0xC0` FORWARD-TSN). Our PR-SCTP policies are meaningful to this rig.
+> **Round XXXVIII headline: run 18 is the first POSITIVE movement in the
+> stall series** (10.2 -> 10.99 -> **30.5 s**) and it arrived exactly
+> when the activation chain started flying (`sent:8 failed:0 ready:1`).
+> What remains is not a startup gap but a sustained-rate gap: the rig's
+> encoder decays while our QoS reports `estimate_kbps:0,
+> utilization:0` forever — the reference's server PID reads those fields
+> (nvst.rs:7924-7927 -> nvst_control.rs:133-156). D-t10 was the last
+> open wire-fidelity item on the feedback plane; this round closes it
+> with a two-implementation-pinned port.
 
 ## New files
 
 | file | what | provenance |
 |---|---|---|
-| `streamer/include/kn/kn_input.h` | the control/input plane API: 17 command codes, 5 cadence constants, 8 builders, the TLV walker, the version parser, the histogram, the cursor machine | every constant carries its reference line (nvst_input.rs:11-12/:25-42, nvst_cursor.rs:3-5) |
-| `streamer/src/kn_input.c` | the implementation — pure wire-format code, no sockets/threads/allocation, identical in every build | nvst_input.rs:1318-1391 + :404-441 + :956-995, nvst_cursor.rs:52-126 |
-| `streamer/src/kn_input_kat_vectors.h` | **GENERATED** — do not edit; regeneration is byte-identical | emitted by `tools/input_reference.py` after self-proof |
-| `tools/input_reference.py` | the independent Python model (the two-implementations rule) | self-proves against nvst_input.rs:1768-1800 goldens + :1698-1712 parser vectors BEFORE emitting |
-| `streamer/tests/test_kninput.c` | **446 checks** — the 17th suite | replays the goldens AND all five nvst_cursor.rs tests as C |
-| `docs/INPUT.md` | the layer's design record | NEW |
+| `streamer/include/kn/kn_bw.h` | the estimator + server-control API: `kn_bw_*` (init/observe/observe_parity/report/reset/frames_observed), `kn_bw_feedback` (the seven QoS fields), `kn_sctl_walk` + `kn_sctl_diag`, `KN_SCTL_PACING_DEFAULT_ENABLED=1` | nvst_bandwidth.rs + nvst_server_control.rs @ a49b124 |
+| `streamer/src/kn_bw.c` | the implementation — pure computation, NO sockets/threads/alloc; the clock arrives as int64 ns parameters; every Rust-`as`-cast site uses the saturating helpers (`bw_sat_i64/u64` + masks) because Rust saturates and C is UB | line-for-line port; parity truths in test_knbw |
+| `streamer/src/kn_bw_kat_vectors.h` | **GENERATED** — do not edit; regeneration is byte-identical (`tools/bw_reference.py`) | |
+| `streamer/tests/test_knbw.c` | **387 checks** — the 18th suite: the Rust goldens (minimum_server_time=270090, estimate_kbps=4800, utilization=5, queue_delay_us=1000, reorder lossy=2, parity receive_kbps=6400.0), backward_clock (68 frames/50 lossy), stale-frame parity (1 loss 0 frames, jitter 121 us), the batched-server-control walk ([0x104][0x10A][0x112] -> 3 records, pacing on LAST), every truncation, the sctl iterator semantics | replays the vectors AND the hand-checked truths |
+| `tools/bw_reference.py` | the independent Python model (the two-implementations rule). It self-proves against the reference's OWN Rust goldens BEFORE emitting the header. **Its scenario scripts (:534-620) are the ONLY authoritative source — never hand-write C scenarios from memory** | |
 
 ## Changed files
 
 | file | change |
 |---|---|
-| `streamer/src/knvstd_main.c` | (a) `#include "kn/kn_input.h"`; (b) `sess_ice_stats` gains 13 control-plane fields incl. `char ctrl_hist[768]`; (c) new `sess_ctrl_raw` type + 9 pump fields (`cursor`, `ctrl_hist`, `input_version = -1`, `activation_sent/attempts`, `origin_us`, `next_ctrl_log_ms`, `ctrl_raw[8]`); (d) NEW `sess_ctrl_open/send`, `sess_cursor_send`, `sess_ctrl_hist_cb`, `sess_ctrl_names{,_cb}`, `sess_ctrl_refresh_hist`, `sess_ctrl_ingest`, `sess_ctrl_try_activate`, `sess_ctrl_service`; (e) `sess_sctp_msg`'s non-DCEP branch now calls `sess_ctrl_ingest` (the D-t4 "never silently dropped" discipline, extended from capture-the-first to name-every-record); (f) the pump loop calls `sess_ctrl_service(p)` right after `sess_sctp_service(p)`; (g) pump init sets the origin/latches/histogram; (h) NEW `ctrl_summary` evidence line before the session summary, from a FRESH `sess_pump_snapshot` (the pump thread still owns the stats at that point) |
-| `CMakeLists.txt` | `streamer/src/kn_input.c` into `kncore`; `kninput` into the test `foreach` |
-| `tools/build_native_tests.sh` | `kn_input.c` into `$KNCORE`; new `test_kninput` compile + run leg (`rc21`) and FAIL-message entry |
-| `tools/cross_check.sh` | `kn_input.c` `-c` leg per arch; `test_kninput_$arch.exe` link leg; `kn_input.c` into `$KCORE` (the F1 link leg) |
-| `streamer/src/kn_selftest.c` | NEW **`input.vectors`** self-test (phase A, 48 checks) — re-proves the SHIPPED BINARY's eight chain builders, the version parser (incl. run 17's live bytes) and the cursor machine's silent-host sequence against the same goldens; `#include "kn/kn_input.h"` + `kn_input_kat_vectors.h`; registry **14 -> 15** |
-| `streamer/include/kn/kn_selftest.h` | the documented phase-A list gains `input.vectors` with its "separates what" line |
-| `streamer/tests/test_knselftest.c` | registry count 14 -> **15**, `run_all` 14 -> 15, host `ok_count` 5 -> **6**, and `input.vectors` joins the portable-must-be-OK set (**117 checks**) |
-| `tests/T10_build_and_test.py` | `"test_kninput"` into the `suites` list, the registry assertion 14 -> **15**, and `"input.vectors"` into the "ok in the target binary" list — **the target check count goes 76 -> 78** (+1 suite, +1 self-test assertion) |
-| `docs/RTSP.md` | §24 (run 17 — the elimination, the INIT decode, the gate table) |
-| `PROJECT-STATE.md` | status header, stage table, risk register (R35 NEW), Next steps, session log |
+| `streamer/include/kn/kn_rx.h` | `kn_rx_config` gains `now_ns` (+ud) — the estimator's monotonic ns clock (us socket clock x1000 in production; NULL -> now_ms x 1e6 deterministic fallback for replay/tests); `kn_rx_qos` gains the seven BWE fields; 5 new prototypes (`kn_rx_video_bw_report/bw_frames_observed/bw_counters/bw_reset`, the qos snapshot) |
+| `streamer/src/kn_rx.c` | the feed: `process_authenticated` takes `feed_bw` (datagram path=1, plaintext process_packet path=0 — **FINAL, do not relitigate**), at the reference site (post-resolve_nack, pre-FEC/reorder; tuple only when `!retransmitted && !reordered` AND RTP+GS parse; bytes = RTP payload len; ssrc change -> estimator reset; parity -> `observe_parity` only). PITFALL pinned by tests: `reordered` must use the PREVIOUS `highest_sequence_received`. `kn_rx_video_rr_snapshot` + the QoS accessors |
+| `streamer/src/knvstd_main.c` | (a) the QoS 0x0207 rewrite — all seven BWE fields with the reference semantics (sender_frame = last COMPLETED frame INDEX, bytes_received = CUMULATIVE, loss = guarded DELTA 10000x(expected-received)/expected with the same-ssrc/same-base/monotonic guard, client_time_90khz = (elapsed_ms x 90) wrapping since transport_origin, const-1000 u16 at @30 AND @32, RR cumulative_lost clamped [-0x800000, 0x7fffff]); (b) `sess_cb_*` ControlReportBatch (MAX 1071, queued_at on first record, flush_due = QoS present OR age >= 50 ms, one flush = ONE sid-6 push, retain-on-failure) wired into frame-ack/pacing/QoS; (c) outbox maxlen 704->1071 + `pushed_per_sid[8]`/`dropped_per_sid[8]`/`refused`; (d) `sess_sctl_ingest` (sid 0 AND sid 6) + the pump's volatile latches + the 30 s `sctl_stats` line; (e) the media loop reads the latches each pass — `sctl_termination` -> `stop_reason:"server_termination"` + break, `sctl_pacing_enabled` gates the 0x0203 sender (`fb_pacing_gated/disabled` counters); (f) AU wall-vs-ts telemetry in dec_ctx (`au_drift_ms/min/max`, `au_ts_backwards`); (g) R3-D `sess_ctrl_ping` (2 s u64-BE pings, pong-match RTT sample, 5 s expiry, 1 ms drain on a 50 ms beat, `cping_*` on the 1 s beat, `ctrl_ping_stop` at teardown); (h) the summary grows `batch`/`outbox_by_sid`/`bwe`/`au_clock` blocks APPENDED after `feedback` — `make_rx_capture.py --verify` untouched |
+| `streamer/include/kn/kn_ws.h` + `streamer/src/kn_ws.c` | pong payload capture (`last_pong[125]`/`last_pong_len`/`last_pong_seq` + the caller-cursor `pong_seen`) and `kn_ws_take_pong` (consume-once) — the reference matches the pong payload against its ping sequence (nvst_rtsp.rs:895-901) |
+| `streamer/tests/test_knws.c` | +5 R3-D checks (payload capture, u64-BE round-trip, consume-once cursor) — suite 83 -> **88** |
+| `streamer/include/kn/kn_sctp.h` + `streamer/src/kn_sctp.c` | assoc_state/error tracking + `kn_sctp_assoc_state_name` — `sctp_down` now prints SHUTDOWN_COMPLETE vs COMM_LOST vs the rest (run 18's graceful death was an inference; run 19's is a fact) |
+| `CMakeLists.txt` | `kn_bw.c` into kncore; `knbw` into the test foreach |
+| `tools/build_native_tests.sh` | `kn_bw.c` into `$KNCORE` AND the direct-link `test_knrx` leg; the new `test_knbw` compile+run leg |
+| `tools/cross_check.sh` | the `kn_bw.c` `-c` leg per arch; `test_knbw_$arch.exe` link leg; `kn_bw.c` into `$KCORE` and the `test_knrx` cross leg |
+| `tests/T10_build_and_test.py` | `"test_knbw"` into the suites list -> **the target count goes 78 -> 79** |
+| `docs/RTSP.md` | §25 (run 18 — the diagnosis, the shipped set, the run-19 matrix) |
+| `PROJECT-STATE.md` | status header, R35 updated + R36 NEW, Next steps, session log |
 
 ## Integration notes / traps for the next agent
 
-1. **`test_kninput` is backend-independent.** `kn_input.c` has no stub/real
-   split (unlike `kn_cert`/`kn_dtls`/`kn_sctp`) — it is pure wire-format
-   code, so the sandbox run and the target run execute the SAME 446
-   checks. No CMake define needed.
-2. **The timestamp endianness split is a live trap.** `device_descriptor`
-   writes `timestamp_us` **BE** (nvst_input.rs:1360); the haptics
-   `remote_input_message` writes it **LE** (:973). Both are pinned by
-   dedicated checks (`descriptor timestamp is BE`, `haptics timestamp is
-   LE`) — do not "unify" them.
-3. **`input_protocol_version` has TWO fallbacks and the first is
-   counter-intuitive.** For `0e 02 ff 00 03` the reference returns **255**
-   (it reads `data[2..4]` verbatim), not `0x020e`. `tools/input_reference.py`
-   caught our own wrong expectation here before the C port did.
-4. **`0x0308` is NOT a cursor notification.** Our own `capture(true)`
-   command shares the "cursor" vocabulary with the rig's server-cursor
-   notifications `0x010f`/`0x0110`; the detector must only fire on the
-   latter (checked both ways in `test_kninput`).
-5. **The cursor machine's deadline check runs BEFORE the state match, in
-   the same call** (nvst_cursor.rs:82-89) — so the silent-host fallback
-   sends `capture(false)` in the very `update()` that trips the deadline.
-   The 15-command sequence in `t_cursor_silent_host` pins it.
-6. **`ctrl_hist` is embedded as a raw JSON value, not a string.** It
-   contains `[["020e",1],...]` with real quotes, emitted as `"codes":%s`.
-   `kn_input_hist_json` REFUSES (returns −1) rather than truncate, and
-   `sess_ctrl_refresh_hist` substitutes `["hist-too-large"]` — so a
-   `ctrl_in`/`ctrl_summary` line can never be malformed JSONL.
-7. **The activation runs on the PUMP thread**, not the main one: that
-   thread owns the SCTP socket and the mbedTLS context (single-owner
-   discipline). Main reads the control-plane state only through
-   `sess_pump_snapshot`. D21 is untouched — the media loop stays
-   single-threaded.
-8. **`origin_us` is set at pump init**, before the thread starts, so the
-   chain's `ts_us` is elapsed-since-transport-origin like the reference's
-   `transport_origin.elapsed()` (nvst.rs:6564-6567) — not wall clock.
+1. **`test_knbw` is backend-independent.** `kn_bw.c` is pure computation
+   (no sockets, no clock of its own, no allocation) — sandbox and target
+   run the SAME 387 checks. No CMake define needed.
+2. **The CLOCK-EXACTNESS RULE is load-bearing.** The reference does all
+   clock math on integer-ns Durations and only then `as_secs_f64`; a
+   float clock broke utilization in early parity runs. `kn_bw.c` AND
+   `bw_reference.py` are both int64-ns end to end. Production feeds the
+   us socket clock x1000 via `cfg.now_ns`; do not "simplify" to ms —
+   sub-ms arrival granularity is what keeps `received_ms` off the 0.5 ms
+   clamp floor (ms-granular arrivals read 0 ms -> clamp -> 2x
+   receive-rate error).
+3. **Do NOT send real BWE before 100 observed frames.** The reference
+   zero-gates the report until then (nvst.rs:1068-1069); the port
+   replicates it. A run-19 summary showing `frames_observed < 100` with
+   zero estimates is CORRECT behavior, not a broken port.
+4. **The feed decision is FINAL** (it went through two reversals during
+   the port): `process_authenticated(feed_bw)` — datagram path 1,
+   plaintext `process_packet` path 0. Do not relitigate without new
+   reference evidence.
+5. **Rust `as` casts saturate/reinterpret; C is UB.** `kn_bw.c` uses
+   `bw_sat_i64`/`bw_sat_u64` + explicit masks everywhere. Do not
+   simplify them away.
+6. **`completed_frame_bytes` is CUMULATIVE and `sender_frame_number` is
+   the last COMPLETED frame index** (store-on-complete), not per-report
+   deltas. The loss field IS a delta snapshot, guarded by
+   same-ssrc + same-base + monotonic.
+7. **Server-control iterator semantics are FINAL**
+   (nvst_server_control.rs:107-146 + its test): Oversized yields once at
+   construction (bytes emptied); BOUNDS errors empty bytes WITHOUT an
+   error and yield once; DECODE errors consume one record and the walk
+   continues. `0x0100` is NOT in the Unhandled set — it decodes as
+   Unknown; bulk tests use the `0x0101` family.
+8. **The batch changes the outbox's message shape.** One sid-6 push now
+   carries up to 1071 bytes (multiple concatenated records) — exactly
+   the reference's `send(&self.bytes)`. Anything that assumed
+   one-record-per-message (nothing in-tree does; `--verify` reads the
+   summary only) must be updated.
+9. **The R3-D service runs on the MAIN thread** (the media loop), not
+   the pump: the pump owns the bundle socket, main owns the WSS from
+   handshake to TEARDOWN (single-owner discipline, D21 untouched). The
+   50 ms service beat bounds the 1 ms drain; the reference's dedicated
+   worker reads every 100 ms, so ping/pong timing is unaffected.
+10. **Build-leg completeness trap:** `kn_rx.c` now references `kn_bw`,
+    and FOUR places link `kn_rx.o` directly (native test_knrx, the cross
+    test_knrx leg, `$KCORE`, CMake kncore). When adding a new core
+    module, grep every script for direct `kn_rx.c` links — this round
+    the native gate caught it, the cross gate caught the rest.
+11. **Summary-printf patching traps (hit and fixed this round):** two
+    identical `char drops[512]` anchors exist (replay + session) —
+    search from the END or pin the function; a format-line edit that
+    drops the closing quote silently turns the printf into a comma
+    expression (the compiler only says "too many arguments"); after any
+    format edit, re-validate the JSON by literal extraction (specs vs
+    args count + `json.loads` with `%dx%d` pre-replaced).
 
 ## Gate results (sandbox, this round)
 
 | gate | result |
 |---|---|
-| `tools/build_native_tests.sh` | **NATIVE TESTS PASS** — 17 suites (test_kninput **446**, test_knselftest **117**), jsonl + zip validation, paranoid knvstd leg |
-| `tools/cross_check.sh` | **CROSS-CHECK PASS** ×2 (x86_64 + i686), zero warnings under `-Wall -Wextra -Werror`, incl. the usrsctp real-body leg and the F1 link leg (`test_kninput_{x86_64,i686}.exe` built) |
-| ctest, mbedTLS backend | **19/19 PASS**, zero build warnings |
-| ctest, schannel backend | **19/19 PASS**, zero build warnings |
-| ASan+UBSan+LSan on `test_kninput` | **446/446, zero diagnostics** |
-| ASan+UBSan+LSan on `test_knselftest` | **117/117, zero diagnostics** from `streamer/` code (the only runtime error is the documented pre-existing formal UB in the hash-pinned `third_party/crypto-algorithms-sha1/sha1.c:26` — R33 policy) |
-| `tools/dtls_openssl_check.py` | **PASS** ×2 legs (srtp_profile 0x0000 and 0x0001) |
-| `tools/sandbox_session_e2e` | **43/43 PASS** (no regression) |
-| `tests/T10_build_and_test.py` (POSIX dry) | **ALL PASS (68 checks)** — was 66: +1 for the new suite, +1 for the new "input.vectors ok in the target binary" assertion; `knvstd --selftest=input.vectors` reports **48 checks, 0 failures, gated** |
+| `tools/build_native_tests.sh` | **NATIVE TESTS PASS** — 17 suites incl. **test_knbw 387**, test_knws **88** (+5 R3-D), test_kninput 446, test_knselftest 117; jsonl + zip validation; the paranoid knvstd leg |
+| `tools/cross_check.sh` | **CROSS-CHECK PASS** ×2 (x86_64 + i686), zero warnings under `-Wall -Wextra -Werror`, incl. the NEW kn_bw `-c` legs, the test_knbw link legs, kn_bw in $KCORE + the test_knrx leg |
+| ctest, mbedTLS backend | **20/20 PASS** (+test_knbw), zero build warnings |
+| ctest, schannel backend | **20/20 PASS**, zero build warnings |
+| ASan+UBSan on `test_knbw` | **387/387, zero diagnostics** |
+| ASan+UBSan on `test_knrx` (the patched feed) | **194/194, zero diagnostics** |
+| `tools/sandbox_session_e2e` | **43/43 PASS** (kn_bw added to its link line) |
+| `tests/T10_build_and_test.py` (POSIX dry) | **ALL PASS (69 checks)** — was 68: +1 for the new suite |
 | `tests/T13_udp_e2e.py` | **ALL PASS (63 checks)** — unchanged |
-| paranoid matrix | knvstd ×9 (−O0/−O2/−O3 × bare/mbedTLS/usrsctp) + kn_input ×3, all clean with `-Wunused-but-set-variable -Wformat-truncation=2` |
+| paranoid matrix | knvstd ×9 (−O0/−O2/−O3 × bare/mbedTLS/usrsctp) + kn_bw/kn_rx ×3, all clean with `-Wunused-but-set-variable -Wformat-truncation=2` |
 
-> **Pre-existing finding, NOT introduced this round and NOT gated:** running
-> the paranoid level over `streamer/src/kn_selftest.c` surfaces two
-> `-Wformat-truncation=2` diagnostics in code this round did not touch —
-> `st_decode_synthetic` (:871, an unbounded `%.1f` fps) and `st_net_tls`
-> (:1622, a `%s` tail). The project's paranoid gate is declared over the
-> **knvstd legs** only, and T10 does not use `=2`, so neither affects the
-> target build; both merely clip a human-readable `reason` string.
-> Recorded so that extending the paranoid gate to `kn_selftest.c` is not a
-> surprise failure later — fixing them needs the R28 value-range bounding
-> treatment and belongs in its own round.
+> **Pre-existing, NOT introduced this round:** `kn_ws.c` has two
+> `-Wformat-truncation=2` diagnostics at HEAD (verified via stash) —
+> outside the declared paranoid gate (knvstd + kn_input legs), same
+> class as the recorded `kn_selftest.c` pair. Fixing them needs the R28
+> value-range bounding treatment and belongs in its own round.
 
 **Next (user side):** sync the changed files, run
-`python tests\T10_build_and_test.py` → expect **ALL PASS 78**, zero
-warnings (the 15th self-test `input.vectors` must report `ok` with 48
-checks in the TARGET binary too — that is the proof the shipped builders
-match the reference's goldens on Win7, not just in the sandbox). Then **R7 run 18** (`--session-seconds=180`) and paste
-`ctrl_msg` / `input_version` / `input_activation` / one `ctrl_in` /
-`ctrl_summary` / the full summary — see docs/RTSP.md §24.5 for the
-decision matrix.
+`python tests\T10_build_and_test.py` -> expect **ALL PASS 79**, zero
+warnings; `test_knbw` must report **387 checks** on the target (same
+pure-computation code as the sandbox — that is the Win7-side proof the
+estimator matches the reference's goldens). Then **R7 run 19**
+(`--session-seconds=300`, untruncated log if possible): paste `handoff`,
+one mid-session `session_stats`, `sctl_stats`, `ctrl_ping_stop`,
+`ctrl_summary`, the FULL summary (all four new blocks),
+`sctp_down`/`ice_summary` — see docs/RTSP.md §25.4 for the decision
+matrix. Sustained video + nonzero `bwe.estimate_kbps` past frame 100 =
+**STAGE 2 DONE** and the presentation wiring becomes the main track.
+
+---
 
 ---
 

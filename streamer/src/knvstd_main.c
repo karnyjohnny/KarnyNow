@@ -1518,7 +1518,19 @@ typedef struct dec_q_slot {
  * kn_rx.h). This is the same thread-boundary pattern as the kn_sctp
  * tx queue, one level up. */
 #define SESS_FB_SLOTS   64u
-#define SESS_FB_MAXLEN  704u
+/* Round XXXVIII: the slot grows from 704 (the worst single encoder
+ * output, nack_v2 <= 647) to the reference's MAX_CONTROL_REPORT_BYTES
+ * = 1071 (nvst.rs:107), because a control-report BATCH is now one
+ * message: the reference appends frame acks / pacing / QoS records into
+ * one buffer and sends it as ONE partial-control write (:521-548),
+ * flushing when the next record would not fit or when a QoS report is
+ * queued. Run 18 pushed 6138 individual messages and dropped 890 —
+ * batching cuts the message count roughly by the records-per-batch
+ * factor, which is the honest fix for a full outbox. */
+#define SESS_FB_MAXLEN  1071u
+/* the NVST profile's stream ids are 0,2,4,...,14 (nvst_input.rs:74-127) */
+#define SESS_FB_SIDS    8u
+#define SESS_FB_SID_SLOT(sid) (((sid) <= 14u) ? ((sid) / 2u) : 0u)
 typedef struct {
     uint8_t  payload[SESS_FB_MAXLEN];
     uint16_t len;
@@ -1528,6 +1540,12 @@ typedef struct sess_fb_outbox {
     sess_fb_msg q[SESS_FB_SLOTS];
     unsigned head, count;
     unsigned dropped, pushed;
+    /* per-stream pushes/drops: run 18's `dropped:890` could not say
+     * WHICH channel overflowed, so it could not distinguish "the pump
+     * thread stalled" from "one cadence outran the association". */
+    unsigned long long pushed_per_sid[SESS_FB_SIDS];
+    unsigned long long dropped_per_sid[SESS_FB_SIDS];
+    unsigned long long refused;      /* bad args / oversized: never queued */
 #ifdef _WIN32
     CRITICAL_SECTION lock;
 #else
@@ -1562,8 +1580,10 @@ static int sess_fb_push(sess_fb_outbox *b, uint16_t sid,
                         const uint8_t *data, size_t len)
 {
     int rc = 0;
-    if (!b || !b->inited || !data || len == 0 || len > SESS_FB_MAXLEN)
+    if (!b || !b->inited || !data || len == 0 || len > SESS_FB_MAXLEN) {
+        if (b && b->inited) b->refused++;
         return -1;
+    }
 #ifdef _WIN32
     EnterCriticalSection(&b->lock);
 #else
@@ -1571,6 +1591,7 @@ static int sess_fb_push(sess_fb_outbox *b, uint16_t sid,
 #endif
     if (b->count >= SESS_FB_SLOTS) {
         b->dropped++;
+        b->dropped_per_sid[SESS_FB_SID_SLOT(sid)]++;
         rc = -2;
     } else {
         unsigned slot = (b->head + b->count) % SESS_FB_SLOTS;
@@ -1579,6 +1600,7 @@ static int sess_fb_push(sess_fb_outbox *b, uint16_t sid,
         b->q[slot].sid = sid;
         b->count++;
         b->pushed++;
+        b->pushed_per_sid[SESS_FB_SID_SLOT(sid)]++;
     }
 #ifdef _WIN32
     LeaveCriticalSection(&b->lock);
@@ -1611,6 +1633,120 @@ static int sess_fb_pop(sess_fb_outbox *b, sess_fb_msg *out)
     return got;
 }
 
+/* Round XXXVIII (D-t10): the bandwidth estimator's clock. kn_rx takes
+ * `now_ms` everywhere (deterministic replay), but BandwidthEstimator does
+ * its arithmetic on integer-nanosecond Durations (nvst_bandwidth.rs:60,
+ * :96-108, :212) and a frame's packets usually land INSIDE one
+ * millisecond — a ms-granular clock would read that train as 0 ms, hit the
+ * reference's 0.5 ms floor and double the receive rate it reports.
+ * kn_sock_now_us() is monotonic (QueryPerformanceCounter on Win7,
+ * CLOCK_MONOTONIC elsewhere) and only differences are used. */
+static int64_t sess_bw_now_ns(void *ud)
+{
+    (void)ud;
+    return (int64_t)(kn_sock_now_us() * 1000u);
+}
+
+/* the reference's RTCP sender ssrc: 0x4F4E4F57 = "ONOW" (nvst.rs:96) */
+#define SESS_RTCP_SENDER_SSRC 0x4F4E4F57u
+/* SRTCP_RR_INTERVAL 1 s (:97), QOS_REPORT_INTERVAL 50 ms (nvst_control.rs
+ * :19), FRAME_PACING_INTERVAL 55556 us (:18), CONTROL_KEEPALIVE_INTERVAL
+ * 3 s (nvst_input.rs:11), DEFAULT_FRAME_TIME_US 16666 (:17). The
+ * keepalive bytes are the reference test's golden (:1769:
+ * control_keepalive(0) == 0002040000000000). */
+#define SESS_RR_INTERVAL_MS      1000u
+#define SESS_QOS_INTERVAL_MS     50u
+#define SESS_PACING_INTERVAL_US  55556ull
+#define SESS_KA_INTERVAL_MS      3000u
+#define SESS_FRAME_TIME_US       16666u
+
+/* ---- round XXXVIII: ControlReportBatch (nvst.rs:464-548) ----
+ * The reference does NOT send one SCTP message per feedback record. It
+ * appends frame-ack / pacing / QoS records into one buffer bounded by
+ * MAX_CONTROL_REPORT_BYTES (1071), and flushes that buffer as a SINGLE
+ * partial-control write when (a) the next record would not fit, or
+ * (b) flush_due() — a QoS report is queued, or the oldest queued record
+ * has waited QOS_REPORT_INTERVAL (50 ms). A failed send RETAINS the
+ * buffer (:529-531), so nothing is silently lost.
+ *
+ * Run 18 pushed 6138 separate messages through a 64-slot outbox and
+ * dropped 890 of them; the reference's shape produces roughly one
+ * message per 50 ms instead of one per record, which is both faithful
+ * and the actual fix for that drop count. Counters mirror the
+ * reference's frame_acks_sent / qos_reports_sent / last_ack_frame. */
+#define SESS_CTRL_BATCH_MAX   1071u   /* MAX_CONTROL_REPORT_BYTES */
+#define SESS_CTRL_BATCH_MIN   (4u + KN_RX_CTRL_FRAME_ACK_PAYLOAD_LEN)
+#define SESS_FRAME_ACK_RECORD_LEN (4u + KN_RX_CTRL_FRAME_ACK_PAYLOAD_LEN)
+
+typedef struct {
+    uint8_t  bytes[SESS_CTRL_BATCH_MAX];
+    size_t   len;
+    uint64_t queued_at_ms;      int have_queued_at;
+    int      have_qos;
+    unsigned pending_acks;      /* acks in the buffer, not yet flushed */
+    unsigned acks, qos_reports; /* flushed totals (the reference's) */
+    uint32_t last_ack_frame;    int have_last_ack_frame;
+    /* evidence: why each flush happened, and what never made it */
+    unsigned long long flushes, flush_capacity, flush_qos, flush_age,
+                       flush_failed, records, retained;
+} sess_ctrl_batch;
+
+static void sess_cb_init(sess_ctrl_batch *b) { memset(b, 0, sizeof *b); }
+
+static int sess_cb_fits(const sess_ctrl_batch *b, size_t record_len)
+{
+    return b->len + record_len <= SESS_CTRL_BATCH_MAX;
+}
+
+/* One flush = one outbox push of the whole buffer (the reference's
+ * `send(&self.bytes)`). Returns 1 when the buffer is now empty. On
+ * failure the buffer is RETAINED and retried on the next flush. */
+static int sess_cb_flush(sess_ctrl_batch *b, sess_fb_outbox *fb,
+                         const char *why)
+{
+    if (b->len == 0u) return 1;
+    if (!fb || sess_fb_push(fb, 6, b->bytes, b->len) != 0) {
+        b->flush_failed++;
+        b->retained++;
+        return 0;
+    }
+    b->flushes++;
+    if (why && why[0] == 'c') b->flush_capacity++;
+    else if (why && why[0] == 'q') b->flush_qos++;
+    else if (why && why[0] == 'a') b->flush_age++;
+    b->acks += b->pending_acks;
+    b->qos_reports += b->have_qos ? 1u : 0u;
+    b->len = 0u;
+    b->have_queued_at = 0;
+    b->have_qos = 0;
+    b->pending_acks = 0;
+    return 1;
+}
+
+static int sess_cb_append(sess_ctrl_batch *b, const uint8_t *record,
+                          size_t len, uint64_t now_ms)
+{
+    if (!b || !record || len == 0u || len > SESS_CTRL_BATCH_MAX) return 0;
+    if (!b->have_queued_at) {          /* queued_at.get_or_insert(now) */
+        b->queued_at_ms = now_ms;
+        b->have_queued_at = 1;
+    }
+    memcpy(b->bytes + b->len, record, len);
+    b->len += len;
+    b->records++;
+    return 1;
+}
+
+/* flush_due (nvst.rs:509-515): a QoS report is queued, or the buffer has
+ * been sitting for QOS_REPORT_INTERVAL. */
+static int sess_cb_flush_due(const sess_ctrl_batch *b, uint64_t now_ms)
+{
+    if (b->len == 0u) return 0;
+    if (b->have_qos) return 1;
+    return b->have_queued_at &&
+           now_ms >= b->queued_at_ms + SESS_QOS_INTERVAL_MS;
+}
+
 /* The NVST channel profile's SENDER-side reliability (nvst_input.rs
  * NVST_CHANNEL_PROFILE + str0m configure_reliability): ordered flags
  * and the PR-SCTP policy per stream id. */
@@ -1626,18 +1762,6 @@ static void sess_fb_sid_params(uint16_t sid, int *ordered,
     }
 }
 
-/* the reference's RTCP sender ssrc: 0x4F4E4F57 = "ONOW" (nvst.rs:96) */
-#define SESS_RTCP_SENDER_SSRC 0x4F4E4F57u
-/* SRTCP_RR_INTERVAL 1 s (:97), QOS_REPORT_INTERVAL 50 ms (nvst_control.rs
- * :19), FRAME_PACING_INTERVAL 55556 us (:18), CONTROL_KEEPALIVE_INTERVAL
- * 3 s (nvst_input.rs:11), DEFAULT_FRAME_TIME_US 16666 (:17). The
- * keepalive bytes are the reference test's golden (:1769:
- * control_keepalive(0) == 0002040000000000). */
-#define SESS_RR_INTERVAL_MS      1000u
-#define SESS_QOS_INTERVAL_MS     50u
-#define SESS_PACING_INTERVAL_US  55556ull
-#define SESS_KA_INTERVAL_MS      3000u
-#define SESS_FRAME_TIME_US       16666u
 
 typedef struct dec_ctx {
     kn_rx_video *v;
@@ -1662,14 +1786,50 @@ typedef struct dec_ctx {
     /* round XXXVI: the feedback sender state (session mode only —
      * --decode leaves fb NULL and stays silent, honestly) */
     sess_fb_outbox *fb;
+    /* round XXXVIII: the server's frame-pacing latch (0x112 for stream 0,
+     * nvst.rs:714-721). Default ENABLED — the reference's
+     * AtomicBool::new(true) (:664). Main refreshes it from the pump's
+     * volatile mirror once per media-loop pass. */
+    int pacing_enabled;
+    unsigned long long fb_pacing_disabled;
     uint64_t next_rr_ms, next_qos_ms, next_ka_ms, next_pacing_us;
     uint32_t rr_prior_expected, rr_prior_received;
     uint32_t qos_seq, last_fi;
     unsigned long long fb_bytes_total;
     uint64_t qos_prior_ms;
     unsigned long long qos_prior_bytes;
+    /* round XXXVIII (D-t10): the 0x0207 report's own state, per
+     * qos_report_at (nvst.rs:1140-1177). `completed_frame_bytes` is
+     * CUMULATIVE completed-frame bytes (publish_completed_frame,
+     * :987-993) and `last_sender_frame` is the last completed frame
+     * INDEX (a store, not a sum). The loss field is a DELTA between two
+     * QosPacketSnapshots, so the previous one is kept here (:1147-1166)
+     * — run 18 sent a cumulative ratio instead, which is a different
+     * quantity and never relaxes either. */
+    unsigned long long completed_frame_bytes;
+    uint32_t last_sender_frame;
+    uint64_t transport_origin_ms;
+    int      have_qos_prior;
+    uint32_t qos_prior_ssrc, qos_prior_base, qos_prior_highest,
+             qos_prior_received;
     unsigned long long fb_rr, fb_ack, fb_pacing, fb_qos, fb_ka,
                        fb_nack, fb_idr, fb_pli, fb_rfi;
+    /* round XXXVIII: the ControlReportBatch (nvst.rs:464-548) that the
+     * frame-ack / pacing / QoS records ride in. */
+    sess_ctrl_batch cbatch;
+    /* round XXXVIII: AU wall-clock vs RTP-timestamp telemetry. Run 18's
+     * diagnosis rested on AU BYTE SIZE because the log had no way to say
+     * whether the sender's 90 kHz clock and our wall clock still agreed.
+     * drift_ms = (wall elapsed) - (rtp elapsed) over the whole session:
+     * a rate controller slowing the encoder shows up as the RTP clock
+     * falling behind the wall, and a paused encoder clock shows up as a
+     * jump. Both are invisible in byte counts. */
+    int      have_au_first;
+    uint64_t au_first_wall_ms;
+    uint32_t au_first_ts;
+    uint32_t au_last_ts;
+    long long au_drift_ms, au_drift_min_ms, au_drift_max_ms;
+    unsigned long long au_ts_backwards;
 } dec_ctx;
 
 static uint8_t g_dec_qbytes[DEC_QUEUE_CAP][DEC_AU_CAP];
@@ -1715,23 +1875,78 @@ static void dec_frame_in_cb(const kn_rx_frame *f, void *ud)
      * outbox; overflow drops are counted, never queued unbounded. */
     c->last_fi = f->frame_index;
     c->fb_bytes_total += (unsigned long long)f->bytes_len;
+    /* publish_completed_frame (nvst.rs:987-993): the QoS report's
+     * sender_frame_number is the LAST completed frame index and its
+     * bytes_received is the CUMULATIVE completed-frame byte count. */
+    c->last_sender_frame = f->frame_index;
+    c->completed_frame_bytes += (unsigned long long)f->bytes_len;
+
+    /* ---- AU wall-vs-RTP telemetry (round XXXVIII evidence) ----
+     * The RTP timestamp is the SENDER's 90 kHz clock; c->now_ms is our
+     * monotonic wall. Their elapsed difference is the encoder's cadence
+     * as we see it — the quantity run 18's log could not show. */
+    if (!c->have_au_first) {
+        c->have_au_first = 1;
+        c->au_first_wall_ms = c->now_ms;
+        c->au_first_ts = f->timestamp;
+        c->au_drift_min_ms = 0;
+        c->au_drift_max_ms = 0;
+    } else {
+        long long wall = (long long)(c->now_ms - c->au_first_wall_ms);
+        long long rtp = (long long)((uint32_t)(f->timestamp -
+                                               c->au_first_ts)) / 90;
+        if ((int32_t)(f->timestamp - c->au_last_ts) < 0)
+            c->au_ts_backwards++;
+        c->au_drift_ms = wall - rtp;
+        if (c->au_drift_ms < c->au_drift_min_ms)
+            c->au_drift_min_ms = c->au_drift_ms;
+        if (c->au_drift_ms > c->au_drift_max_ms)
+            c->au_drift_max_ms = c->au_drift_ms;
+    }
+    c->au_last_ts = f->timestamp;
+
     if (c->fb) {
         uint8_t fb[4 + KN_RX_CTRL_FRAME_ACK_PAYLOAD_LEN];
         int n = kn_rx_ctrl_frame_ack(f->frame_index, NULL,
                                      (uint32_t)f->bytes_len, fb);
+        /* nvst.rs:7905-7944: the ack goes into the batch, and the batch
+         * is flushed when the NEXT record would not fit. The reference
+         * drains its pending-frame-ack deque in the same loop, so a full
+         * batch never delays an ack by more than one flush. */
         if (n > 0) {
-            if (sess_fb_push(c->fb, 6, fb, (size_t)n) == 0) c->fb_ack++;
+            if (!sess_cb_fits(&c->cbatch, (size_t)n))
+                (void)sess_cb_flush(&c->cbatch, c->fb, "capacity");
+            if (sess_cb_append(&c->cbatch, fb, (size_t)n, c->now_ms)) {
+                c->cbatch.pending_acks++;
+                c->cbatch.last_ack_frame = f->frame_index;
+                c->cbatch.have_last_ack_frame = 1;
+                c->fb_ack++;
+            }
         }
-        {
+        /* frame_pacing_feedback && frame_pacing_enabled && the interval
+         * gate (nvst.rs:7922-7936). The middle term is the SERVER's: a
+         * 0x112 for stream 0 with mode != 1 switches our 0x0203 reports
+         * OFF, and sending them anyway feeds a PID the rig has explicitly
+         * disabled. The pacing error stays NEUTRAL (:7928-7933 — feeding
+         * network jitter into the server PID made its encoder cadence
+         * oscillate). */
+        if (c->pacing_enabled) {
             uint64_t now_us = kn_sock_now_us();
             if (now_us >= c->next_pacing_us) {
                 uint8_t pb[4 + KN_RX_CTRL_FRAME_PACING_PAYLOAD_LEN];
                 int pn = kn_rx_ctrl_frame_pacing(f->frame_index,
                                                  SESS_FRAME_TIME_US, 0, pb);
-                if (pn > 0 && sess_fb_push(c->fb, 6, pb, (size_t)pn) == 0)
-                    c->fb_pacing++;
+                if (pn > 0) {
+                    if (!sess_cb_fits(&c->cbatch, (size_t)pn))
+                        (void)sess_cb_flush(&c->cbatch, c->fb, "capacity");
+                    if (sess_cb_append(&c->cbatch, pb, (size_t)pn,
+                                       c->now_ms))
+                        c->fb_pacing++;
+                }
                 c->next_pacing_us = now_us + SESS_PACING_INTERVAL_US;
             }
+        } else {
+            c->fb_pacing_disabled++;
         }
     }
 }
@@ -2470,6 +2685,9 @@ typedef struct {
     unsigned sctp_opened, sctp_acked;      /* our OPENs sent / ACKed */
     unsigned sctp_rig_opened, sctp_rig_acked; /* rig's OPENs / our ACKs */
     unsigned sctp_msgs_in;                 /* non-DCEP rig messages */
+    /* round XXXVIII: why the association went down (see sess_sctp_event) */
+    unsigned sctp_down_state, sctp_down_error;
+    int      sctp_down_errno;
     unsigned sctp_first_sid, sctp_first_ppi, sctp_first_len;
     uint8_t  sctp_first[16];               /* the first rig message head */
     uint64_t sctp_up_ms;
@@ -2504,6 +2722,26 @@ typedef struct {
     unsigned cursor_handoffs;
     unsigned ctrl_hist_overflow;
     char     ctrl_hist[768];       /* [["020e",1],...] — the code histogram */
+    /* round XXXVIII: the SERVER-CONTROL plane (nvst_server_control.rs,
+     * decoded by kn_sctl_walk). Run 18 named the rig's 23 control
+     * messages but decoded none of them, so an idle warning, a
+     * termination or a frame-pacing mode change would have been
+     * invisible. These are the reference's own observable outputs:
+     * the three state latches plus its ServerControlDiagnostics
+     * counters (:148-153), which its 10-second nvst-control line
+     * prints verbatim (:7985-7997). */
+    unsigned sctl_msgs;            /* messages walked (sid 0 + sid 6) */
+    unsigned sctl_records;         /* records kn_sctl_walk produced */
+    unsigned sctl_timer, sctl_termination, sctl_pacing;
+    unsigned sctl_unhandled, sctl_unknown, sctl_malformed;
+    unsigned sctl_invalid_stream;
+    unsigned sctl_last_unknown;    /* the reference's last_unknown */
+    unsigned idle_warning;         /* 0x104 active / 0x105 clears */
+    unsigned idle_warnings, idle_expiries;
+    unsigned pacing_enabled;       /* KN_SCTL_PACING_DEFAULT_ENABLED = 1 */
+    unsigned server_termination;   /* 0x109 seen: the session is over */
+    unsigned term_wire_code, term_reason, term_extended;
+    int      term_resumable;       /* -1 = undecidable */
     uint64_t pump_ms;
 } sess_ice_stats;
 
@@ -2583,6 +2821,18 @@ typedef struct {
      * reads the snapshot. */
     kn_input_cursor cursor;
     kn_input_hist   ctrl_hist;
+    /* round XXXVIII: the server-control decoder state. It lives in the
+     * pump thread because that thread owns the SCTP socket; the latches
+     * main needs (frame pacing, termination) are mirrored volatile. */
+    kn_sctl_diag sctl_diag;
+    unsigned sctl_msgs, sctl_records;
+    unsigned sctl_timer, sctl_terms, sctl_pacing;
+    unsigned sctl_unhandled, sctl_idle_warnings, sctl_idle_expiries;
+    volatile unsigned sctl_idle_warning;
+    volatile unsigned sctl_pacing_enabled;
+    volatile unsigned sctl_termination;
+    unsigned sctl_term_wire, sctl_term_reason, sctl_term_extended;
+    int      sctl_term_resumable;
     int      input_version;          /* -1 until the rig's 0x020e lands */
     unsigned activation_sent;        /* latch: the chain flies once */
     unsigned activation_attempts;
@@ -2705,6 +2955,123 @@ static void sess_ctrl_refresh_hist(sess_pump *p)
     p->st.ctrl_hist_overflow = p->ctrl_hist.overflow;
 }
 
+/* ---- round XXXVIII: the server-control plane ----
+ * NvstFeedbackState::receive_server_control (nvst.rs:694-730), which the
+ * bundle worker runs for BOTH control channels — control_reliable (sid 0)
+ * and control_partial (sid 6), :8262-8272. Four codes are not ignorable:
+ *   0x104/0x105  the idle-warning latch (active / expired)
+ *   0x109        server termination — the reference clears the idle
+ *                warning, publishes NvstServerTermination and returns
+ *                true, which STOPS the receive loop (:707-713 + :8269)
+ *   0x112        frame-pacing mode for stream 0 — this is the server
+ *                switching our 0x0203 reports on and off (:714-721)
+ * Everything else is Unhandled (counted) or Unknown (counted, with the
+ * code kept as last_unknown). MALFORMED records are counted and the walk
+ * CONTINUES — a bad record is never terminal, which is the whole point of
+ * the reference's `Err(_) => malformed += 1` arm.
+ * Returns 1 when the server terminated the session. */
+static int sess_sctl_ingest(sess_pump *p, uint16_t sid, const uint8_t *data,
+                            size_t len)
+{
+    kn_sctl_msg msgs[16];
+    size_t n, i;
+    int terminated = 0;
+
+    if (sid != 0u && sid != 6u) return 0;      /* the two control channels */
+    n = kn_sctl_walk(data, len, msgs, sizeof msgs / sizeof msgs[0]);
+    if (n == 0u) return 0;
+    p->sctl_msgs++;
+    p->sctl_records += (unsigned)n;
+
+    for (i = 0; i < n; i++) {
+        kn_sctl_diag_add(&p->sctl_diag, &msgs[i]);
+        switch (msgs[i].kind) {
+        case KN_SCTL_TIMER:
+            p->sctl_timer++;
+            /* idle_warning_active.store(timer.active) (:702-706) */
+            if (msgs[i].timer_active) {
+                if (!p->sctl_idle_warning) p->sctl_idle_warnings++;
+                p->sctl_idle_warning = 1u;
+            } else {
+                if (p->sctl_idle_warning) p->sctl_idle_expiries++;
+                p->sctl_idle_warning = 0u;
+            }
+            printf("{\"mode\":\"session\",\"event\":\"session_timer\","
+                   "\"type\":%u,\"seconds_left\":%u,\"active\":%u,"
+                   "\"sid\":%u,\"t_ms\":%llu}\n",
+                   (unsigned)msgs[i].timer_type, msgs[i].seconds_left,
+                   msgs[i].timer_active, (unsigned)sid,
+                   (unsigned long long)(kn_sock_now_ms() % 1000000000ull));
+            fflush(stdout);
+            break;
+        case KN_SCTL_TERMINATION:
+            p->sctl_terms++;
+            p->sctl_idle_warning = 0u;         /* :708 clears the warning */
+            p->sctl_term_wire = msgs[i].wire_code;
+            if (msgs[i].have_reason) p->sctl_term_reason = msgs[i].reason;
+            if (msgs[i].have_extended)
+                p->sctl_term_extended = msgs[i].extended_code;
+            p->sctl_term_resumable = msgs[i].have_resumable
+                                         ? msgs[i].resumable : -1;
+            printf("{\"mode\":\"session\",\"event\":\"server_termination\","
+                   "\"wire_code\":%u,\"reason\":%u,\"extended\":%u,"
+                   "\"resumable\":%d,\"sid\":%u}\n",
+                   msgs[i].wire_code,
+                   msgs[i].have_reason ? msgs[i].reason : 0u,
+                   msgs[i].have_extended ? msgs[i].extended_code : 0u,
+                   p->sctl_term_resumable, (unsigned)sid);
+            fflush(stdout);
+            p->sctl_termination = 1u;
+            terminated = 1;
+            break;
+        case KN_SCTL_PACING_MODE:
+            p->sctl_pacing++;
+            /* stream 0 only; any other stream just counts invalid_stream
+             * (:714-721). The latch default is ENABLED (nvst.rs:664). */
+            if (msgs[i].stream_index == 0u) {
+                unsigned want = msgs[i].pacing_interval ? 1u : 0u;
+                if (want != p->sctl_pacing_enabled) {
+                    printf("{\"mode\":\"session\",\"event\":\"frame_pacing\","
+                           "\"enabled\":%u,\"mode\":%d,\"sid\":%u}\n",
+                           want, msgs[i].pacing_interval, (unsigned)sid);
+                    fflush(stdout);
+                }
+                p->sctl_pacing_enabled = want;
+            }
+            break;
+        case KN_SCTL_UNHANDLED:
+            p->sctl_unhandled++;
+            break;
+        case KN_SCTL_UNKNOWN:
+            /* counted by kn_sctl_diag_add; named here so the log says
+             * WHICH code the rig sent that we do not model */
+            printf("{\"mode\":\"session\",\"event\":\"sctl_unknown\","
+                   "\"code\":%u,\"sid\":%u}\n", (unsigned)msgs[i].code,
+                   (unsigned)sid);
+            fflush(stdout);
+            break;
+        case KN_SCTL_MALFORMED:
+            printf("{\"mode\":\"session\",\"event\":\"sctl_malformed\","
+                   "\"error\":%d,\"code\":%u,\"sid\":%u,\"len\":%u}\n",
+                   (int)msgs[i].error, (unsigned)msgs[i].code,
+                   (unsigned)sid, (unsigned)len);
+            fflush(stdout);
+            break;
+        default:
+            break;
+        }
+    }
+    if (n == sizeof msgs / sizeof msgs[0]) {
+        /* a bigger buffer than 16 records: say so instead of implying the
+         * walk saw everything (the reference bounds it at 256) */
+        printf("{\"mode\":\"session\",\"event\":\"sctl_truncated_walk\","
+               "\"records\":%u,\"sid\":%u,\"len\":%u}\n", (unsigned)n,
+               (unsigned)sid, (unsigned)len);
+        fflush(stdout);
+    }
+    return terminated;
+}
+
 /* One inbound non-DCEP message: capture it verbatim (bounded), name its
  * records, count them, and react — INPUT_VERSION latches the negotiated
  * version (nvst_input.rs:339-351), a cursor notification drives the
@@ -2723,6 +3090,15 @@ static void sess_ctrl_ingest(sess_pump *p, uint16_t sid, uint32_t ppi,
     recs = kn_input_scan(data, len, sess_ctrl_hist_cb, p);
     p->st.ctrl_records += (unsigned)recs;
     sess_ctrl_refresh_hist(p);
+
+    /* round XXXVIII: decode it as SERVER CONTROL too (sid 0 + sid 6, the
+     * reference's two control channels, nvst.rs:8262-8272). The 0x02xx
+     * input-plane scan above and this 0x01xx walk are different planes on
+     * the same bytes — the rig's run-18 inventory (0x020e, 0x0111,
+     * 0x010a, 0x010f, 0x0106, 0x010e, 0x0101) is Unhandled/Unknown here,
+     * which is exactly what the reference's own decoder makes of it. */
+    if (sess_sctl_ingest(p, sid, data, len))
+        p->st.server_termination = 1u;
 
     nc.buf = names; nc.cap = sizeof names; nc.used = 0; names[0] = '\0';
     (void)kn_input_scan(data, len, sess_ctrl_names_cb, &nc);
@@ -2824,6 +3200,152 @@ static void sess_ctrl_try_activate(sess_pump *p)
     fflush(stdout);
 }
 
+/* ---- round XXXVIII (R3-D): the WSS control-channel keepalive ----
+ * The reference runs a dedicated worker over the RTSPS WebSocket for
+ * the whole post-PLAY session (nvst_rtsp.rs:840-935): every
+ * KEEPALIVE_INTERVAL (2 s) it sends Ping(seq as u64 BE), matches the
+ * pong payload against the outstanding sequence (:895-901), records
+ * the RTT sample, and expires it after CONTROL_PING_EXPIRY (5 s,
+ * :269-274). An outstanding ping older than the interval is dropped
+ * (:865-870). Every pass also drains RTSP responses (:906-921) and a
+ * hard error ends the worker (:902-905).
+ *
+ * Run 18's WSS went silent after PLAY and nothing noticed: when video
+ * stalled at 30.5 s we could not say whether the control channel was
+ * alive. These counters make that a logged fact.
+ *
+ * Ownership: whoever set `have` services it — the pump thread when it
+ * persists post-PLAY (the reference's shape: a worker beside the media
+ * loop), else the media loop itself. Never both: main raises the hand
+ * BEFORE the loop and kn_rtsp does not touch the socket again until
+ * TEARDOWN, which runs after sess_pump_stop + sess_ctrl_ping_stop.
+ * The 1 ms recv bound is the reference's non-blocking read
+ * (CONTROL_IO_TIMEOUT = 100 ms in its dedicated worker; a media-loop
+ * pass cannot afford that, and 1 ms keeps its ~10 ms cadence). */
+#define SESS_CTRL_PING_INTERVAL_MS 2000u   /* KEEPALIVE_INTERVAL */
+#define SESS_CTRL_PING_EXPIRY_MS   5000u   /* CONTROL_PING_EXPIRY */
+#define SESS_CTRL_PING_RECV_MS     1u      /* bounded drain per pass */
+
+typedef struct {
+    kn_ws_client *ws;
+    int      have;               /* service armed (post-PLAY) */
+    int      dead;               /* hard error: the worker's break */
+    uint64_t next_ping_ms;
+    uint64_t outstanding_seq;    /* 0 = none outstanding */
+    uint64_t outstanding_ms;
+    unsigned long long seq;      /* wrapping_add(1) per ping */
+    unsigned long long pings_sent, ping_send_failed;
+    unsigned long long pongs_matched, pongs_unmatched;
+    unsigned long long expired;  /* outstanding aged out (no pong) */
+    unsigned long long msgs_drained;
+    /* the reference's NvstControlPing sample: (received_at, elapsed) */
+    int      have_sample;
+    uint64_t sample_ms;
+    uint64_t sample_rtt_us;
+    uint64_t rtt_last_us, rtt_min_us, rtt_max_us;
+} sess_ctrl_ping;
+
+static void sess_ctrl_ping_init(sess_ctrl_ping *k, kn_ws_client *ws)
+{
+    memset(k, 0, sizeof *k);
+    k->ws = ws;
+    k->rtt_min_us = 0xFFFFFFFFFFFFFFFFull;
+}
+
+static void sess_ctrl_ping_stop(sess_ctrl_ping *k)
+{
+    if (!k->have) return;
+    k->have = 0;
+    printf("{\"mode\":\"session\",\"event\":\"ctrl_ping_stop\","
+           "\"pings\":%llu,\"pongs\":%llu,\"unmatched\":%llu,"
+           "\"expired\":%llu,\"drained\":%llu,\"dead\":%d,"
+           "\"rtt_last_us\":%llu,\"rtt_min_us\":%llu,\"rtt_max_us\":%llu,"
+           "\"sample_ms\":%llu}\n",
+           k->pings_sent % 1000000000ull, k->pongs_matched % 1000000000ull,
+           k->pongs_unmatched % 1000000000ull, k->expired % 1000000000ull,
+           k->msgs_drained % 1000000000ull, k->dead,
+           (unsigned long long)k->rtt_last_us,
+           (unsigned long long)(k->rtt_min_us == 0xFFFFFFFFFFFFFFFFull
+                                    ? 0ull : k->rtt_min_us),
+           (unsigned long long)k->rtt_max_us,
+           (unsigned long long)(k->have_sample ? k->sample_rtt_us : 0ull));
+    fflush(stdout);
+}
+
+static void sess_ctrl_ping_service(sess_ctrl_ping *k, uint64_t now_ms)
+{
+    unsigned long long seen;
+    if (!k->have || k->dead || !k->ws) return;
+
+    /* the sample expires (ping_ms, nvst_rtsp.rs:266-274) */
+    if (k->have_sample && now_ms - k->sample_ms >= SESS_CTRL_PING_EXPIRY_MS)
+        k->have_sample = 0;
+    /* an outstanding ping older than the interval is dropped (:865-870) */
+    if (k->outstanding_seq &&
+        now_ms - k->outstanding_ms >= SESS_CTRL_PING_INTERVAL_MS) {
+        k->outstanding_seq = 0;
+        k->have_sample = 0;
+        k->expired++;
+    }
+    if (!k->outstanding_seq &&
+        now_ms - k->next_ping_ms >= SESS_CTRL_PING_INTERVAL_MS) {
+        uint8_t pl[8];
+        int i;
+        k->seq++;                              /* wrapping_add */
+        for (i = 0; i < 8; i++)                /* to_be_bytes */
+            pl[i] = (uint8_t)(k->seq >> (8 * (7 - i)));
+        if (kn_ws_send_ping(k->ws, pl, sizeof pl) == KN_WS_OK) {
+            k->pings_sent++;
+            k->outstanding_seq = k->seq;
+            k->outstanding_ms = now_ms;
+        } else {
+            k->ping_send_failed++;
+            k->dead = 1;                       /* the worker's break */
+        }
+        k->next_ping_ms = now_ms;
+    }
+
+    /* drain: kn_ws answers pings and closes internally; text/binary
+     * surface here (the reference pushes them into its RTSP buffer and
+     * take_rtsp_response discards post-PLAY stragglers) */
+    for (;;) {
+        int op = 0;
+        size_t n = 0;
+        int rc = kn_ws_recv_msg(k->ws, SESS_CTRL_PING_RECV_MS, &op, &n);
+        if (rc == KN_WS_ERR_TIMEOUT) break;    /* WouldBlock: keep going */
+        if (rc != KN_WS_OK) {                  /* CLOSED / IO / BIG */
+            k->dead = 1;
+            break;
+        }
+        k->msgs_drained++;
+    }
+    /* pong match (:895-901): payload == outstanding seq, big-endian */
+    seen = k->ws->pong_seen;
+    for (;;) {
+        uint8_t pl[KN_WS_MAX_CONTROL_PAYLOAD];
+        size_t pln = 0;
+        uint64_t got = 0;
+        size_t z;
+        if (!kn_ws_take_pong(k->ws, &seen, pl, sizeof pl, &pln)) break;
+        if (pln != 8) { k->pongs_unmatched++; continue; }
+        for (z = 0; z < 8; z++) got = (got << 8) | pl[z];
+        if (k->outstanding_seq && got == k->outstanding_seq) {
+            uint64_t rtt = (now_ms - k->outstanding_ms) * 1000ull;
+            k->pongs_matched++;
+            k->outstanding_seq = 0;
+            k->have_sample = 1;
+            k->sample_ms = now_ms;
+            k->sample_rtt_us = rtt;
+            k->rtt_last_us = rtt;
+            if (rtt < k->rtt_min_us) k->rtt_min_us = rtt;
+            if (rtt > k->rtt_max_us) k->rtt_max_us = rtt;
+        } else {
+            k->pongs_unmatched++;
+        }
+    }
+}
+
+
 /* one pump pass of the control plane: the handshake, then the cursor
  * machine (nvst.rs:7515-7531 and :7756-7766), then a 30 s evidence beat
  * so a long session shows the rig's command mix without a flood. */
@@ -2845,6 +3367,30 @@ static void sess_ctrl_service(sess_pump *p)
     p->st.cursor_trackings = p->cursor.trackings;
     p->st.cursor_disables = p->cursor.disables;
     p->st.cursor_handoffs = p->cursor.handoffs;
+    /* round XXXVIII: mirror the server-control plane for main (the
+     * snapshot channel is the only legal read path while this thread
+     * runs). The pacing latch gates the media loop's 0x0203 reports. */
+    p->st.sctl_msgs = p->sctl_msgs;
+    p->st.sctl_records = p->sctl_records;
+    p->st.sctl_timer = p->sctl_timer;
+    p->st.sctl_termination = p->sctl_terms;
+    p->st.server_termination = p->sctl_termination;
+    p->st.sctl_pacing = p->sctl_pacing;
+    p->st.sctl_unhandled = p->sctl_unhandled;
+    p->st.sctl_unknown = (unsigned)(p->sctl_diag.unknown % 1000000u);
+    p->st.sctl_malformed = (unsigned)(p->sctl_diag.malformed % 1000000u);
+    p->st.sctl_invalid_stream =
+        (unsigned)(p->sctl_diag.invalid_stream % 1000000u);
+    p->st.sctl_last_unknown = p->sctl_diag.have_last_unknown
+                                  ? (unsigned)p->sctl_diag.last_unknown : 0u;
+    p->st.idle_warning = p->sctl_idle_warning;
+    p->st.idle_warnings = p->sctl_idle_warnings;
+    p->st.idle_expiries = p->sctl_idle_expiries;
+    p->st.pacing_enabled = p->sctl_pacing_enabled;
+    p->st.term_wire_code = p->sctl_term_wire;
+    p->st.term_reason = p->sctl_term_reason;
+    p->st.term_extended = p->sctl_term_extended;
+    p->st.term_resumable = p->sctl_term_resumable;
     if (now_ms >= p->next_ctrl_log_ms) {
         p->next_ctrl_log_ms = now_ms + 30000u;
         sess_ctrl_refresh_hist(p);
@@ -2855,6 +3401,24 @@ static void sess_ctrl_service(sess_pump *p)
                p->st.ctrl_records, p->input_version, p->st.input_ready,
                p->st.activation_sent,
                kn_input_cursor_state_name(p->cursor.state), p->st.ctrl_hist);
+        fflush(stdout);
+        /* the reference's own 10-second nvst-control line (:7985-7997),
+         * minus the keepalive-health fields (no control keepalive worker
+         * yet — R3-D). Printed on the same 30 s beat as ctrl_in so the
+         * two lines always pair up in the log. */
+        printf("{\"mode\":\"session\",\"event\":\"sctl_stats\","
+               "\"unknown_commands\":%llu,\"last_unknown_command\":%u,"
+               "\"malformed_commands\":%llu,\"invalid_stream_commands\":%llu,"
+               "\"timers\":%u,\"terminations\":%u,\"pacing_msgs\":%u,"
+               "\"unhandled\":%u,\"idle_warning\":%u,\"pacing_enabled\":%u}\n",
+               (unsigned long long)(p->sctl_diag.unknown % 1000000000ull),
+               p->st.sctl_last_unknown,
+               (unsigned long long)(p->sctl_diag.malformed % 1000000000ull),
+               (unsigned long long)(p->sctl_diag.invalid_stream %
+                                    1000000000ull),
+               p->sctl_timer, p->sctl_terms, p->sctl_pacing,
+               p->sctl_unhandled, p->sctl_idle_warning,
+               p->sctl_pacing_enabled);
         fflush(stdout);
     }
 }
@@ -2926,7 +3490,28 @@ static void sess_sctp_event(void *ctx, int established)
                                   KN_SCTP_NVST_N_CHANNELS);
         p->st.sctp_opened = (unsigned)n;
     } else {
-        printf("{\"mode\":\"session\",\"event\":\"sctp_down\"}\n");
+        /* Round XXXVIII: name the cause. Run 18's `sctp_down` with
+         * sctp_fail:0 was only readable as SHUTDOWN_COMP by knowing
+         * kn_sctp's internal lost-flag rule; the state integer and its
+         * name now ride in the line itself, plus usrsctp's sac_error.
+         * A graceful peer shutdown and a lost path are different
+         * diagnoses: the first means the rig DECIDED the session was
+         * over (what a rate controller at its floor does), the second
+         * means the transport died underneath us. */
+        kn_sctp_stats ds;
+        memset(&ds, 0, sizeof ds);
+        if (p->sctp) kn_sctp_stats_get(p->sctp, &ds);
+        p->st.sctp_down_state = ds.have_assoc_state ? ds.assoc_state : 0u;
+        p->st.sctp_down_error = ds.assoc_error;
+        p->st.sctp_down_errno = ds.last_errno;
+        printf("{\"mode\":\"session\",\"event\":\"sctp_down\","
+               "\"cause\":\"%s\",\"assoc_state\":%u,\"assoc_error\":%u,"
+               "\"errno\":%d,\"lost\":%d,\"msgs_in\":%u,\"sent\":%u,"
+               "\"send_errors\":%u,\"txq_dropped\":%u,\"t_ms\":%llu}\n",
+               kn_sctp_assoc_state_name(ds.assoc_state), ds.assoc_state,
+               ds.assoc_error, ds.last_errno, ds.lost, ds.msgs_in,
+               ds.sends, ds.send_errors, ds.txq_dropped,
+               (unsigned long long)(kn_sock_now_ms() % 1000000000ull));
         fflush(stdout);
     }
 }
@@ -3606,6 +4191,7 @@ static int run_session(const char *token, const char *device_id,
     kn_cm_session sess;
     kn_net_tls_stream *cm_tls = NULL, *sig_tls = NULL;
     kn_ws_client wsc;
+    sess_ctrl_ping ctrl_ping;          /* R3-D: the WSS keepalive */
     kn_rtsp_client rtc;
     kn_rtsp_response resp;
     kn_rtsp_describe desc;
@@ -3687,6 +4273,7 @@ static int run_session(const char *token, const char *device_id,
     int rc, http_status = 0, ring_ok, exit_code = 1, i;
     uint16_t ws_port = 0;
     uint64_t t_start, next_poll_ms, now_ms, t_last_stats;
+    uint64_t ctrl_ping_next_ms = 0;    /* R3-D service beat */
     unsigned long long datagrams = 0;
     unsigned consecutive_errors = 0;
     const char *stop_reason = "time";
@@ -4074,6 +4661,8 @@ static int run_session(const char *token, const char *device_id,
         kn_log_shutdown();
         return 1;
     }
+    sess_ctrl_ping_init(&ctrl_ping, &wsc);   /* armed after PLAY */
+
     rio.send_text = sess_ws_send_text;
     rio.recv_text = sess_ws_recv_text;
     rio.ctx = &wsc;
@@ -4488,6 +5077,15 @@ static int run_session(const char *token, const char *device_id,
          * Option<u16>::None. */
         pump.input_version = -1;
         pump.st.input_version = -1;
+        /* round XXXVIII: the server-control decoder's initial state. The
+         * frame-pacing latch starts ENABLED (nvst.rs:664
+         * AtomicBool::new(true)) — 0x112 mode 1 keeps it, anything else
+         * clears it. Diagnostics start at zero and SATURATE. */
+        kn_sctl_diag_init(&pump.sctl_diag);
+        pump.sctl_pacing_enabled = KN_SCTL_PACING_DEFAULT_ENABLED;
+        pump.st.pacing_enabled = KN_SCTL_PACING_DEFAULT_ENABLED;
+        pump.sctl_term_resumable = -1;
+        pump.st.term_resumable = -1;
         pump.origin_us = kn_sock_now_us();
         pump.next_ctrl_log_ms = kn_sock_now_ms() + 10000u;
         kn_input_cursor_init(&pump.cursor);
@@ -4686,6 +5284,14 @@ static int run_session(const char *token, const char *device_id,
                                      rc == KN_RTSP_OK ? &resp : NULL);
             goto teardown_sock;
         }
+        /* R3-D: the control keepalive arms the moment PLAY lands —
+         * exactly when the reference spawns its rtsps worker
+         * (nvst_rtsp.rs:840-846). Main owns the WSS from here to
+         * TEARDOWN; the media loop services it (1 ms bounded drain
+         * per pass), so single-owner discipline is untouched. */
+        ctrl_ping.have = 1;
+        ctrl_ping.next_ping_ms = kn_sock_now_ms();
+
         /* the handoff line — shapes and LENGTHS only, never key material
          * (docs/RTSP.md §4 logging rule) */
         printf("{\"mode\":\"session\",\"event\":\"handoff\","
@@ -4726,6 +5332,11 @@ static int run_session(const char *token, const char *device_id,
             cfg.max_access_unit_bytes = KN_GS_DEFAULT_MAX_ACCESS_UNIT;
             cfg.video_packet_size = vps;
             cfg.timeout_ms = KN_RX_DEFAULT_TIMEOUT_MS;
+            /* D-t10: the bandwidth estimator's monotonic ns clock. Only
+             * the LIVE session sets it — --decode and the KAT runner stay
+             * on the deterministic ms fallback so replays reproduce. */
+            cfg.now_ns = sess_bw_now_ns;
+            cfg.now_ns_ud = NULL;
             slots = cfg.reorder_window_packets + 1u +
                     fec_blocks * fec_shards + 16u;
             if ((size_t)slots * pkt_cap > pool_budget)
@@ -4793,6 +5404,8 @@ static int run_session(const char *token, const char *device_id,
         /* round XXXVI: the feedback sender arms with the pipeline (the
          * cadence anchors at 0 fire on the first media tick) */
         c.fb = &fb;
+        sess_cb_init(&c.cbatch);      /* round XXXVIII: the report batch */
+        c.pacing_enabled = KN_SCTL_PACING_DEFAULT_ENABLED;
         c.next_rr_ms = 0;
         c.next_qos_ms = 0;
         c.next_ka_ms = 0;
@@ -4801,6 +5414,15 @@ static int run_session(const char *token, const char *device_id,
         c.qos_prior_bytes = 0;
         c.rr_prior_expected = 0;
         c.rr_prior_received = 0;
+        /* round XXXVIII: the 0x0207 plane's origin. `elapsed` in the
+         * reference is `now - transport_origin` (nvst.rs:7952), and
+         * transport_origin is taken when the transport work starts
+         * (:6197) — pump.origin_us is our same instant (set above, and
+         * the activation chain already timestamps against it). */
+        c.transport_origin_ms = pump.origin_us / 1000u;
+        c.have_qos_prior = 0;
+        c.completed_frame_bytes = 0;
+        c.last_sender_frame = 0;
         c.decode_available = kn_decode_available();
         if (c.decode_available) {
             char derr[128];
@@ -4903,6 +5525,37 @@ static int run_session(const char *token, const char *device_id,
                 }
             }
             now_ms = kn_sock_now_ms();
+            /* Round XXXVIII: the server-control plane reaches the media
+             * loop through two volatile latches the pump thread owns.
+             * A 0x109 termination ENDS the session — the reference's
+             * receive_server_control returns true and its caller does
+             * `input_ready.store(false); break 'bundle` (nvst.rs:707-713
+             * + :8265-8271) rather than keep reading media from a server
+             * that has already said the session is over. A 0x112 for
+             * stream 0 gates the 0x0203 pacing reports (:7923-7925).
+             * Both are single-word volatile reads: no lock, no tearing,
+             * and the pump thread is the only writer. */
+            if (ice_enabled) {
+                if (pump.sctl_termination) {
+                    stop_reason = "server_termination";
+                    break;
+                }
+                c.pacing_enabled = (int)pump.sctl_pacing_enabled;
+            }
+            /* R3-D: the WSS control keepalive (nvst_rtsp.rs:844-935).
+             * Serviced here rather than in a worker thread: the pump
+             * thread owns the bundle socket, not the WSS, and the
+             * media loop is the only other long-lived context. The
+             * 50 ms service beat bounds the 1 ms recv drain to one
+             * pass in 50 (~0.02 ms/ms of loop time); the reference
+             * worker reads every 100 ms, so ping/pong timing (2 s
+             * interval, ms-resolution RTT) is unaffected. Runs in
+             * BOTH ice and plain modes. */
+            if (ctrl_ping.have &&
+                now_ms - ctrl_ping_next_ms >= 50u) {
+                ctrl_ping_next_ms = now_ms;
+                sess_ctrl_ping_service(&ctrl_ping, now_ms);
+            }
             if (now_ms >= next_poll_ms) {
                 c.now_ms = now_ms;
                 (void)kn_rx_video_poll(&v, now_ms, dec_frame_in_cb, &c);
@@ -4950,42 +5603,95 @@ static int run_session(const char *token, const char *device_id,
                 }
                 if (now_ms >= c.next_qos_ms) {
                     kn_rx_qos q;
+                    kn_bw_feedback bw;
                     uint8_t qb[4 + KN_RX_CTRL_QOS_PAYLOAD_LEN];
-                    unsigned long long kbps = 0;
-                    int n;
+                    uint32_t s_ssrc = 0, s_base = 0, s_high = 0,
+                             s_recv = 0;
+                    int have_snap, n;
                     memset(&q, 0, sizeof q);
-                    if (c.qos_prior_ms && now_ms > c.qos_prior_ms) {
-                        unsigned long long db =
-                            c.fb_bytes_total - c.qos_prior_bytes;
-                        kbps = (db * 8ull) / (now_ms - c.qos_prior_ms);
-                    }
-                    q.sequence = ++c.qos_seq;
-                    q.sender_frame_number = c.last_fi;
+                    q.sequence = ++c.qos_seq;             /* wrapping_add */
+                    /* qos_report_at (nvst.rs:1140-1177). The frame plane
+                     * is publish_completed_frame's (:987-993): the LAST
+                     * completed frame index and the CUMULATIVE completed
+                     * bytes, not this process's feedback byte total. */
+                    q.sender_frame_number = c.last_sender_frame;
                     q.bytes_received =
-                        (uint32_t)(c.fb_bytes_total & 0xFFFFFFFFull);
-                    if (have_rr) {
-                        uint32_t expected = f_high - f_base + 1u;
-                        uint32_t rec32 = (uint32_t)(f_recv & 0xFFFFFFFFull);
+                        (uint32_t)(c.completed_frame_bytes & 0xFFFFFFFFull);
+                    /* The packet snapshot is the QoS one (nvst.rs:900-914,
+                     * u32 with `received` saturating), NOT the u64 RR
+                     * counters — and the loss field is the DELTA between
+                     * the previous snapshot and this one, guarded exactly
+                     * like the reference's filter (:1147-1166): same ssrc,
+                     * same base, both counters monotonic. Anything else
+                     * reports 0 rather than a bogus ratio. */
+                    have_snap = kn_rx_video_qos_snapshot(&v, &s_ssrc,
+                                                         &s_base, &s_high,
+                                                         &s_recv);
+                    if (have_snap) {
                         q.have_packet_snapshot = 1;
-                        q.snap_ssrc = f_ssrc;
-                        q.snap_base = f_base;
-                        q.snap_highest = f_high;
-                        q.snap_received = rec32;
-                        if (expected && expected > rec32)
-                            q.loss_per_ten_thousand = (uint16_t)
-                                (((uint64_t)(expected - rec32) * 10000ull)
-                                 / expected);
+                        q.snap_ssrc = s_ssrc;
+                        q.snap_base = s_base;
+                        q.snap_highest = s_high;
+                        q.snap_received = s_recv;
+                        if (c.have_qos_prior &&
+                            c.qos_prior_ssrc == s_ssrc &&
+                            c.qos_prior_base == s_base &&
+                            s_high >= c.qos_prior_highest &&
+                            s_recv >= c.qos_prior_received) {
+                            uint32_t expected = s_high - c.qos_prior_highest;
+                            uint32_t received = s_recv - c.qos_prior_received;
+                            if (expected)
+                                q.loss_per_ten_thousand = (uint16_t)
+                                    (((uint64_t)(expected > received
+                                                 ? expected - received : 0u)
+                                      * 10000ull) / (uint64_t)expected);
+                        }
+                        c.have_qos_prior = 1;
+                        c.qos_prior_ssrc = s_ssrc;
+                        c.qos_prior_base = s_base;
+                        c.qos_prior_highest = s_high;
+                        c.qos_prior_received = s_recv;
                     }
-                    q.client_time_90khz =
-                        (uint32_t)((kn_sock_now_us() / 11111ull) &
-                                   0xFFFFFFFFull);
-                    /* D-t10: the estimator fields stay honest zeros
-                     * until the BWE stage; the estimate is the MEASURED
-                     * downlink rate (bytes*8/ms == kbit/s) */
-                    q.bw_estimate_kbps = (uint32_t)kbps;
+                    /* client_time_90khz = elapsed.as_millis() * 90
+                     * (:1172, elapsed = now - transport_origin). Run 18
+                     * sent an absolute 90 kHz wall reading here, which is
+                     * a different quantity and wraps every 13 h. */
+                    q.client_time_90khz = (uint32_t)
+                        ((now_ms > c.transport_origin_ms
+                              ? now_ms - c.transport_origin_ms : 0u) * 90u);
+                    /* D-t10 FIXED: the seven estimator fields, from
+                     * BandwidthEstimator::report(now) — the same call the
+                     * reference makes inside qos_report_at (:1146). Zeros
+                     * here are the reference's own gate (no packet yet, or
+                     * fewer than 100 completed frames for
+                     * utilization/estimate), never a missing port. */
+                    if (kn_rx_video_bw_report(&v, 0, &bw)) {
+                        q.bw_minimum_server_time = bw.minimum_server_time;
+                        q.bw_median_server_time = bw.median_server_time;
+                        q.bw_queue_delay_us = bw.queue_delay_us;
+                        q.bw_lossy_frames = bw.lossy_frames;
+                        q.bw_estimate_kbps = bw.estimate_kbps;
+                        q.bw_jitter_us = bw.jitter_us;
+                        q.bw_utilization_percent = bw.utilization_percent;
+                    }
                     n = kn_rx_ctrl_qos_report(&q, qb);
-                    if (n > 0 && sess_fb_push(c.fb, 6, qb, (size_t)n) == 0)
-                        c.fb_qos++;
+                    /* nvst.rs:7946-7967: the QoS record is appended to
+                     * the batch, and because flush_due() is true the
+                     * instant a QoS report is queued (:509-515), the
+                     * batch goes out as ONE partial-control write here —
+                     * carrying whatever frame acks/pacing records were
+                     * waiting with it. That is the reference's cadence:
+                     * one control message per 50 ms, not one per record. */
+                    if (n > 0) {
+                        if (!sess_cb_fits(&c.cbatch, (size_t)n))
+                            (void)sess_cb_flush(&c.cbatch, c.fb, "capacity");
+                        if (sess_cb_append(&c.cbatch, qb, (size_t)n,
+                                           now_ms)) {
+                            c.cbatch.have_qos = 1;
+                            c.fb_qos++;
+                        }
+                        (void)sess_cb_flush(&c.cbatch, c.fb, "qos");
+                    }
                     c.qos_prior_ms = now_ms;
                     c.qos_prior_bytes = c.fb_bytes_total;
                     c.next_qos_ms = now_ms + SESS_QOS_INTERVAL_MS;
@@ -5040,6 +5746,12 @@ static int run_session(const char *token, const char *device_id,
                     }
                 }
             }
+            /* ControlReportBatch's age flush (nvst.rs:7903-7909): a
+             * buffered record never waits longer than QOS_REPORT_INTERVAL
+             * even when no QoS report is due (e.g. the pipeline stalled
+             * and only frame acks are queued). */
+            if (c.fb && sess_cb_flush_due(&c.cbatch, now_ms))
+                (void)sess_cb_flush(&c.cbatch, c.fb, "age");
             if (ka_on && now_ms >= next_ka_ms) {
                 uint8_t ktid[12], ktx[KN_SOCK_STUN_MAX_PKT];
                 size_t ktlen;
@@ -5076,6 +5788,61 @@ static int run_session(const char *token, const char *device_id,
                 kn_lctx_i64(&p, "withheld",
                             (long long)(v.withheld_frames % 1000000000ll));
                 kn_lctx_i64(&p, "q_depth", (long long)c.q_count);
+                /* round XXXVIII (D-t10): the estimator plane the reference
+                 * prints on its nvst-bundle line — qosBweKbps /
+                 * qosUtilPercent / qosOwdUs / qosJitterUs (:8003-8017).
+                 * Run 18's log could not distinguish "the estimator never
+                 * ran" from "it ran and said zero", which is the exact
+                 * question this round answers. bw_frames says whether the
+                 * 100-frame gate is open, i.e. whether estimate and
+                 * utilization are live or still honestly zero. */
+                {
+                    kn_bw_feedback bwf;
+                    uint64_t bs = 0, bp = 0, br = 0, bt = 0, bn = 0;
+                    memset(&bwf, 0, sizeof bwf);
+                    (void)kn_rx_video_bw_report(&v, 0, &bwf);
+                    kn_rx_video_bw_counters(&v, &bs, &bp, &br, &bt, &bn);
+                    kn_lctx_i64(&p, "bw_frames",
+                                (long long)kn_rx_video_bw_frames_observed(&v));
+                    kn_lctx_i64(&p, "bw_samples",
+                                (long long)(bs % 1000000000ull));
+                    kn_lctx_i64(&p, "bw_parity",
+                                (long long)(bp % 1000000000ull));
+                    kn_lctx_i64(&p, "bw_skip_reorder",
+                                (long long)(br % 1000000000ull));
+                    kn_lctx_i64(&p, "bw_skip_retrans",
+                                (long long)(bt % 1000000000ull));
+                    kn_lctx_i64(&p, "bw_skip_novideo",
+                                (long long)(bn % 1000000000ull));
+                    kn_lctx_i64(&p, "qos_bwe_kbps",
+                                (long long)bwf.estimate_kbps);
+                    kn_lctx_i64(&p, "qos_util_pct",
+                                (long long)bwf.utilization_percent);
+                    kn_lctx_i64(&p, "qos_owd_us",
+                                (long long)bwf.queue_delay_us);
+                    kn_lctx_i64(&p, "qos_jitter_us",
+                                (long long)bwf.jitter_us);
+                    kn_lctx_i64(&p, "qos_lossy",
+                                (long long)bwf.lossy_frames);
+                    kn_lctx_i64(&p, "qos_min_server_time",
+                                (long long)bwf.minimum_server_time);
+                }
+                /* R3-D: the control keepalive health, on the same beat */
+                if (ctrl_ping.have || ctrl_ping.pings_sent) {
+                    kn_lctx_i64(&p, "cping_sent",
+                                (long long)(ctrl_ping.pings_sent %
+                                            1000000000ll));
+                    kn_lctx_i64(&p, "cping_pongs",
+                                (long long)(ctrl_ping.pongs_matched %
+                                            1000000000ll));
+                    kn_lctx_i64(&p, "cping_expired",
+                                (long long)(ctrl_ping.expired %
+                                            1000000000ll));
+                    kn_lctx_i64(&p, "cping_rtt_us",
+                                (long long)(ctrl_ping.have_sample
+                                    ? ctrl_ping.sample_rtt_us : 0ull));
+                    kn_lctx_i64(&p, "cping_dead", ctrl_ping.dead);
+                }
                 kn_log_emit(&p);
             }
         }
@@ -5118,8 +5885,37 @@ static int run_session(const char *token, const char *device_id,
         {   /* summary — field-compatible with the decode/replay contract
              * (make_rx_capture.py --verify consumes it unchanged) */
             char drops[512];
+            char sid_json[320];
+            kn_bw_feedback bwf;
+            uint64_t bw_samples = 0, bw_parity = 0, bw_skip_re = 0,
+                     bw_skip_rt = 0, bw_skip_nv = 0;
+            unsigned si;
             kn_decode_stats dst;
             size_t doff = 0;
+
+            /* The final estimator report + its feed counters: this block
+             * is what says whether D-t10 is closed. frames_observed below
+             * 100 would mean estimate/utilization are the reference's OWN
+             * gated zeros (nvst.rs:1068-1069), not a missing port. */
+            memset(&bwf, 0, sizeof bwf);
+            (void)kn_rx_video_bw_report(&v, 0, &bwf);
+            kn_rx_video_bw_counters(&v, &bw_samples, &bw_parity, &bw_skip_re,
+                                    &bw_skip_rt, &bw_skip_nv);
+            /* per-sid outbox pushes/drops: run 18's dropped:890 could not
+             * name which channel overflowed */
+            sid_json[0] = '\0';
+            for (si = 0; si < SESS_FB_SIDS; si++) {
+                size_t sl = strlen(sid_json);
+                if (sl + 40 >= sizeof sid_json) break;
+                snprintf(sid_json + sl, sizeof sid_json - sl,
+                         "%s\"%u\":[%llu,%llu]",
+                         strlen(sid_json) ? "," : "",
+                         si * 2u,
+                         fb.pushed_per_sid[si] % 1000000000ull,
+                         fb.dropped_per_sid[si] % 1000000000ull);
+            }
+            if (sid_json[0] == '\0')
+                snprintf(sid_json, sizeof sid_json, "{}");
             int d;
             kn_decode_stream_stats(c.stream, &dst);
             for (d = 1; d < 24; ++d) {
@@ -5150,7 +5946,24 @@ static int run_session(const char *token, const char *device_id,
                    "\"feedback\":{\"rr\":%llu,\"ack\":%llu,\"pacing\":%llu,"
                    "\"qos\":%llu,\"ka\":%llu,\"nack\":%llu,\"idr\":%llu,"
                    "\"pli\":%llu,\"rfi\":%llu,\"pushed\":%llu,"
-                   "\"dropped\":%llu}}}\n",
+                   "\"dropped\":%llu,"
+                   "\"pacing_disabled_skips\":%llu},"
+                   "\"batch\":{\"flushes\":%llu,\"records\":%u,"
+                   "\"acks_sent\":%u,\"qos_sent\":%u,"
+                   "\"last_ack_frame\":%u,\"by_cause\":{\"capacity\":%llu,"
+                   "\"qos\":%llu,\"age\":%llu},\"failed\":%llu,"
+                   "\"retained\":%llu,\"bytes_pending\":%u},"
+                   "\"outbox_by_sid\":%s,"
+                   "\"bwe\":{\"frames_observed\":%u,\"samples\":%u,"
+                   "\"parity\":%u,\"skip_reordered\":%u,"
+                   "\"skip_retransmitted\":%u,\"skip_no_video\":%u,"
+                   "\"estimate_kbps\":%u,\"utilization_pct\":%u,"
+                   "\"min_server_time\":%u,\"median_server_time\":%u,"
+                   "\"queue_delay_us\":%u,\"jitter_us\":%u,"
+                   "\"lossy_frames\":%u},"
+                   "\"au_clock\":{\"drift_ms\":%lld,\"drift_min_ms\":%lld,"
+                   "\"drift_max_ms\":%lld,\"ts_backwards\":%llu,"
+                   "\"wall_ms\":%llu,\"rtp_ms\":%llu}}}\n",
                    stop_reason, sess.session_id,
                    datagrams % 10000000000ull,
                    (unsigned long long)(v.authenticated_packets %
@@ -5184,7 +5997,37 @@ static int run_session(const char *token, const char *device_id,
                    c.fb_ka % 1000000ull, c.fb_nack % 1000000ull,
                    c.fb_idr % 1000000ull, c.fb_pli % 1000000ull,
                    c.fb_rfi % 1000000ull, fb.pushed % 1000000000ull,
-                   fb.dropped % 1000000ull);
+                   fb.dropped % 1000000ull,
+                   c.fb_pacing_disabled % 1000000000ull,
+                   c.cbatch.flushes % 1000000000ull,
+                   (unsigned)c.cbatch.records % 1000000u,
+                   c.cbatch.acks % 1000000u, c.cbatch.qos_reports % 1000000u,
+                   c.cbatch.have_last_ack_frame ? c.cbatch.last_ack_frame : 0u,
+                   c.cbatch.flush_capacity % 1000000000ull,
+                   c.cbatch.flush_qos % 1000000000ull,
+                   c.cbatch.flush_age % 1000000000ull,
+                   (unsigned long long)(c.cbatch.flush_failed % 1000000000ull),
+                   c.cbatch.retained % 1000000ull,
+                   (unsigned)c.cbatch.len,
+                   sid_json,
+                   kn_rx_video_bw_frames_observed(&v),
+                   (unsigned)(bw_samples % 1000000000ull),
+                   (unsigned)(bw_parity % 1000000000ull),
+                   (unsigned)(bw_skip_re % 1000000000ull),
+                   (unsigned)(bw_skip_rt % 1000000000ull),
+                   (unsigned)(bw_skip_nv % 1000000000ull),
+                   bwf.estimate_kbps % 1000000u,
+                   (unsigned)bwf.utilization_percent,
+                   bwf.minimum_server_time, bwf.median_server_time,
+                   bwf.queue_delay_us, (unsigned)bwf.jitter_us,
+                   bwf.lossy_frames,
+                   c.au_drift_ms, c.au_drift_min_ms, c.au_drift_max_ms,
+                   c.au_ts_backwards % 1000000000ull,
+                   (unsigned long long)(c.have_au_first
+                       ? (kn_sock_now_ms() - c.au_first_wall_ms) % 1000000000ull : 0ull),
+                   (unsigned long long)(c.have_au_first
+                       ? ((uint32_t)(c.au_last_ts - c.au_first_ts) / 90u)
+                         % 1000000000ull : 0ull));
             fflush(stdout);
         }
         {
@@ -5246,6 +6089,7 @@ static int run_session(const char *token, const char *device_id,
 teardown:
     /* best-effort TEARDOWN (the reference's Drop path: 1 s, errors
      * ignored, sequence mismatches skipped) then close everything */
+    sess_ctrl_ping_stop(&ctrl_ping);   /* R3-D: join before TEARDOWN */
     {
         kn_rtsp_header th[4];
         kn_rtsp_response tresp;

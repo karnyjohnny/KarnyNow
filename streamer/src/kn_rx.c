@@ -1632,6 +1632,77 @@ void kn_rx_rtcp_rr(uint32_t sender_ssrc, uint32_t media_ssrc,
     rx_put_be32(out + 28, 0u);           /* DLSR — fills these (:2994) */
 }
 
+/* ------------------------------------------------------------ round XXXVIII
+ * D-t10: the bandwidth-estimator feed (publish_stream_packet,
+ * nvst.rs:852-899).
+ *
+ * Two reference details decide what may be fed:
+ *   - the feed happens on the AUTHENTICATED DATAGRAM path only, after
+ *     resolve_nack and before the FEC/reorder routing (:4703-4725);
+ *   - the video tuple exists only when `!retransmitted && !reordered`
+ *     (:4694-4702) AND the packet parses as an RTP payload plus a GS
+ *     video header. Anything else publishes with video = None, which
+ *     still counts the packet for the QoS snapshot but measures nothing.
+ * `bytes` is the RTP PAYLOAD length (:4697 payload.len()), not the
+ * datagram length — the difference is the whole SRTP/RTP header, which
+ * would inflate estimate_kbps by ~5%.
+ */
+static int64_t bw_now_ns(const kn_rx_video *v, uint64_t now_ms)
+{
+    if (v->cfg.now_ns) return v->cfg.now_ns(v->cfg.now_ns_ud);
+    return (int64_t)(now_ms * 1000000u);   /* deterministic replay fallback */
+}
+
+static void bw_feed(kn_rx_video *v, uint32_t ssrc, const kn_gs_rtp *rtp,
+                    const uint8_t *plain, size_t plain_len, uint32_t seq32,
+                    int reordered, int retransmitted, uint64_t now_ms)
+{
+    /* publish_stream_packet's ssrc-change reset (:875-884): a new media
+     * ssrc discards the whole estimator, so a stream switch cannot report
+     * a transit minimum measured on the previous stream. */
+    if (v->have_bw_ssrc && v->bw_ssrc != ssrc) kn_bw_init(&v->bw);
+    v->bw_ssrc = ssrc;
+    v->have_bw_ssrc = 1;
+
+    if (retransmitted) { v->bw_skipped_retransmitted++; return; }
+    if (reordered)     { v->bw_skipped_reordered++;     return; }
+    if (!rtp->has_gs)  { v->bw_skipped_no_video++;      return; }
+
+    {
+        kn_gs_video video;
+        size_t poff = 0, plen = 0;
+        /* header.payload(&plaintext) — padding validation on the DECRYPTED
+         * buffer (:2512-2525) — then NvVideoPacket::parse (:3229-3248).
+         * A failure on either is the reference's `.ok()`/None: counted,
+         * not fed, never an error. */
+        if (kn_gs_rtp_payload(rtp, plain, plain_len, &poff, &plen) != KN_GS_OK ||
+            kn_gs_video_parse(plain + rtp->gs_off, &video) != KN_GS_OK) {
+            v->bw_skipped_no_video++;
+            return;
+        }
+        if (video.is_fec) {
+            /* a parity shard is not measured; it only keeps the frame's
+             * sequence contiguity honest (:886-887) */
+            kn_bw_observe_parity(&v->bw, video.frame_index, seq32);
+            v->bw_parity_samples++;
+            return;
+        }
+        {
+            kn_bw_sample s;
+            memset(&s, 0, sizeof s);
+            s.frame_number = video.frame_index;
+            s.sequence = seq32;
+            s.timestamp = rtp->timestamp;
+            s.bytes = (uint32_t)plen;
+            s.started = video.is_start_of_frame;
+            s.ended = video.is_end_of_frame;
+            s.received_ns = bw_now_ns(v, now_ms);
+            kn_bw_observe(&v->bw, &s);
+            v->bw_samples++;
+        }
+    }
+}
+
 int kn_rx_video_rr_snapshot(const kn_rx_video *v, uint32_t *ssrc,
                             uint32_t *base, uint32_t *highest,
                             uint64_t *received)
@@ -1642,6 +1713,56 @@ int kn_rx_video_rr_snapshot(const kn_rx_video *v, uint32_t *ssrc,
     if (highest)  *highest = v->highest_sequence_received;
     if (received) *received = v->authenticated_packets;
     return 1;
+}
+
+int kn_rx_video_qos_snapshot(const kn_rx_video *v, uint32_t *ssrc,
+                             uint32_t *base, uint32_t *highest,
+                             uint32_t *received)
+{
+    if (!v || !v->have_qos_snapshot) return 0;
+    if (ssrc)     *ssrc = v->bw_ssrc;
+    if (base)     *base = v->qos_base_sequence;
+    if (highest)  *highest = v->qos_highest_sequence;
+    if (received) *received = v->qos_received_packets;
+    return 1;
+}
+
+int kn_rx_video_bw_report(const kn_rx_video *v, int64_t now_ns,
+                          kn_bw_feedback *out)
+{
+    if (!v || !out) return 0;
+    memset(out, 0, sizeof *out);
+    /* now_ns == 0 is the production convenience path: read the configured
+     * monotonic clock here instead of making every caller convert. */
+    kn_bw_report(&v->bw, now_ns ? now_ns : bw_now_ns(v, 0u), out);
+    return 1;
+}
+
+void kn_rx_video_bw_counters(const kn_rx_video *v, uint64_t *samples,
+                             uint64_t *parity, uint64_t *skipped_reordered,
+                             uint64_t *skipped_retransmitted,
+                             uint64_t *skipped_no_video)
+{
+    if (!v) return;
+    if (samples)                *samples = v->bw_samples;
+    if (parity)                 *parity = v->bw_parity_samples;
+    if (skipped_reordered)      *skipped_reordered = v->bw_skipped_reordered;
+    if (skipped_retransmitted)  *skipped_retransmitted =
+                                    v->bw_skipped_retransmitted;
+    if (skipped_no_video)       *skipped_no_video = v->bw_skipped_no_video;
+}
+
+uint32_t kn_rx_video_bw_frames_observed(const kn_rx_video *v)
+{
+    return v ? kn_bw_frames_observed(&v->bw) : 0u;
+}
+
+void kn_rx_video_bw_reset(kn_rx_video *v)
+{
+    if (!v) return;
+    kn_bw_init(&v->bw);
+    v->have_bw_ssrc = 0;
+    v->bw_ssrc = 0;
 }
 
 size_t kn_rx_rtcp_nack(uint32_t sender_ssrc, uint32_t media_ssrc,
@@ -2011,6 +2132,7 @@ int kn_rx_video_init(kn_rx_video *v, const kn_rx_video_config *cfg,
     memset(v, 0, sizeof *v);
     v->cfg = c;
     v->mem = *mem;
+    kn_bw_init(&v->bw);          /* D-t10: the estimator starts empty */
 
     rc = kn_rx_pool_init(&v->pool, mem->pool_meta, mem->pool_slots,
                          mem->pool_bytes, mem->pool_pkt_cap);
@@ -2267,12 +2389,14 @@ static void consume_result(kn_rx_video *v, const kn_rx_result *result,
 static void process_authenticated(kn_rx_video *v, uint64_t index,
                                   const kn_gs_rtp *rtp, const uint8_t *plain,
                                   size_t plain_len, uint64_t now_ms,
+                                  int feed_bw,
                                   kn_rx_frame_fn cb, void *ud)
 {
     uint32_t slot, seq32;
     kn_rx_result result;
     kn_gs_fec_layout layout;
     int have_layout = 0, is_fec_path;
+    int reordered = 0, retransmitted = 0;
     uint8_t *dst;
     kn_rx_pkt *pkt;
 
@@ -2311,8 +2435,12 @@ static void process_authenticated(kn_rx_video *v, uint64_t index,
     }
     v->authenticated_packets++;
     seq32 = (uint32_t)(index & 0xFFFFFFFFull);
-    /* `reordered` (4692-4694) feeds only the statistics plane in the
-     * reference; keep the highest-sequence bookkeeping for stats parity. */
+    /* `reordered` (nvst.rs:4681-4683) is evaluated against the PREVIOUS
+     * highest sequence, so it must be computed before the update below.
+     * Round XXXVIII: it is no longer statistics-only — it gates the
+     * bandwidth-estimator feed (:4694-4702). */
+    reordered = (v->authenticated_packets > 1u &&
+                 seq32 <= v->highest_sequence_received);
     if (!v->have_base_sequence) {   /* round XXXVI: the RR expected-count
                                      * anchor (the reference's base_sequence,
                                      * nvst.rs:1225 — first extended seq) */
@@ -2321,8 +2449,25 @@ static void process_authenticated(kn_rx_video *v, uint64_t index,
     }
     if (seq32 > v->highest_sequence_received)
         v->highest_sequence_received = seq32;
-    if (kn_rx_nack_resolve(&v->nack, index))
+    retransmitted = kn_rx_nack_resolve(&v->nack, index);
+    if (retransmitted)
         v->recovered_retransmissions++;
+
+    /* publish_stream_packet (nvst.rs:852-914): the QoS packet snapshot and
+     * the bandwidth-estimator feed. Placed exactly where the reference has
+     * it — after resolve_nack, before the FEC/reorder routing (:4703). */
+    if (!v->have_qos_base) {         /* compare_exchange(u32::MAX, ..) :861 */
+        v->qos_base_sequence = seq32;
+        v->have_qos_base = 1;
+    }
+    if (seq32 > v->qos_highest_sequence)
+        v->qos_highest_sequence = seq32;      /* fetch_max :867 */
+    if (v->qos_received_packets < 0xFFFFFFFFu)
+        v->qos_received_packets++;            /* saturating :901-906 */
+    v->have_qos_snapshot = 1;
+    if (feed_bw)
+        bw_feed(v, rtp->ssrc, rtp, plain, plain_len, seq32, reordered,
+                retransmitted, now_ms);
 
     /* Routing (4712-4725): a valid FEC layout goes to the FEC reorder
      * buffer, everything else to the plain RTP reorder buffer. */
@@ -2391,7 +2536,10 @@ int kn_rx_video_process_datagram(kn_rx_video *v, uint8_t *datagram, size_t len,
         ev_dropped(v, rc > 0 ? rc : KN_RX_DROP_MALFORMED_RTP, 0, detail);
         return KN_RX_OK;
     }
-    process_authenticated(v, index, &rtp, datagram, plain_len, now_ms, cb, ud);
+    /* feed_bw = 1: this is the reference's process_datagram, the only path
+     * that drives the bandwidth estimator. */
+    process_authenticated(v, index, &rtp, datagram, plain_len, now_ms, 1,
+                          cb, ud);
     return KN_RX_OK;
 }
 
@@ -2425,7 +2573,12 @@ int kn_rx_video_process_packet(kn_rx_video *v, uint64_t index,
     }
     rtp.payload_off = (unsigned)poff;
     rtp.payload_len = (unsigned)plen;
-    process_authenticated(v, index, &rtp, plaintext, len, now_ms, cb, ud);
+    /* feed_bw = 0: the plaintext entry point has no counterpart in the
+     * reference's receive path (its only video=None publisher is the
+     * #[cfg(test)] helper at nvst.rs:846-850), so replay/KAT runs must not
+     * move estimator state — a capture replay would otherwise publish a
+     * bandwidth estimate built from file timestamps. */
+    process_authenticated(v, index, &rtp, plaintext, len, now_ms, 0, cb, ud);
     return KN_RX_OK;
 }
 

@@ -106,7 +106,31 @@ typedef struct {
     int      established;              /* 1 after COMM_UP */
     int      lost;                     /* 1 after a lost/shutdown assoc */
     int      last_errno;               /* usrsctp errno at the failure */
+    /* Round XXXVIII: the ASSOC_CHANGE cause. Run 18 logged a bare
+     * `sctp_down` with sctp_fail:0, and the only way to read that was by
+     * knowing kn_sctp's internal rule (SHUTDOWN_COMP -> lost = 0). The
+     * distinction is the whole diagnosis: SHUTDOWN_COMP means the PEER
+     * closed the association gracefully (it had decided the session was
+     * over — consistent with a rate controller that walked the bitrate to
+     * its floor and stopped), while COMM_LOST means the path died. Both
+     * fields are the raw usrsctp values, so nothing is inferred. */
+    int      have_assoc_state;         /* 1 once any ASSOC_CHANGE landed */
+    unsigned assoc_state;              /* sac_state of the LAST change */
+    unsigned assoc_error;              /* sac_error of the LAST change */
 } kn_sctp_stats;
+
+/* The ASSOC_CHANGE sac_state values this port names in evidence lines
+ * (RFC 4960 §6.1 / usrsctp sctp_assoc_change). Named here so a log
+ * reader never has to guess which integer meant "the peer shut down". */
+#define KN_SCTP_ASSOC_COMM_UP        1u
+#define KN_SCTP_ASSOC_COMM_LOST      2u
+#define KN_SCTP_ASSOC_RESTART        3u
+#define KN_SCTP_ASSOC_SHUTDOWN_COMP  4u
+#define KN_SCTP_ASSOC_CANT_STR_ASSOC 5u
+
+/* The human name of a sac_state value ("comm_up", "comm_lost",
+ * "restart", "shutdown_comp", "cant_str_assoc", "unknown"). Never NULL. */
+const char *kn_sctp_assoc_state_name(unsigned sac_state);
 
 /* One NVST channel definition — the reference's NvstChannelDefinition
  * (nvst_input.rs:72-127): a fixed stream id, the label, the ordered

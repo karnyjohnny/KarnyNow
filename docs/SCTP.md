@@ -220,3 +220,20 @@ stage 3 sends the kn_rx NACK-v2/IDR/RFI encoders there.
    / QoS 50 ms sid 6 / keepalive 3 s sid 0 / IDR+PLI+NACK+RFI, all
    through the outbox with the profile's PR policies) is the answer;
    run 17 verifies sustainability.
+
+## 9. Round XXXVIII — association cause codes on `sctp_down`
+
+Run 18's SCTP death was graceful (`sctp_fail:0` at session end) but the
+log could only INFER SHUTDOWN_COMPLETE from the absence of an error —
+the same blind spot run 14's silent INIT refusal had. `kn_sctp` now
+tracks the association state and error from the usrsctp notification
+stream (`SCTP_ASSOC_CHANGE` sacs_state, `SCTP_SHUTDOWN_EVENT`,
+`SCTP_SEND_FAILED_EVENT` errors) in `kn_sctp_stats`
+(`have_assoc_state/assoc_state/last_error`), and
+`kn_sctp_assoc_state_name()` renders the sac_state enum
+(`COMM_UP/RESTART/SHUTDOWN_COMPLETE/COMM_LOST/CANT_STR_ASSOC`). The
+`sctp_down` evidence line prints the NAME, so run 19 states the death
+cause instead of implying it: a server-initiated SHUTDOWN_COMPLETE
+(session over, orderly) vs COMM_LOST (path died under us) vs
+CANT_STR_ASSOC (the rig refused the INIT) are three different diagnoses
+and they now look different in the log.

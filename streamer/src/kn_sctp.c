@@ -580,6 +580,13 @@ int kn_sctp_poll(kn_sctp *s, kn_sctp_msg_fn on_msg, void *msg_ctx,
             if (sn->sn_header.sn_type == SCTP_ASSOC_CHANGE) {
                 uint16_t state = sn->sn_assoc_change.sac_state;
                 s->st.notif_assoc++;
+                /* round XXXVIII: record WHY the association changed state.
+                 * The reference's own stop causes distinguish a graceful
+                 * shutdown from a lost path (NvstStopCause), and run 18's
+                 * bare `sctp_down` line could not. */
+                s->st.have_assoc_state = 1;
+                s->st.assoc_state = (unsigned)state;
+                s->st.assoc_error = (unsigned)sn->sn_assoc_change.sac_error;
                 if (state == SCTP_COMM_UP || state == SCTP_RESTART) {
                     if (!s->established) {
                         s->established = 1;
@@ -679,6 +686,18 @@ int kn_sctp_send_pr(kn_sctp *s, uint16_t sid, uint32_t ppi, int ordered,
  * consumer's evidence line reports the same numbers). */
 void kn_sctp_note_opened(kn_sctp *s) { if (s) s->st.opened++; }
 void kn_sctp_note_acked(kn_sctp *s)  { if (s) s->st.acked++; }
+
+const char *kn_sctp_assoc_state_name(unsigned sac_state)
+{
+    switch (sac_state) {
+    case KN_SCTP_ASSOC_COMM_UP:         return "comm_up";
+    case KN_SCTP_ASSOC_COMM_LOST:       return "comm_lost";
+    case KN_SCTP_ASSOC_RESTART:         return "restart";
+    case KN_SCTP_ASSOC_SHUTDOWN_COMP:   return "shutdown_comp";
+    case KN_SCTP_ASSOC_CANT_STR_ASSOC:  return "cant_str_assoc";
+    default:                            return "unknown";
+    }
+}
 
 void kn_sctp_stats_get(const kn_sctp *s, kn_sctp_stats *out)
 {
@@ -820,6 +839,19 @@ void kn_sctp_stats_get(const kn_sctp *s, kn_sctp_stats *out)
 {
     (void)s;
     if (out) memset(out, 0, sizeof *out);
+}
+
+/* the state names are backend-independent evidence vocabulary */
+const char *kn_sctp_assoc_state_name(unsigned sac_state)
+{
+    switch (sac_state) {
+    case KN_SCTP_ASSOC_COMM_UP:         return "comm_up";
+    case KN_SCTP_ASSOC_COMM_LOST:       return "comm_lost";
+    case KN_SCTP_ASSOC_RESTART:         return "restart";
+    case KN_SCTP_ASSOC_SHUTDOWN_COMP:   return "shutdown_comp";
+    case KN_SCTP_ASSOC_CANT_STR_ASSOC:  return "cant_str_assoc";
+    default:                            return "unknown";
+    }
 }
 
 uint64_t kn_sctp_up_ms(const kn_sctp *s) { (void)s; return 0; }

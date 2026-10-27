@@ -1,6 +1,24 @@
-# KarnyNow — implementation project state (living handoff)
+# KarnyNow — implementation project state (ARCHIVE — rounds I–XXXVIII)
 
-> This file is the **implementation agent's** running state. It supersedes the research
+> ## ⚠️ SUPERSEDED — this document is NO LONGER UPDATED (marked at the
+> ## close of round XXXVIII, 2026-10-27)
+>
+> **The living entry point and handoff document is now `START-HERE.md`** —
+> it carries the current state, the next steps (target T10 → expect ALL
+> PASS **79**, then R7 run 19), the binding working agreements, the
+> reference baseline, the trap list and the round history at a glance.
+> The continuity rule now names `START-HERE.md` (updated every round,
+> before results are presented).
+>
+> This file remains the **historical archive**: the session log below
+> (rounds I–XXXVIII) is the deepest record of *why* the project is shaped
+> the way it is, and the frozen "Current status" header and "Next steps"
+> list were accurate at XXXVIII close. Read it for provenance; do not
+> treat it as live state and do not extend it — new rounds append to
+> `START-HERE.md` §10 and their own `INTEGRATION.md` rev.
+
+> This file **was** the implementation agent's running state (rounds I–XXXVIII — see the
+> banner above; the living state is now `START-HERE.md`). It superseded the research
 > `HANDOFF.md` (archived verbatim under `uploads/`, along with `BOOTSTRAP.md`, the map of
 > everything already known). Read `BOOTSTRAP.md` first for mission, hardware, architecture,
 > decisions D1–D13, verified facts, the logging spec (§7), pitfalls and the stage plan.
@@ -55,7 +73,7 @@ sh tools/cross_check.sh            # mingw x64+i686, -Wall -Wextra -Werror, F1 f
 (loopback-only, no account; reuses T10's build). The user runs both quickly
 and willingly — ask for a measurement instead of guessing (§10.7).
 
-## Current status (updated 2026-10-27, post-round-XXXVII: **R7 RUN 17 DISPROVED THE FEEDBACK HYPOTHESIS — the complete round-XXXVI sender set flew for the WHOLE 242 s session (`feedback{rr:242, ack:331, pacing:167, qos:4701, ka:81, idr:1, pli:1, pushed:5524, dropped:0}`) and video STILL died at exactly **10.99 s / 331 AUs @ 30.12 fps** — the same shape as run 16's 10.2 s / 307 AUs with NO feedback at all. Coverage proof: RR ≈ 242 s, QoS ≈ 235 s, keepalive ≈ 243 s, ack = one per AU, pacing = 9.28 s (frame-gated, so it stopped WITH the video exactly like the reference's); the outbox never dropped. The recovery path finally flew (`kf_request sent:1`, idr 1, pli 1 — run 16 had `sent:false`) and **the rig never answered**. Everything below PLAY was as good as or better than run 16: `dtls_ready ms:102 srtp_prof:1`, `sctp_up ms:36` (was 52), `sctp_channels 8/8`, `PLAY 200 attempt:1`, `3027/3027 datagrams authenticated`, `keyframes 10`, `fec_repaired 4`, zero decode errors. NEW LIVE DATUM: the rig's own SCTP INIT was captured verbatim (`app_first_len:44`) and parses as a textbook sctp-proto INIT — ports 5000/5000, a_rwnd 5 MiB, OS/MIS 128/128, **FORWARD-TSN-SUPPORTED (0xC000)** + **SUPPORTED-EXTENSIONS (0x8008 → chunk types 0x82 PAD, 0xC0 FORWARD-TSN)** — so our PR-SCTP per-sid policies are meaningful to this rig. THE ELIMINATION: sweeping the reference's complete control-plane inventory for a device-less session left exactly ONE missing startup item, absent from BOTH runs 16 and 17 — **the eight-message INPUT ACTIVATION CHAIN** (`enable_input(off)` → `device_descriptor` → `cursor_capture(true)` → `cursor_tracking(true)` → `window_state 19` → `system_state 0` → `enable_input(on)` → `haptics(true)`), sent once on sid 0 the instant the control channel opens and INPUT_VERSION arrives (nvst.rs:6554-6591 → nvst_input.rs:1318-1329). The reference documents the consequence itself: an all-zero window state *"leaves the session looking **inactive**"* (nvst_input.rs:1376-1381). Run 17 even handed us the version to negotiate — `sctp_first "0e0202000300"` = `0x020e`, **input protocol version 3** — and we answered nothing, then or for the rig's other 19 control messages. **ROUND XXXVII SHIPPED IT**: NEW `kn_input.{h,c}` (pure wire-format: TLV framing, all 8 chain builders, the record-list walker, `input_protocol_version` with BOTH reference fallbacks, cursor-notification detection, a bounded JSONL-safe command histogram, and the full cursor-capture handoff machine of nvst_cursor.rs:52-126), NEW `tools/input_reference.py` (the independent Python model — it self-proves against the reference's OWN byte-exact Rust goldens at nvst_input.rs:1768-1800 and its parser vectors at :1698-1712 BEFORE emitting `kn_input_kat_vectors.h`, so the chain is pinned by THREE implementations), NEW `test_kninput` (**446 checks** — 8/8 chain goldens + 11 singles, 7 parser vectors incl. run 17's live bytes, 7 cursor vectors, all FIVE reference cursor tests replayed as C, every-truncation ASan sweep), a NEW **`input.vectors` self-test (48 checks)** in the production binary so the SHIPPED knvstd re-proves the same goldens on Win7 (registry 14→15), the pump-thread wiring (`sess_ctrl_*`: the handshake latch, the chain, the cursor machine) and the evidence set that closes run 17's blind spot (`ctrl_msg` ×8 verbatim with NAMED codes, `input_version`, `input_activation`, `cursor_handoff`, `ctrl_in` 30 s histogram beat, `ctrl_summary`). Deviations D-t11 (unbatched control records — wire-compatible) and D-t12 (chain retry bounded at 8) recorded in the NEW `docs/INPUT.md` §7. Gates: native **17** suites, cross ×2 zero warnings, ctest **19/19 ×2** backends, ASan+UBSan+LSan clean on test_kninput 446 AND test_knselftest 117, OpenSSL interop ×2, E2E 43/43, T10 dry **68**, T13 63, paranoid ×12. Next = target T10 (expect **78**) + **R7 run 18: does the activation chain SUSTAIN the stream past 11 s?** If yes → STAGE 2 DONE and the presentation wiring (frames → the G1-proven `kn_d3d_vp` presenter = G2 video ON SCREEN) becomes the main track; if no → the QoS estimator fields (D-t10 / nvst_bandwidth.rs — the server PID reads them) plus whatever `ctrl_summary.codes` shows the rig asking for. docs/RTSP.md §24 + docs/INPUT.md are the record)
+## Current status (updated 2026-10-27, post-round-XXXVIII: **R7 RUN 18 MOVED THE STALL FOR THE FIRST TIME — 10.99 s -> 30.5 s with the activation chain flying (`sent:8 failed:0 ready:1`, 562 AUs, 13 keyframes, 6665/6665 authenticated, 0 decode errors, feedback present the whole session) — and the AU frame-size decay under zero loss / flat RTT names the next gate: the SERVER RATE CONTROL is ramping us down because our QoS 0x0207 carries ZERO bandwidth-estimator fields (D-t10, open since round XXII; the server PID reads them, nvst.rs:7924-7927). **ROUND XXXVIII SHIPS THE ESTIMATOR**: NEW `kn_bw.{h,c}` — the line-for-line port of `nvst_bandwidth.rs` BandwidthEstimator (int64-ns clock via `cfg.now_ns`, wrap-extended 90 kHz sender time, transit-min/jitter-EWMA/ring-16, the lossy 60-frame bump, frame-ms EMA .875/.125, `received_ms = max(dur-gap, 0.5)`, the report zero-gate and the 100-frame estimate gate) + the server-control decoder (`kn_sctl_walk`, table FINAL from nvst_server_control.rs:107-146), pinned by NEW `tools/bw_reference.py` (self-proves against the reference Rust goldens BEFORE emitting vectors) and NEW `test_knbw` **387 checks**; the feed rides `process_authenticated` (datagram=1/plaintext=0, FINAL) at the reference site (post-nack, pre-FEC, tuple only when !retransmitted && !reordered, ssrc-change reset, parity->observe only); `qos_report_at` now fills ALL SEVEN BWE fields with the reference semantics (last completed frame INDEX, CUMULATIVE bytes, guarded loss DELTA, client_time_90khz, both const-1000s). PLUS the evidence set run 18 demanded: **ControlReportBatch** (MAX 1071, flush = ONE sid-6 push, due on QoS-or-50-ms-age, retain-on-failure — the structural fix for `dropped:890`; outbox maxlen 704->1071) + **per-sid push/drop counters** (`outbox_by_sid`), **server-control latches in the media loop** (0x109 termination -> `stop_reason:server_termination` + break; 0x112 pacing gate on the 0x0203 sender, default ENABLED), **SCTP assoc cause codes** on `sctp_down` (run 18: SHUTDOWN_COMP inferred, next run printed), **AU wall-vs-RTP-ts drift telemetry** (`au_clock` block), **R3-D the WSS control keepalive** (kn_ws pong capture + `kn_ws_take_pong`, 2 s u64-BE pings, pong-match RTT sample, 5 s expiry, `cping_*` on the 1 s beat + `ctrl_ping_stop`), and FOUR new summary blocks (`batch`/`outbox_by_sid`/`bwe`/`au_clock`, appended after `feedback` so `--verify` is untouched). Gates: native 17 suites (knbw 387, knws 88 incl. 5 new), cross x2 zero warnings (+kn_bw legs), ctest **20/20 x2** backends (+test_knbw), ASan+UBSan clean on test_knbw 387 AND test_knrx 194, E2E 43/43, T10 dry **69** (+1 = test_knbw -> target expectation **79**), T13 63, paranoid knvstd x9 + kn_bw/kn_rx/kn_ws x3 clean. Next = target T10 (expect 79) + **R7 run 19: does real BWE stop the ramp-down?** (decision matrix in docs/RTSP.md §25.4 — sustained video => STAGE 2 DONE; the record is docs/RTSP.md §25)
 
 | Stage | State |
 |---|---|
@@ -122,7 +140,9 @@ D1–D13 are in `BOOTSTRAP.md` §4 (unchanged, except D7 settled below).
 | **R33 (round XVI: CLOSED; round XVII: extended)** | Arena-memory class of bugs: two real defects (reorder-map `used` garbage from malloc; 8-byte arena misalignment) slipped past static-context unit tests and were caught by the malloc'd-arena scenario battery + UBSan BEFORE handover. Rule adopted: vector runners allocate through malloc (never statics), every arena carve rounds to 8, and ASan+UBSan+LSan is part of the pre-handover gate for any kn_rx-family change. **Round XVII proved the rule's worth again: LSan caught a real leak in the NEW `kn_decode_stream_close()` (kd_deliver's NV12 buffer, 115 264 B) on the first sanitized E2E run — fixed, and the whole T13 matrix now passes under ASan+UBSan+LSan.** Sanitizer policy note: the vendored `third_party/crypto-algorithms-sha1/sha1.c:26` (`data[j] << 24`, int promotion) is PRE-EXISTING formal UB in a hash-pinned file that must NOT be edited — sanitizer runs use recover mode and the gate is ZERO diagnostics from `streamer/` code (verified: the sha1.c line is the only runtime error in a sanitized T13). |
 | **R34 (round XIX: CLOSED except the real-session firewall note)** | **The Winsock side of the live modes is target-verified (T13 r2: ALL PASS 61).** capture recorded 119/119 datagrams with parseable JSONL, every decode leg ran 60/60 (paced + blast + cm128 + gcm256), sock.loopback ok, select-cadence and QPC clock behaved, the round-XVIII JSONL-escape fix confirmed. **SO_RCVBUF: Windows applies requests EXACTLY — `rcvbuf_actual=8388608` on every decode leg (the full 8 MiB; ~6 700 datagrams of slack at shard 1296 — the burst-headroom math holds on the target).** The only remainder: a REAL session binding INADDR_ANY with inbound internet UDP — the firewall-allow question is deferred to the WSS/RTSP round and must be MEASURED, not assumed (loopback legs proved WFP does not filter 127.0.0.1). |
 
-| **R35 (round XXXVII: NEW — the ~11 s stall, feedback ELIMINATED)** | The stage-2 stream still stops ~11 s after PLAY. Run 16 (no feedback) stalled at ~10.2 s / 307 AUs; run 17 (the complete sender set, all of it demonstrably flying for 242 s with `dropped:0`) stalled at 10.99 s / 331 AUs — **the stall did not move**, so nvst.rs:4320-4323 ("without any receiver feedback the server stops video") does NOT explain ours. The post-stall IDR+PLI drew no answer, i.e. the rig had already torn the video down. **Mitigation shipped:** the one startup item both runs lacked — the eight-message input activation chain (nvst_input.rs:1318-1329), whose window-state member the reference documents as the difference between a session that looks active and one that does not (:1376-1381) — plus the cursor-capture handoff machine and full inbound-control evidence. **Remaining suspects if run 18 still stalls:** the QoS estimator fields (D-t10 honest zeros; the reference's server PID reads them, nvst.rs:7924-7927), then whatever `ctrl_summary.codes` shows the rig asking for that we still ignore. **Not over-read:** AU sizes fall monotonically across the burst (18 356 → 2 862 B), consistent with BOTH a rate-controller ramp-down and a static desktop compressing better after its first keyframe; 10 keyframes in 331 AUs ≈ a 1.1 s periodic-IDR pattern. No conclusion drawn. |
+| **R35 (round XXXVII: NEW; round XXXVIII: THE STALL MOVED — activation confirmed, BWE now the prime suspect)** | The stage-2 stream stopped ~11 s after PLAY in runs 16-17. **Run 18 (round XXXVIII) moved it to 30.5 s** — the first time any change moved the number — with the activation chain flying (`sent:8 failed:0 ready:1`), 562 AUs, 13 keyframes, 6665/6665 authenticated, zero decode errors, and feedback present the whole session. The activation hypothesis is CONFIRMED as a contributor and the remaining suspect is now named by the AU frame-size decay under zero loss / flat RTT: the server rate controller ramping down against our zero-valued BWE fields in QoS 0x0207 (D-t10; the server PID reads them, nvst.rs:7924-7927). **Mitigation shipped:** the full `nvst_bandwidth.rs` port (kn_bw) + the seven-field QoS rewrite + the estimator feed on the authenticated datagram path. Run 19 decides (docs/RTSP.md §25.4). |
+| **R36 (round XXXVIII: NEW — outbox saturation under per-record cadence)** | Run 18 pushed 6138 messages through the 64-slot outbox and **dropped 890** — the one-message-per-record cadence saturates the drain during bursts. The reference never sends per-record: it batches (ControlReportBatch, MAX 1071, one flush = one sid-6 message, due on QoS-or-50-ms-age). **Mitigation shipped:** the batch + outbox maxlen 704→1071 + per-sid push/drop counters, so run 19 both produces ~1 message/50 ms and NAMES any channel that still drops. Not yet live-proven: if run 19 shows sid-6 drops with the batch active, the cadence constants are wrong somewhere. |
+
 
 Everything else (R3 usrsctp/DTLS spike, R7's first READY session — the
 first real `POST v2/session` itself is now MEASURED, 4/4 OK, round XXIII;
@@ -131,71 +151,80 @@ unchanged — see BOOTSTRAP §9.
 
 ## Next steps (ordered)
 
-1. **Target-verify round XXXVII: `python tests\T10_build_and_test.py`** —
-   expect ALL PASS **78** (was 76; +1 for the new `test_kninput` suite and
-   +1 for the new "input.vectors ok in the target binary" assertion) and
-   **zero warnings**. Two of the new legs run the SAME code on the target
-   as in the sandbox (`kn_input.c` is pure wire-format with no backend
-   split), so `test_kninput` must report **446 checks** and
-   `knvstd --selftest=input.vectors` must report **48 checks, 0 failures,
-   gated** — that is the proof the SHIPPED Win7 binary's activation-chain
-   builders match the reference's own goldens.
-   Round XXXVII touched: NEW `streamer/{include/kn,src}/kn_input.*`, NEW
-   `streamer/src/kn_input_kat_vectors.h` (generated), NEW
-   `streamer/tests/test_kninput.c`, NEW `tools/input_reference.py`, NEW
-   `docs/INPUT.md`, `streamer/src/knvstd_main.c` (the `sess_ctrl_*` service
-   + evidence), `streamer/src/kn_selftest.c` + `kn_selftest.h` (the
-   `input.vectors` runner, registry 14→15),
-   `streamer/tests/test_knselftest.c` (15/15, host ok_count 6),
-   `CMakeLists.txt`, `tools/build_native_tests.sh`, `tools/cross_check.sh`,
-   `tests/T10_build_and_test.py`. Sandbox gates all green: native 17
-   suites (test_kninput 446, test_knselftest 117), cross ×2 zero warnings,
-   ctest 19/19 ×2, ASan+UBSan+LSan clean on both, OpenSSL interop ×2,
-   E2E 43/43, T10 dry 68, T13 63, paranoid ×12.
-2. **R7 run 18 — the ACTIVATION run (docs/RTSP.md §24.5).** Same command,
-   `--session-seconds=180`. The new evidence lines decide it directly:
-   * **Video SUSTAINS** (aus ≈ 30/s × seconds, no `progress_stall`,
-     `input_activation sent:8 failed:0 ready:1`) → **STAGE 2 IS DONE**.
-     The presentation wiring becomes the main track: `--session` frames →
-     the G1-proven `kn_d3d_vp` presenter = G2 video ON SCREEN (D20 overlay
-     OFF by default; can be rehearsed against `send_rx_capture.py` first).
-     Then stage 3 proper: discrete input (keyboard/mouse/text —
-     `docs/INPUT.md` G3), bundle audio (DTLS-SRTP keying is negotiated,
-     `srtp_prof:1` — extraction is the first step), R3-D WS control pings.
-   * **Stall persists WITH the chain flying** → the activation hypothesis
-     dies too. Then: (a) paste `ctrl_summary` + every `ctrl_msg` line —
-     that is the whole point of this round's instrumentation, and it names
-     what the rig asks for that we still ignore; (b) the next suspect is
-     the QoS estimator fields (D-t10 zeros; `nvst_bandwidth.rs`
-     `BandwidthEstimator` — the server PID reads them, nvst.rs:7924-7927);
-     (c) check whether `cursor` reached `local` via `cursor-notification`
-     (proof the rig's ServerControl path reacts to us at all).
-   * **`version:-1`** → the rig withheld `0x020e`; the chain cannot fire
-     and gap G1 (the 5 s `INPUT_HANDSHAKE_TIMEOUT` is defined but not
-     enforced) becomes relevant.
-   * **New failure modes** (`sctp_fail`, `activation_fail`, dtls close,
-     `recv_errors`) → the evidence lines name them as usual.
-   * Paste: `dtls_ready`, `sctp_up`, `sctp_channels`, `PLAY`, the
-     `ctrl_msg` lines, `input_version`, `input_activation`, ONE `ctrl_in`,
-     `handoff`, the FULL summary and `ctrl_summary`.
-3. **R3 status: A/B/C shipped + nomination (D-t8) + use_srtp (D-t9) + the
-   feedback senders (XXXVI) + the input activation chain and cursor
-   machine (XXXVII).** Remaining: R3-D WS control pings (NvstControlPing
-   :260-290/:844-930 — small); the discrete-input half of stage 3
-   (`docs/INPUT.md` G2/G3); the bundle audio (stage 3+); the presentation
-   wiring (can ship ANY round now).
-4. **Open fidelity items, in the order run 18 ranks them:** the QoS/BWE
-   estimator (D-t10 → port `nvst_bandwidth.rs`); control-record batching
-   (D-t11 — the reference batches ack/pacing/QoS into one message up to
-   `maxQosMessagesSize`, nvst.rs:462-548; wire-compatible either way);
-   the handshake timeout (G1); server cursor payload decoding (G4).
+1. **Target-verify round XXXVIII: `python tests\T10_build_and_test.py`** —
+   expect ALL PASS **79** (was 78; +1 for the new `test_knbw` suite) and
+   **zero warnings**. `kn_bw.c` is pure computation (no sockets, no clock
+   of its own — the clock arrives via `cfg.now_ns`), so `test_knbw` must
+   report **387 checks** on the target exactly as in the sandbox; that is
+   the proof the SHIPPED Win7 binary's estimator matches the reference's
+   own Rust goldens (minimum_server_time=270090, estimate_kbps=4800,
+   utilization=5, queue_delay_us=1000, reorder lossy=2, parity
+   receive_kbps=6400.0).
+   Round XXXVIII touched: NEW `streamer/{include/kn,src}/kn_bw.*`, NEW
+   `streamer/src/kn_bw_kat_vectors.h` (generated), NEW
+   `streamer/tests/test_knbw.c`, NEW `tools/bw_reference.py`,
+   `streamer/include/kn/kn_rx.h` + `streamer/src/kn_rx.c` (the feed,
+   the QoS snapshot, the bw accessors, `cfg.now_ns`),
+   `streamer/include/kn/kn_ws.h` + `streamer/src/kn_ws.c` (pong capture),
+   `streamer/tests/test_knws.c` (+5), `streamer/src/kn_sctp.c` +
+   `kn_sctp.h` (assoc cause codes), `streamer/src/knvstd_main.c` (the
+   QoS 0x0207 rewrite, ControlReportBatch, per-sid outbox counters, the
+   sctl latches, the AU telemetry, the R3-D service, the summary blocks),
+   `CMakeLists.txt`, `tools/build_native_tests.sh`,
+   `tools/cross_check.sh`, `tests/T10_build_and_test.py`,
+   `docs/RTSP.md` §25, `INTEGRATION.md` rev 28, this file.
+   Sandbox gates all green: native 17 suites (knbw 387, knws 88), cross
+   ×2 zero warnings, ctest 20/20 ×2 backends, ASan+UBSan clean on
+   test_knbw + test_knrx, E2E 43/43, T10 dry 69, T13 63, paranoid
+   knvstd ×9 + kn_bw/kn_rx ×3.
+2. **R7 run 19 — the BWE run (docs/RTSP.md §25.4).** Same command,
+   `--session-seconds=300`, UNTRUNCATED log (`> run19.log`) if possible.
+   * **Video sustains** (aus ≈ 30/s × 300, no AU-size decay,
+     `bwe.estimate_kbps > 0` past frame 100) → **D-t10 was the gate;
+     STAGE 2 IS DONE.** The presentation wiring becomes the main track:
+     `--session` frames → the G1-proven `kn_d3d_vp` presenter = G2 video
+     ON SCREEN; then stage 3 proper (discrete input, bundle audio).
+   * **Stall persists with `frames_observed ≥ 100` and a nonzero
+     estimate** → the estimator flew and the server still ramped down:
+     paste the `bwe` block + one mid-session `session_stats`; the suspect
+     becomes the QoS wire values field-by-field vs nvst_control.rs:133-156
+     or the utilization gate.
+   * **`frames_observed < 100`** → the feed is starved; the `skip_*`
+     counters name where (reordered/retransmitted/no-video-parse).
+   * **`dropped > 0` with the batch active** → `outbox_by_sid` names the
+     channel; a sid-6 drop means the batch cadence is wrong somewhere.
+   * **`stop_reason:server_termination`** → the rig sent 0x109;
+     `sctl_stats` + `term_*` say which wire code, resumable or not.
+   * **`cping_dead:1` / growing `cping_expired`** → the WSS control
+     channel died mid-session; correlate with the stall timestamp.
+   * Paste: `handoff`, one mid-session `session_stats`, `sctl_stats`,
+     `ctrl_ping_stop`, `ctrl_summary`, the FULL summary (all four new
+     blocks), `sctp_down`/`ice_summary`.
+
+3. **R3 status: A/B/C/D ALL SHIPPED** — nomination (D-t8), use_srtp
+   (D-t9), the feedback senders (XXXVI), the input activation chain +
+   cursor machine (XXXVII), the WSS control keepalive (XXXVIII, R3-D
+   closed: pong-capture + 2 s u64-BE pings + RTT sample + expiry, the
+   nvst_rtsp.rs:844-935 semantics). Remaining stage-2-adjacent: the
+   discrete-input half of stage 3 (`docs/INPUT.md` G2/G3); the bundle
+   audio (stage 3+); the presentation wiring (can ship ANY round now).
+
+4. **Open fidelity items after XXXVIII:** D-t10 (BWE zeros) — **CLOSED,
+   pending run 19**; D-t11 (unbatched control records) — **CLOSED**
+   (ControlReportBatch shipped, wire-identical shape); remaining: the
+   input handshake timeout (docs/INPUT.md G1 — the 5 s
+   INPUT_HANDSHAKE_TIMEOUT defined but not enforced); server cursor
+   payload decoding (G4); the audio plane's own estimator feed if the
+   reference ever routes audio through it (it does not — video ssrc
+   only, and our feed mirrors that).
+
 5. Stage 3+ per BOOTSTRAP §12; R22's full 31-field context + R23 RESUME
    at stage 4/5.
 6. **Continuity rule (binding):** every round ends with `PROJECT-STATE.md`
    + `INTEGRATION.md` + the relevant `docs/*.md` updated BEFORE results
-   are presented. Round XXXVII: `docs/INPUT.md` (NEW), `docs/RTSP.md` §24,
-   `INTEGRATION.md` rev 27, this file (status header, R35, Next steps,
-   session log).
+   are presented. Round XXXVIII: `docs/RTSP.md` §25 (run 18 + the
+   evidence set + the run-19 matrix), `INTEGRATION.md` rev 28, this file
+   (status header, R35/R36, Next steps, session log).
 
 
 ## Repo layout (this workspace → user machine)
@@ -3008,3 +3037,155 @@ Files touched: NEW `streamer/include/kn/kn_input.h`, NEW
 `CMakeLists.txt`, `tools/build_native_tests.sh`, `tools/cross_check.sh`,
 `tests/T10_build_and_test.py`, `docs/RTSP.md` §24, `INTEGRATION.md`
 rev 27, this file.
+
+### 2026-10-27 · impl round XXXVIII (R7 run 18: **THE ACTIVATION CHAIN WORKED — the stall moved 11 s → 30.5 s for the first time** (562 AUs, 13 keyframes, 6665/6665 authenticated, 0 decode errors, feedback present the whole 300 s) → the AU frame-size decay under zero loss names the next gate: the server rate control ramping down against our ZERO BWE fields in QoS 0x0207 → **D-t10 CLOSES: the nvst_bandwidth.rs port ships** (kn_bw + the feed + the seven-field QoS rewrite, two-implementation pinned, 387 checks) **plus the whole evidence set run 18 demanded**: ControlReportBatch + per-sid outbox counters (the dropped:890 fix), server-control latches in the media loop (0x109 termination / 0x112 pacing gate), SCTP assoc cause codes, AU wall-vs-RTP-ts telemetry, and R3-D the WSS control keepalive)
+
+**Run 18 (the user's paste; lines truncated ~76 chars).** 300 s session,
+Ctrl-C at 5 min. `input_activation sent:8 failed:0 ready:1` on attempt 1
+with the rig's `0x020e` version 3 negotiated — round XXXVII's chain flew
+byte-exact live. Video: **562 AUs / 13 keyframes / 0 decode errors /
+6665-6665 datagrams authenticated**, then `progress_stall` +
+`recovery_timeout` at **30.5 s** (runs 16/17: 10.2/10.99 s — the stall
+MOVED for the first time in three runs). SCTP died gracefully
+(`sctp_fail:0` ⇒ SHUTDOWN_COMPLETE inferred). Feedback:
+`{rr:258, ack:562, pacing:298, qos:4932, ka:86, idr:1, pli:1,
+pushed:6138, dropped:890}`. Control codes seen:
+`[["020e",1],["0111",2],["010a",9],["010f",1],["0106",1],["010e",1],["0101",8]]`.
+
+**The diagnosis.** Per-AU frame sizes decay monotonically across the live
+window while loss stays zero and RTT flat — not a network symptom. The
+reference documents the mechanism: the server PID reads the client's
+bandwidth-estimator fields out of QoS `0x0207` (nvst.rs:7924-7927 →
+nvst_control.rs:133-156). Ours were all zero (D-t10, open since round
+XXII): a server that never sees an estimate decays the encoder toward its
+floor. Secondary finding: `dropped:890` — the 64-slot outbox saturated
+under our one-message-per-record cadence; the reference batches
+(ControlReportBatch, nvst.rs:455-560).
+
+**What shipped (all sandbox-gated this round):**
+
+* **NEW `kn_bw.{h,c}`** — the line-for-line port of `nvst_bandwidth.rs`:
+  BandwidthEstimator (int64-ns clock, wrap-extended 90 kHz sender time,
+  transit-min, jitter EWMA /16, 16-entry ring, distance=wrapping_sub with
+  the 0/≥0x80000000 put-back, lossy += distance−1, frame-ms EMA
+  .875/.125, received_ms=max(dur−sender_gap,0.5), utilization=min(100×
+  received/frame,100), the every-60-frames min_transit+=0.5 else
+  lossy+=1, report zero-gate, median sorted[(count−1)/2], server_time
+  mask 0x7fffffff, the 100-frame estimate gate) + the server-control
+  decoder (`kn_sctl_walk`; 0x104/0x105 Timer, 0x109 termination with the
+  wire-code split, 0x112 8-byte pacing latch, the Unhandled set, Unknown
+  fallthrough, MAX 256 cmds/65539 B; iterator semantics FINAL from
+  nvst_server_control.rs:107-146). All Rust-`as`-cast sites use the
+  saturating helpers (bw_sat_i64/u64) — C UB where Rust saturates.
+* **NEW `tools/bw_reference.py`** — the independent Python model; it
+  self-proves against the reference's OWN Rust goldens (backward_clock →
+  frames_observed=68/lossy=50; stale-frame parity → 1 loss 0 frames,
+  jitter 121 µs; batched [0x104][0x10A][0x112] → 3 records pacing on
+  LAST; minimum_server_time=270090, estimate_kbps=4800, utilization=5,
+  queue_delay_us=1000; reorder lossy=2; parity receive_kbps=6400.0)
+  BEFORE emitting `kn_bw_kat_vectors.h`. The scenario scripts at :534-620
+  are the ONLY authoritative source — never hand-written C scenarios.
+* **NEW `test_knbw` — 387 checks**, registered everywhere (CMakeLists
+  kncore + foreach, build_native_tests, cross_check ×2 arches, T10
+  suites → target expectation **79**).
+* **The feed** (kn_rx): `process_authenticated` takes `feed_bw`
+  (datagram=1, plaintext process_packet=0 — FINAL, do not relitigate),
+  at the reference site (post-resolve_nack, pre-FEC/reorder; tuple only
+  when `!retransmitted && !reordered` AND RTP+GS parse; bytes = RTP
+  payload len; ssrc change → reset; parity → observe_parity only;
+  `reordered` uses the PREVIOUS highest_sequence_received — the placement
+  pitfall is test-pinned). `cfg.now_ns` carries the µs socket clock ×1000
+  (sub-ms granularity is load-bearing: ms arrivals clamp to the 0.5 ms
+  floor and double the receive-rate error); replay/tests keep NULL →
+  now_ms×1e6.
+* **The QoS 0x0207 rewrite** (knvstd): all seven BWE fields with the
+  reference semantics — sender_frame = last COMPLETED frame index,
+  bytes_received = CUMULATIVE completed bytes, loss = guarded DELTA
+  (same-ssrc + same-base + monotonic; 10000×(expected−received)/expected),
+  client_time_90khz = (elapsed_ms×90) wrapping u32 since
+  transport_origin, const-1000 u16 at @30 AND @32, RR cumulative_lost
+  clamped [−0x800000, 0x7fffff].
+* **ControlReportBatch** (`sess_cb_*`): MAX 1071, queued_at on first
+  record, flush_due = QoS present OR age ≥ 50 ms, one flush = ONE sid-6
+  outbox push, retain-on-failure; frame-ack + pacing append; QoS appends
+  + flushes; the media loop age-flushes each pass. Outbox maxlen
+  704→1071. **Per-sid counters** (pushed_per_sid/dropped_per_sid, sid/2
+  slots, + refused) surface as `"outbox_by_sid"`.
+* **Server-control plane in the pump** (`sess_sctl_ingest` from
+  `sess_ctrl_ingest`, both sid 0 and sid 6): the decoder state +
+  diagnostics counters mirrored to stats, a 30 s `sctl_stats` line, and
+  two VOLATILE latches the media loop reads each pass:
+  `sctl_termination` → `stop_reason:"server_termination"` + break (the
+  reference's `input_ready=false; break 'bundle`), `sctl_pacing_enabled`
+  → gates the 0x0203 pacing sender (default ENABLED, nvst.rs:664).
+* **SCTP cause codes** (kn_sctp): assoc_state tracking +
+  `kn_sctp_assoc_state_name` so `sctp_down` prints SHUTDOWN_COMPLETE vs
+  COMM_LOST vs the rest.
+* **AU wall-vs-ts telemetry** (dec_ctx): drift_ms = wall_elapsed −
+  rtp_ts_delta/90 per AU, min/max, ts_backwards — `"au_clock"`.
+* **R3-D the WSS control keepalive**: kn_ws captures pong payloads
+  (`kn_ws_take_pong`, cursor consume-once; +5 test_knws checks, suite
+  88); the media loop services the nvst_rtsp.rs:844-935 semantics — 2 s
+  interval, u64-BE seq payload, pong-match RTT sample, 5 s sample
+  expiry, outstanding expiry at the interval, 1 ms bounded drain on a
+  50 ms beat (both ice and plain modes), hard error → `dead`. Evidence:
+  `cping_*` on the 1 s session_stats beat + `ctrl_ping_stop` at
+  teardown. The service is main-thread (WSS single owner; the pump
+  thread owns the bundle socket, not the WSS) — D21 untouched.
+* **Summary grows four blocks** — `batch`, `outbox_by_sid`, `bwe`
+  (estimator report + feed counters; frames_observed < 100 would mean
+  the zeros are the reference's own gate), `au_clock` — APPENDED after
+  `feedback`; `make_rx_capture.py --verify` untouched. JSON shape
+  re-validated by literal extraction this round (70 specs / 70 args).
+
+**Traps hit this round (recorded so nobody repeats them):** (1) the
+summary printf patch first landed in the REPLAY block (two identical
+`char drops[512]` anchors — always search from the END or pin the
+function); (2) a format-line replacement that dropped the closing `"`
+silently turned the printf into a comma expression — the compiler only
+said "too many arguments", so the format block was bisected with a
+no-args stub to find it; (3) `%dx%d` in a validator regex eats the
+literal x — exclude `x` from conversion classes; (4) patch anchors go
+stale when an earlier patch rewrote the same block — re-read the current
+text before constructing anchors (the failed step-76 pacing patch);
+(5) `test_knrx`/cross legs link kn_rx.o directly — adding kn_bw to
+kn_rx.c means every such leg needs kn_bw.c (native, cross ×2, T10
+suites, CMake kncore + foreach).
+
+**Gates (all green, sandbox):** `build_native_tests.sh` NATIVE TESTS
+PASS — 17 suites incl. **test_knbw 387** and test_knws **88** (+5 R3-D),
+jsonl + zip validation, the paranoid knvstd leg · `cross_check.sh`
+CROSS-CHECK PASS ×2 (x86_64 + i686) zero warnings under
+`-Wall -Wextra -Werror`, incl. the NEW kn_bw `-c` legs, the test_knbw
+link legs and kn_bw in $KCORE/the test_knrx leg · ctest **20/20** with
+the mbedTLS backend and **20/20** with schannel, zero build warnings
+(the +1 = test_knbw) · ASan+UBSan clean on **test_knbw 387/387** AND
+**test_knrx 194/194** · `sandbox_session_e2e` **43/43** (kn_bw added to
+its link line) · T10 POSIX dry **ALL PASS 69** (was 68; +1 for the new
+suite) · T13 **ALL PASS 63** · the paranoid matrix: knvstd ×9
+(−O0/−O2/−O3 × bare/mbedTLS/usrsctp) + kn_bw/kn_rx ×3, all clean with
+`-Wunused-but-set-variable -Wformat-truncation=2` (the kn_ws
+-Wformat-truncation=2 diagnostics are PRE-EXISTING at HEAD and outside
+the declared gate — recorded, not introduced).
+
+**Handover / next.** The user syncs the changed files, runs
+`python tests\T10_build_and_test.py` (expect **ALL PASS 79**, zero
+warnings, test_knbw **387** on target), then **R7 run 19** with
+`--session-seconds=300` and an UNTRUNCATED log if possible. Decision
+matrix in Next steps 2 and docs/RTSP.md §25.4: sustained video +
+nonzero `bwe.estimate_kbps` → **STAGE 2 DONE** and the presentation
+wiring becomes the main track; anything else → the `bwe`/`skip_*`/
+`outbox_by_sid`/`cping_*`/`au_clock` blocks name the next suspect
+directly.
+
+Files touched: NEW `streamer/include/kn/kn_bw.h`, NEW
+`streamer/src/kn_bw.c`, NEW `streamer/src/kn_bw_kat_vectors.h`
+(generated), NEW `streamer/tests/test_knbw.c`, NEW
+`tools/bw_reference.py`, `streamer/include/kn/kn_rx.h`,
+`streamer/src/kn_rx.c`, `streamer/include/kn/kn_ws.h`,
+`streamer/src/kn_ws.c`, `streamer/tests/test_knws.c`,
+`streamer/include/kn/kn_sctp.h`, `streamer/src/kn_sctp.c`,
+`streamer/src/knvstd_main.c`, `CMakeLists.txt`,
+`tools/build_native_tests.sh`, `tools/cross_check.sh`,
+`tests/T10_build_and_test.py`, `docs/RTSP.md` §25, `INTEGRATION.md`
+rev 28, this file.

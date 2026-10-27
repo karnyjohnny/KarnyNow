@@ -71,7 +71,7 @@ for a **device-less** session (no HID runtime, no gamepad, no microphone):
 | 0 | frame invalidation `0x0301` | on unrecoverable loss | :3104 | ✅ round XXXVI | ✅ |
 | 6 | frame ack `0x0204` (batched) | per completed frame | :7936-7946 | ✅ round XXXVI (unbatched) | ✅ |
 | 6 | frame pacing `0x0203` | 55 556 µs, frame-gated | :7920-7935 | ✅ round XXXVI | ✅ |
-| 6 | QoS report `0x0207` | every 50 ms | :7948-7970 | ✅ round XXXVI (D-t10 zeros) | ✅ |
+| 6 | QoS report `0x0207` | every 50 ms | :7948-7970 | ✅ round XXXVI; **all seven BWE fields live round XXXVIII (D-t10 CLOSED)** | ✅ |
 | 6 | NACK-v2 `0x0317` | from the tracker | :3075-3078 | ✅ round XXXVI | ✅ |
 | 14 | RTCP RR / NACK / PLI | 1 s / on loss | :8041-8103 | ✅ round XXXVI | ✅ |
 | 0 | HID: sony/generic reports, gamepad descriptors, text | only with devices attached | :7767-7800, :8290-8310 | ❌ n/a | ❌ stage 3 |
@@ -81,7 +81,9 @@ also that the reference *batches* frame-ack/pacing/QoS records into one
 SCTP message (`ControlReportBatch`, nvst.rs:462-548); the wire format is a
 concatenated TLV list either way, so our one-record-per-message form
 parses identically. Batching is a throughput nicety, not a fidelity gap —
-recorded as **D-t11** (see §7).
+recorded as **D-t11** (see §7) — **CLOSED round XXXVIII**: the
+`ControlReportBatch` now ships (MAX 1071, one flush = one sid-6 message,
+due on QoS-or-50-ms-age, retain-on-failure).
 
 ## 3. The activation chain, byte for byte
 
@@ -222,13 +224,13 @@ malformed JSONL — the round-XVIII discipline.
 
 | id | deviation / gap | status |
 |---|---|---|
-| **D-t11** | frame-ack/pacing/QoS are sent one TLV record per SCTP message; the reference batches them into a `ControlReportBatch` up to `maxQosMessagesSize` (nvst.rs:462-548). Wire-compatible either way (the format is a concatenated TLV list, nvst_input.rs:404-424); batching only cuts message count. | accepted; revisit if the rig's `ctrl_in` shows it batching back, or if sid-6 send volume ever matters |
+| **D-t11** | ~~frame-ack/pacing/QoS are sent one TLV record per SCTP message~~ — **CLOSED round XXXVIII**: `sess_cb_*` implements the reference `ControlReportBatch` (nvst.rs:455-560): MAX 1071 = MAX_CONTROL_REPORT_BYTES, `queued_at` on first record, flush_due = QoS present OR age ≥ 50 ms, one flush = ONE sid-6 push, failure retains the buffer. Run 18's `dropped:890` (per-record cadence saturating the 64-slot outbox) was the trigger. | closed |
 | **D-t12** | the activation chain is retried at most **8 times** on partial send failure; the reference retries the whole chain indefinitely (nvst.rs:6569-6574). A dead association is already reported via `sctp_fail`, so an unbounded spin adds nothing. | accepted, bounded on purpose |
 | G1 | `INPUT_HANDSHAKE_TIMEOUT` (5 s) is defined but not enforced — we never give up waiting for `0x020e`. | open; only matters if a rig withholds the version |
 | G2 | `device_descriptor` is sent with bitmap 0 (no gamepad attached) — faithful for a device-less session, but a real pad needs `set_rich_slot_mask` + the sony/generic HID paths (nvst.rs:7767-7800). | stage 3 |
 | G3 | discrete input (keyboard/mouse/wheel/text), the `0x0206` remote-input envelope for real events, and the `input_partial`/`control_partial` routing split (nvst_input.rs:241-247) are **not** implemented. | stage 3 |
 | G4 | server cursor payloads are detected (for `notify`) but not decoded into shapes/positions (`server_cursor_messages`, nvst_input.rs:461-529). No local cursor rendering yet. | stage 3+ (presentation) |
-| G5 | the QoS estimator fields remain honest zeros (**D-t10**) and `bw_estimate_kbps` is the measured downlink, not the reference's `BandwidthEstimator` (nvst_bandwidth.rs). Demoted by run 17 from prime suspect to secondary: the stall did not move when feedback appeared. | open; the next suspect if run 18 still stalls with the chain flying |
+| G5 | ~~the QoS estimator fields remain honest zeros (**D-t10**)~~ — **CLOSED round XXXVIII**: run 18 promoted it back to prime suspect (the stall moved 11→30.5 s once activation flew, and the AU frame-size decay under zero loss named the server rate control reading our zero BWE fields). `kn_bw.{h,c}` is the line-for-line `nvst_bandwidth.rs` port (two-implementation pinned, test_knbw 387); the feed rides `process_authenticated` (datagram=1/plaintext=0); `qos_report_at` fills all seven fields with the reference semantics. | closed; run 19 verifies live |
 
 ## 8. Files
 

@@ -418,7 +418,7 @@ def main():
               "test_kndiag", "test_knselftest", "test_kngs", "test_knaudio",
               "test_knrx", "test_knsock", "test_knws", "test_knrtsp",
               "test_kncm", "test_kncert", "test_kndtls", "test_knsctp",
-              "test_kninput"]
+              "test_kninput", "test_knbw"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out

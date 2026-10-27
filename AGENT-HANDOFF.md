@@ -1,9 +1,10 @@
 # AGENT-HANDOFF — recovery document for the next implementation agent
 
 > **FRESHNESS WARNING (added round IX, 2026-10-23): §3–§5 below are FROZEN
-> HISTORY as of impl round V (2026-10-21).** The authoritative living state
-> is `PROJECT-STATE.md` — read its "Bootstrapping a NEW agent session",
-> "Current status", "Next steps" and the session log (rounds I–IX) FIRST.
+> HISTORY as of impl round V (2026-10-21).** (Updated at round XXXVIII
+> close: the authoritative living state is now **`START-HERE.md`**;
+> `PROJECT-STATE.md` — whose session log covers rounds I–XXXVIII — is a
+> frozen archive. Read `START-HERE.md` FIRST.)
 > The build/test gate is `tests/T10_build_and_test.py` (T9 is superseded).
 > §1–§2 of this file (mission summary + reading order) remain useful; add
 > `docs/D3D.md` to the reading list (kn_d3d provenance + VEH crash guard).

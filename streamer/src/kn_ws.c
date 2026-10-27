@@ -29,6 +29,19 @@
 
 /* ------------------------------------------------------------ helpers */
 
+int kn_ws_take_pong(kn_ws_client *c, unsigned long long *seen,
+                    uint8_t *buf, size_t cap, size_t *out_len)
+{
+    size_t n;
+    if (!c || !seen) return 0;
+    if (c->last_pong_seq == *seen) return 0;      /* nothing fresh */
+    *seen = c->last_pong_seq;
+    n = c->last_pong_len < cap ? c->last_pong_len : cap;
+    if (buf && n) memcpy(buf, c->last_pong, n);
+    if (out_len) *out_len = n;
+    return 1;
+}
+
 int kn_ws_rand(uint8_t *buf, size_t n)
 {
     size_t i;
@@ -536,7 +549,17 @@ int kn_ws_recv_msg(kn_ws_client *c, uint32_t timeout_ms, int *out_opcode,
                     c->pongs_out++;
                 continue;                                  /* not surfaced */
             }
-            if (c->hdr_op == 0xA) { c->pongs_in++; continue; }
+            if (c->hdr_op == 0xA) {
+                c->pongs_in++;
+                /* R3-D: keep the payload — the control worker matches it
+                 * against its ping sequence (nvst_rtsp.rs:895-901) */
+                if (c->ctrl_done <= KN_WS_MAX_CONTROL_PAYLOAD) {
+                    memcpy(c->last_pong, c->ctrl, c->ctrl_done);
+                    c->last_pong_len = c->ctrl_done;
+                    c->last_pong_seq++;
+                }
+                continue;
+            }
             if (c->hdr_op == 0x8) {                        /* close */
                 c->closes_in++;
                 c->last_close_code = c->ctrl_done >= 2

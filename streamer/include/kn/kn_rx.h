@@ -68,6 +68,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "kn/kn_bw.h"
 #include "kn/kn_gs.h"
 #include "kn/knsrtp.h"
 
@@ -568,6 +569,19 @@ typedef struct kn_rx_video_config {
      * config.timeout (nvst.rs:9124-9126). 0 -> same default. */
     uint32_t progress_stall_ms;
     uint32_t progress_keyframe_grace_ms;
+    /* Round XXXVIII (D-t10) — the bandwidth estimator's clock. The
+     * reference hands BandwidthEstimator an `Instant` and does every
+     * subtraction on integer-nanosecond Durations (nvst_bandwidth.rs:60,
+     * :96-108, :212), so sub-millisecond arrival spacing is part of the
+     * measured quantity: a frame's packets usually land inside ONE
+     * millisecond, and a ms-granular clock would read that train as 0 ms
+     * and clamp it to the reference's 0.5 ms floor (a 2x receive-rate
+     * error, straight into estimate_kbps). `now_ns(ud)` returns any
+     * monotonic integer-nanosecond reading; only DIFFERENCES are used, so
+     * the origin is irrelevant. NULL (tests, capture/KAT replay, which
+     * must stay deterministic) falls back to now_ms * 1000000. */
+    int64_t (*now_ns)(void *ud);
+    void    *now_ns_ud;
 } kn_rx_video_config;
 
 /* Storage bundle for kn_rx_video_init — one struct so the caller sees every
@@ -636,6 +650,30 @@ typedef struct kn_rx_video {
 
     /* per-call event staging */
     uint32_t ev_count, ev_capacity, ev_overflow;
+
+    /* ---- round XXXVIII (D-t10): the BandwidthEstimator ----
+     * publish_stream_packet (nvst.rs:852-899) feeds it from the
+     * authenticated datagram path only, and resets it when the media
+     * ssrc changes. `bw_ssrc` is our copy of the reference's
+     * qos_packet_snapshot.ssrc — the field whose change triggers
+     * `timing.bandwidth = BandwidthEstimator::default()` (:875-884).
+     * The samples fed are counted so a log can prove the estimator was
+     * actually driven (run 18's QoS block was zeros for 4701/4932
+     * reports and nothing in the log said so). */
+    kn_bw    bw;
+    uint32_t bw_ssrc;        int have_bw_ssrc;
+    uint64_t bw_samples, bw_parity_samples, bw_skipped_reordered,
+             bw_skipped_retransmitted, bw_skipped_no_video;
+
+    /* The QoS packet snapshot (nvst.rs:860-914). These are SEPARATE from
+     * the RR counters above on purpose: base_sequence/highest_sequence/
+     * received_packets back the RTCP report block and are u64, while the
+     * 0x0207 snapshot is u32 with `received` SATURATING at u32::MAX (the
+     * reference's `previous.received < u32::MAX` guard, :901) and `base`
+     * latched once by compare_exchange (:861-866). */
+    uint32_t qos_base_sequence;  int have_qos_base;
+    uint32_t qos_highest_sequence;
+    uint32_t qos_received_packets; int have_qos_snapshot;
 } kn_rx_video;
 
 /* Initialise the pipeline. Validates every bound (window 1..2048, AU cap
@@ -698,6 +736,49 @@ int kn_rx_video_take_keyframe_request(kn_rx_video *v);
 int kn_rx_video_rr_snapshot(const kn_rx_video *v, uint32_t *ssrc,
                             uint32_t *base, uint32_t *highest,
                             uint64_t *received);
+
+/* ---- round XXXVIII (D-t10): the bandwidth-estimator plane ---- */
+
+/* The QoS packet snapshot the 0x0207 report carries
+ * (QosPacketSnapshot, nvst.rs:900-914): the media ssrc, the base
+ * sequence latched on the FIRST packet of that ssrc, the highest
+ * sequence seen, and the received-packet count (saturating at u32::MAX
+ * exactly like the reference's `previous.received < u32::MAX` guard).
+ * Returns 1 once a packet has been published, 0 before — the reference's
+ * Option. The 0x0207 loss field is a DELTA between two of these, so the
+ * caller keeps the previous one (nvst.rs:1147-1166). NULL-safe. */
+int kn_rx_video_qos_snapshot(const kn_rx_video *v, uint32_t *ssrc,
+                             uint32_t *base, uint32_t *highest,
+                             uint32_t *received);
+
+/* BandwidthEstimator::report(now) (nvst_bandwidth.rs:210-243) for the
+ * seven 0x0207 fields. `now_ns` must come from the SAME clock domain as
+ * cfg.now_ns; passing 0 asks the pipeline to read cfg.now_ns itself (the
+ * production convenience path). Every field is already clamped/masked to
+ * its wire type, and all of them are ZERO before the first packet — plus
+ * utilization_percent/estimate_kbps stay zero until 100 completed frames,
+ * which is the reference's gate, not an omission. Returns 1 on success. */
+int kn_rx_video_bw_report(const kn_rx_video *v, int64_t now_ns,
+                          kn_bw_feedback *out);
+
+/* Evidence for the log: how many samples reached the estimator, how many
+ * parity notes, and how many authenticated packets were withheld from it
+ * (reordered / retransmitted / no parseable GS video tuple). The reference
+ * gates the feed on `!retransmitted && !reordered` (nvst.rs:4694-4702), so
+ * a session that never feeds anything is a defect these counters name. */
+void kn_rx_video_bw_counters(const kn_rx_video *v, uint64_t *samples,
+                             uint64_t *parity, uint64_t *skipped_reordered,
+                             uint64_t *skipped_retransmitted,
+                             uint64_t *skipped_no_video);
+
+/* Number of completed frame trains the estimator has consumed — the gate
+ * counter behind utilization_percent/estimate_kbps
+ * (nvst_bandwidth.rs:238-241). 0 before the first completed frame. */
+uint32_t kn_rx_video_bw_frames_observed(const kn_rx_video *v);
+
+/* Drop the estimator and its ssrc latch (the reference resets it on an
+ * ssrc change; this is the same reset for a deliberate stream switch). */
+void kn_rx_video_bw_reset(kn_rx_video *v);
 
 /* SET the keyframe-request flag from outside the pipeline (stage-2 decode
  * glue: encoded-queue overflow => the decoder never saw a frame later

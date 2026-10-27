@@ -116,6 +116,15 @@ typedef struct kn_ws_client {
                        bytes_out, bytes_in;
     int      last_error;         /* KN_WS_ERR_* of the last failure */
     int      last_close_code;    /* peer close payload code (-1 = none) */
+    /* Round XXXVIII (R3-D): pong payload capture. The reference's
+     * control worker matches the pong payload against the sequence it
+     * pinged (nvst_rtsp.rs:895-901) to sample control-channel RTT;
+     * that needs the payload, which kn_ws used to discard. `seen` is
+     * the caller's cursor into last_pong_seq (kn_ws_take_pong). */
+    uint8_t  last_pong[KN_WS_MAX_CONTROL_PAYLOAD];
+    size_t   last_pong_len;
+    unsigned long long last_pong_seq;   /* 0 = none; ++ per pong payload */
+    unsigned long long pong_seen;       /* caller cursor (take_pong) */
 } kn_ws_client;
 
 /* Run the opening handshake over io. host/port are used ONLY for the
@@ -161,6 +170,14 @@ int kn_ws_accept(const char *key_b64, char out[29]);
 
 /* CSPRNG fill: 0 ok, -1 unavailable (callers MUST refuse to proceed). */
 int kn_ws_rand(uint8_t *buf, size_t n);
+
+/* R3-D: fetch the most recent pong payload not yet consumed by this
+ * caller (cursor = *seen, updated on success). Returns 1 and copies
+ * <= cap bytes (*out_len set) when a fresh pong arrived, else 0. The
+ * reference matches this payload against its ping sequence
+ * (nvst_rtsp.rs:895-901) to sample control-channel RTT. */
+int kn_ws_take_pong(kn_ws_client *c, unsigned long long *seen,
+                    uint8_t *buf, size_t cap, size_t *out_len);
 
 #ifdef __cplusplus
 }
