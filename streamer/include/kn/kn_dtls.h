@@ -80,6 +80,7 @@ enum {
 #define KN_DTLS_MAX_RECORD   2048u
 #define KN_DTLS_QUEUE_SLOTS    32u
 #define KN_DTLS_FIRST_APP_CAP  64u   /* first app-record capture window */
+#define KN_DTLS_APPQ_SLOTS      8u   /* decrypted app-record ring (R3-C) */
 
 typedef struct kn_dtls kn_dtls;   /* opaque; heap-owned like kn_cert */
 
@@ -101,6 +102,14 @@ typedef struct {
     uint8_t  first_app[KN_DTLS_FIRST_APP_CAP];
     unsigned first_app_len;   /* the record's TRUE length (may exceed
                                  the captured cap) */
+    /* Round XXXIII: run 14 showed app_records:0 while ONE extra record
+     * still arrived post-ready (dtls_in 8 vs 7) — so that record was
+     * NOT app data. This captures the first post-ready INJECT at the
+     * wire level (record header included: byte 0 = ContentType —
+     * 20 CCS / 21 alert / 22 handshake / 23 app), naming it. */
+    uint8_t  first_post_ready[32];
+    unsigned first_post_ready_len;
+    unsigned app_q_dropped;   /* app-rx ring overflows (counted, honest) */
     int      pin_matched;     /* verify callback saw the pinned fp */
     int      verify_result;   /* mbedtls_ssl_get_verify_result (0 = clean) */
     int      last_rc;         /* last fatal mbedTLS return (negative) */
@@ -141,6 +150,19 @@ int kn_dtls_inject(kn_dtls *d, const uint8_t *data, size_t len);
 int kn_dtls_poll(kn_dtls *d);
 
 int kn_dtls_ready(const kn_dtls *d);
+
+/* ---- R3-C bridge: SCTP rides the DTLS app layer ----
+ * write_app: encrypt+send one app record (mbedtls_ssl_write). Only
+ * valid when ready. Returns KN_DTLS_OK / ERR_STATE / ERR_IO. Called
+ * from kn_sctp_poll's flush — i.e. the pump thread, the ssl context's
+ * single owner.
+ * read_app: pop ONE decrypted app record from the bounded rx ring
+ * (drain_app fills it after ready). Returns 1 with *out_len set, 0
+ * when empty, negative on error. The consumer (kn_sctp_inject) gets
+ * whole records — never partials. */
+int kn_dtls_write_app(kn_dtls *d, const uint8_t *data, size_t len);
+int kn_dtls_read_app(kn_dtls *d, uint8_t *buf, size_t cap,
+                     size_t *out_len);
 
 /* Negotiated facts for the evidence line (bounded copies; "" when not
  * ready). version: e.g. "DTLSv1.2". ciphersuite: the mbedTLS name

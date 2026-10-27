@@ -1,4 +1,142 @@
-# INTEGRATION NOTES — Round XXXII delta, rev 22 (R7 run 13 = THE DTLS HANDSHAKE COMPLETED ON A LIVE PRODUCTION RIG — R3-B live-closed; PLAY went silence→explicit 400 with the body uncaught → the instrumentation round: the full non-200 response capture, the rig's post-DTLS app-record capture, the pre-PLAY video-socket keepalive)
+# INTEGRATION NOTES — Round XXXIII delta, rev 23 (R7 run 14 = the 400 captured: empty body, echo headers, app_records:0 → the rig waits for OUR SCTP INIT → R3-C SHIPPED: kn_sctp on vendored usrsctp + the 8-channel DCEP profile + bounded PLAY gating)
+
+> **Rev 23 supersedes rev 1-22.** Canonical state: `PROJECT-STATE.md`.
+> Design records: **`docs/SCTP.md`** (NEW — kn_sctp's full record:
+> wire parameters, thread map, the SEVEN usrsctp landmines, deviations
+> D-t4..D-t7), `docs/RTSP.md` §20 (run 14 + the delta + the run-15
+> matrix), §19 (run 13), `docs/DTLS.md` (R3-C marked SHIPPED).
+>
+> **Round XXXIII headline: run 14's captures forced the verdict —
+> PLAY's 400 says nothing (`reason:"OK"`, empty body, echo headers) and
+> `app_records:0` proves the rig initiates no SCTP; the reference
+> client does (`start_sctp(true)` at dtls_ready, then the 8-channel
+> DCEP profile, all before finish()/PLAY). R3-C shipped: `kn_sctp`
+> (vendored usrsctp c625e219, AF_CONN over the new kn_dtls app bridge,
+> sctp-proto-exact wire parameters, the full NVST channel profile) +
+> the independent Python reference + the 33-check suite + PLAY gated on
+> sctp_up (D-t5). Target expectation: T10 ALL PASS **75** (the harness
+> now fetches the pinned usrsctp tarball), then R7 run 15.**
+>
+> ## Changed files (round XXXIII)
+> 1. `streamer/{include/kn,src}/kn_sctp.{h,c}` (NEW) — the R3-C module:
+>    real body under KN_SCTP_BACKEND_USRSCTP (CMake auto-detects
+>    third_party/usrsctp, BOTH platforms), honest stub elsewhere.
+>    AF_CONN routing (one registered key per process — the
+>    libdatachannel pattern; usrsctp opens no real sockets, DTLS is
+>    the wire); the bounded mutex tx queue is the thread boundary
+>    (usrsctp's timer thread emits into it; only kn_sctp_poll — the
+>    pump thread — touches the DTLS context); wire parameters mirror
+>    sctp-proto exactly (5000↔5000, OS/MIS 65535, a_rwnd 1 MiB, RTO
+>    3000/1000/60000 via sysctls+RTOINFO, unlimited INIT attempts,
+>    MAXSEG 1200); PURE DCEP marshal/parse (RFC 8832, strict type set)
+>    identical in every build; `kn_sctp_nvst_channels[8]` = the
+>    reference profile verbatim (sids 0-14, labels, 0x00/0x01/0x82/0x81,
+>    params 0/2/300, priority 0, protocol ""); `kn_sctp_open_channels`
+>    fires the burst ordered+reliable PPI 50 per stream; test-only
+>    server/peer opens (shared-key + port-routed loopback — landmine
+>    #4 in SCTP.md §5).
+> 2. `streamer/{include/kn,src}/kn_dtls.{h,c}` — the app layer became a
+>    BRIDGE: `kn_dtls_write_app` (mbedtls_ssl_write when ready; the
+>    SCTP tx path) + `kn_dtls_read_app` (a bounded 8×2048 decrypted-app
+>    ring; the SCTP rx path) + `first_post_ready` (the inject-level RAW
+>    capture of the first post-ready record — run 15 names the mystery
+>    record run 13/14 saw: ContentType 20/21/22/23) + `app_q_dropped`;
+>    the D-t4 counted discard stays as the no-consumer fallback.
+> 3. `streamer/src/knvstd_main.c` — the pump thread arms kn_sctp the
+>    moment dtls_ready fires (write_cb = kn_dtls_write_app; the DTLS
+>    app ring feeds kn_sctp_inject each pass); on COMM_UP it opens all
+>    8 channels; rig-side OPENs get ACKs (str0m :1046-1060); the first
+>    rig message head is captured. PLAY gating (D-t5): after the 100 ms
+>    burst head start, main waits (snapshot-polled, bounded by
+>    `--session-play-wait`, default 2500 ms) for sctp_up — or for
+>    dtls/sctp failure or Ctrl-C — then settles `--session-play-settle`
+>    (default 250 ms); PLAY ALWAYS flies afterwards (a dead data plane
+>    never eats the measurement). New evidence: `sctp_arm` (with the
+>    refusal detail), `sctp_up {"ms"}`, `sctp_channels {"opened",
+>    "acked","rig_opened"}`, `sctp_down`; ice_preplay grew sctp_armed/
+>    up/ms/opened/acked/rig_opened/msgs_in/fail/first_sid/first_ppi/
+>    first_len/first(hex). Teardown order: join → kn_sctp_close →
+>    kn_dtls_free → sockets → cert. run_session grew the two play
+>    parameters; usage + argv parsing updated.
+> 4. `streamer/tests/test_knsctp.c` (NEW, 16th suite) — self-adaptive:
+>    REAL battery 33 checks / stub contract 13. The real legs: the
+>    Python goldens ↔ builder byte-equality (all 8 channels) + parse
+>    round-trips + the 6-vector malformed battery + CRC-32c goldens +
+>    the golden INIT through the independent parser; the LIVE usrsctp
+>    INIT captured at the write_cb and verified independently (ports
+>    5000↔5000, vtag 0, CRC-32c, OS/MIS 65535/65535, a_rwnd ≥ 64 KiB);
+>    the full 4-way association over the port-routed memory relay; the
+>    channel burst received with exact sids/labels/types/params + ACKed
+>    both ways; user data sid 0 + sid 14; one-shot loss → SACK/fast-
+>    retransmit recovery; garbage inject tolerated; stats coherence
+>    (honest about the shared-key topology: the server queue carries
+>    both directions). ASan+UBSan+LSan clean.
+> 5. `tools/sctp_reference.py` (NEW) + generated
+>    `streamer/src/kn_sctp_kat_vectors.h` — the independent Python
+>    (self-proves CRC-32c against RFC 3720 B.4 = 0xE3069283 and
+>    hand-transcribed DCEP goldens BEFORE emitting; byte-stable
+>    regeneration). It caught its own bug pre-ship (a valid ACK had
+>    been filed under the malformed vectors).
+> 6. `third_party/usrsctp` (GITIGNORED, vendored like mbedtls) —
+>    pinned master c625e21950600460cb5c6075616eb1622df2b06a
+>    (2026-10-07), tarball SHA-256
+>    090b9d03bf068ce5989576c8e0ff6979d3031ea85e405acd263206f19166b41e;
+>    `tests/T10_build_and_test.py` downloads+verifies+extracts it
+>    (ensure_usrsctp_source, the mbedtls pattern) and gates the build
+>    on it; suites += test_knsctp → target expectation **75**.
+> 7. `CMakeLists.txt` — kn_sctp.c into kncore; knsctp into the foreach
+>    (ctest 17→18 ×2); the usrsctp block: add_subdirectory with
+>    sctp_debug/werror/invariants/programs/shared/fuzzer OFF + inet6
+>    OFF, scoped `-w` on the vendored target ONLY (our files stay
+>    strict — the mbedtls-suppression precedent), KN_SCTP_BACKEND_
+>    USRSCTP on kncore + test_knsctp, ws2_32 on Win32, an explicit
+>    ENABLED/stub status line.
+> 8. `tools/build_native_tests.sh` (KNCORE += kn_sctp.c; the 16th suite
+>    builds stub + runs as rc20) and `tools/cross_check.sh` (kn_sctp
+>    stub -c + the REAL-body leg + the test's REAL-section leg under
+>    the exact target flags ×2 arches whenever third_party/usrsctp
+>    exists — the round-XXII rule; the stub suite link; KCORE +=).
+> 9. Docs: `docs/SCTP.md` (NEW — §2 the wire-parameter provenance
+>    table, §3 the channel profile, §4 the thread map, §5 the SEVEN
+>    landmines, §6 verification, §7 deviations D-t4..D-t7, §8 run-15
+>    questions), `docs/RTSP.md` §20, `docs/DTLS.md` (R3-C SHIPPED +
+>    the remaining stage-3 send scope), `PROJECT-STATE.md` (round
+>    XXXIII), `tests/README.md` untouched (no new target harness).
+>
+> ## Verification status (what ran WHERE, round XXXIII)
+> * Sandbox: native 16 suites PASS; cross mingw x64+i686 -Werror PASS
+>   incl. the kn_sctp real-body + test-real-section legs; paranoid
+>   knvstd legs clean with BOTH backend defines ×3 opt levels; ctest
+>   **18/18 ×2** (mbedtls: test_kndtls 32 + test_knsctp 33 real;
+>   schannel: knsctp still REAL — usrsctp is TLS-independent —
+>   kndtls stub); ASan+UBSan+LSan clean on both new suites; the
+>   OpenSSL-3 DTLS interop PASS (re-run after the bridge changes);
+>   sandbox_session_e2e **43/43** (unchanged by design — the rig
+>   speaks no SCTP yet; upgrading it is a stage-3 candidate); T10
+>   POSIX dry ALL PASS **66**; T13 ALL PASS **63**.
+> * Target (round XXXIII's evidence, user-reported): T10 ALL PASS
+>   **74** (the round-XXXII tree); R7 run 14 (docs/RTSP.md §20).
+> * Target (PENDING — round XXXIV asks for): T10 (expect **75**, the
+>   usrsctp download on first run) + **R7 run 15** (the decision
+>   matrix in PROJECT-STATE Next steps 2; paste sock_pair/dtls_ready/
+>   sctp_arm/sctp_up/sctp_channels/PLAY/rtsp_response/ice_preplay
+>   verbatim, + handoff/summary on PLAY 200).
+>
+> ## Notes for the target build
+> * First T10 run downloads the ~0.8 MB pinned usrsctp tarball
+>   (SHA-256 verified before extraction); the build grows by ~25 s
+>   (usrsctp static). The vendored target compiles with scoped `-w`
+>   (the mbedtls-suppression precedent); T10's zero-warning gate greps
+>   the WHOLE ninja log for "warning:", so if GCC 16.2 ever surfaces a
+>   class `-w` does not cover, the gate flags it — the two-tier rule
+>   working as designed. The sandbox GCC 12 build is warning-free.
+> * No new PE imports: usrsctp is static; AF_CONN opens no sockets
+>   (ws2_32 already linked for kn_sock).
+> * kn_sctp's real body needs NO code change on Win32 — the sandbox
+>   cross legs already compiled it under the exact target flags ×2.
+
+
+# Round XXXII delta, rev 22 (R7 run 13 = THE DTLS HANDSHAKE COMPLETED ON A LIVE PRODUCTION RIG — R3-B live-closed; PLAY went silence→explicit 400 with the body uncaught → the instrumentation round: the full non-200 response capture, the rig's post-DTLS app-record capture, the pre-PLAY video-socket keepalive)
 
 > **Rev 22 supersedes rev 1-21.** Canonical state: `PROJECT-STATE.md`.
 > Design records: **`docs/RTSP.md` §19** (run 13 + the round-XXXII
@@ -95,6 +233,8 @@
 >   proved inbound UDP flows on 49006; 49005 send-side is new).
 
 
+
+# Round XXXI delta, rev 21 (R7 run 12 = the real fingerprint flew and PLAY STILL refused → R3-B SHIPPED: kn_dtls, the DTLS 1.2 ACTIVE client on the bundle socket + the reference's N/N+1 socket pair + the pump-thread DTLS state machine)
 
 > **Rev 21 supersedes rev 1-20.** Canonical state: `PROJECT-STATE.md`.
 > Design records: **`docs/RTSP.md` §18** (run 12 + the R3-B design +
@@ -232,6 +372,8 @@
 >   `dtls_arm {"armed":0,"reason":"backend_unavailable"}`.
 
 
+
+# Round XXX delta, rev 20 (R7 run 11 = the FINAL elimination datum: PLAY refused with a saturated pump + TOTAL WS silence → R3-A SHIPPED: kn_cert, the real ECDSA P-256 self-signed identity replacing D-s1's placeholder fingerprint)
 
 > **Rev 20 supersedes rev 1-19.** Canonical state: `PROJECT-STATE.md`.
 > Design records: **`docs/DTLS.md`** (R3-A now SHIPPED, R3-B/C/D

@@ -1410,3 +1410,96 @@ next round; (b) 400 persists with everything captured → R3-C
 piece) → the media loop on 49005: `natt_keepalive.sent`, the summary's
 datagrams/aus/frames = R32's final stage-2 gate. In ALL cases the rig
 now talks back — the silence era is over.
+
+## 20. Round XXXIII — R7 run 14 (the 400 CAPTURED: empty body, echo headers — a generic handler refusal; `app_records:0` proves the rig waits for OUR SCTP INIT) → R3-C SHIPPED: kn_sctp (vendored usrsctp, AF_CONN over the DTLS app layer) + the 8-channel DCEP profile + bounded PLAY gating
+
+**Target T10 (the round-XXXII tree): ALL PASS 74, zero warnings** — the
+instrumentation round verified; test_kndtls's real battery ran on Win7.
+
+**Run 14 (live production, rig #6 = 185-136-70-139, fast queue: 17
+relearns, cap-156 glimpses 44/48/47/33/7 → ready):**
+* `sock_pair 49005/49006 preferred, unified:0` again (second
+  consecutive seat on the reserved pair — the ports are reliably free
+  on the target and the two-socket layout is the production norm).
+* OPTIONS/DESCRIBE/SETUP/ANNOUNCE 200 (4136 B), identity cert:real.
+* **`dtls_ready ms:190`** — the fastest live handshake yet, same
+  cipher (TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256), verify:0. The R3-B
+  layer is now THREE-for-three on live rigs (388/293/190 ms).
+* `vid_ka:23` — the round-XXXII pre-PLAY video-socket keepalive fired
+  (23 NATT pings from 49005 before PLAY). **PLAY: still 400** — the
+  video-port silence was NOT the missing piece.
+* **`rtsp_response` caught the refusal**: `status 400, reason "OK"` (!),
+  headers = ONLY the echo set (`request-id:5, cseq:5, x-gs-version:
+  14.2`), `body_len 0`. A generic templated refusal from a handler that
+  had nothing specific to say — NOT the state-machine's 455 (run 9) and
+  NOT silence (runs 10-12). The rig evaluates PLAY once DTLS is up and
+  rejects on a missing condition it doesn't bother to name.
+* **`app_records:0, app_bytes:0`** — the rig sent NO DTLS app data
+  after the handshake (the run-13 "one extra record" was NOT app data;
+  with the round-XXXIII inject-level capture the next run names it —
+  ContentType byte: 20 CCS / 21 alert / 22 handshake / 23 app). So the
+  rig does NOT initiate SCTP: it waits for the CLIENT's INIT, exactly
+  like the reference (`start_sctp(true)` = "this side initiates",
+  nvst.rs:8221 + str0m direct.rs `start_sctp(client: bool)`).
+* `pump_ms:491` (the live accumulation works), dtls_in 8 vs 7 at ready
+  (the mystery non-app record again), req_in 3/answered 3, ok_in 20,
+  invalid 0 — the fourth consecutive clean ICE window.
+
+**Verdict: the missing layer is SCTP.** At PLAY time the reference has:
+DTLS up + the SCTP association initiated + the 8 DCEP channels opening
+(`Event::Connected → start_sctp(true) → NvstInputChannels::create`,
+nvst.rs:8214-8233, all before `finish()` at lib.rs:1117). We had DTLS
+up and nothing above it. **R3-C shipped this round** (the BOOTSTRAP's
+usrsctp choice; full design + the SEVEN measured usrsctp landmines are
+in the NEW `docs/SCTP.md`):
+
+* NEW `streamer/{include/kn,src}/kn_sctp.{h,c}` — vendored usrsctp
+  (pinned c625e219…, SHA-256-verified tarball via T10, the mbedTLS
+  model) in AF_CONN mode over the DTLS app layer: the wire parameters
+  mirror sctp-proto's defaults exactly (5000↔5000, OS/MIS 65535,
+  a_rwnd 1 MiB, RTO 3000/1000/60000, unlimited INIT retries, MAXSEG
+  1200); the tx thread-boundary queue (usrsctp's timer thread may emit
+  any time; the mbedTLS context stays single-threaded); the PURE DCEP
+  helpers (RFC 8832 marshal/parse, golden-tested against the
+  independent Python reference) available in EVERY build; the honest
+  stub elsewhere (`sctp_arm {"armed":0}` — the log never lies).
+* NEW `tools/sctp_reference.py` + generated
+  `streamer/src/kn_sctp_kat_vectors.h` — the independent Python
+  implementation (CRC-32c proven against RFC 3720 B.4 before emitting;
+  hand-transcribed DCEP goldens; the full NVST profile; an INIT packet
+  builder) — the two-implementations rule at the SCTP wire level.
+* NEW `streamer/tests/test_knsctp.c` (16th suite, **33 real checks**):
+  goldens, the independent live-INIT parse (ports/CRC/OS/MIS), the full
+  4-way association over a memory relay, the 8-channel burst received
+  with exact sids/labels/types/params + ACKed, bidirectional user data,
+  loss→SACK recovery, garbage tolerance — ASan+UBSan+LSan clean.
+* knvstd: the pump thread arms kn_sctp the instant `dtls_ready` fires
+  (the reference's `Event::Connected` moment), opens ALL 8 channels on
+  COMM_UP, answers rig-side OPENs with ACKs, captures the first rig
+  message head; PLAY now WAITS (bounded, `--session-play-wait=2500`
+  default) for `sctp_up` + a settle (`--session-play-settle=250`)
+  before flying — deviation D-t5 (runs 13/14 PLAYed ~12 ms after
+  dtls_ready; the reference's PLAY always lands behind its SCTP
+  initiation). New evidence: `sctp_arm`, `sctp_up {"ms"}`,
+  `sctp_channels {"opened","acked","rig_opened"}`, `sctp_down`, and
+  ice_preplay grew 10 sctp fields incl. the first-rig-message hex.
+* kn_dtls: the app path became a bridge — `kn_dtls_write_app` /
+  `kn_dtls_read_app` (a bounded decrypted-app ring; D-t4's counted
+  discard is now the fallback only) + the post-ready RAW record
+  capture (`first_post_ready`: run 15 names the mystery record).
+
+**What run 15 tests (same command; the decision matrix):**
+1. **PLAY 200** → the SCTP association (± channels) was the gate: the
+   media loop on 49005 starts — `natt_keepalive.sent` + the summary's
+   datagrams/aus/frames = R32's FINAL stage-2 gate (first real Mjolnir
+   SRTP → kn_rx → AUs → decoder).
+2. **PLAY still 400 WITH `sctp_up` + `sctp_channels acked:8`** → the
+   gate is deeper (rig-side channel data? an RTCP RR on sid 14? the
+   `sctp_first*` capture shows what the rig itself sent) — stage-3
+   senders are already KAT'd, wiring is the next round.
+3. **`sctp_fail` / no `sctp_up`** → the rig's DTLS-app behaviour
+   differs from the loopback peer (the `first_post_ready` hex +
+   dtls_fail/sctp counters localize it).
+4. Any outcome: paste `sock_pair`, `dtls_ready`, `sctp_arm`, `sctp_up`,
+   `sctp_channels`, PLAY, `rtsp_response` (if non-200), `ice_preplay`
+   verbatim; on PLAY 200 also `handoff` + the summary.

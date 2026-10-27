@@ -17,8 +17,17 @@
 > its capture ships in round XXXII) and the pre-PLAY Mjolnir
 > keepalive (shipped round XXXII). Sandbox gates: test_kndtls 32/32
 > under ASan+UBSan, the OpenSSL-3 interop PASS, ctest 17/17 ×2.)**
-> R3-C/D: PLAN as below — R3-C is the leading next round pending run
-> 14's captured 400 body.
+> **R3-C SHIPPED (round XXXIII, 2026-10-27** — run 14 captured the
+> 400 (`reason:"OK"`, empty body, echo headers only) AND proved the
+> rig sends no app data itself (`app_records:0`): it waits for the
+> CLIENT's SCTP INIT (`start_sctp(true)`, nvst.rs:8221). kn_sctp
+> landed: vendored usrsctp (pinned c625e219) in AF_CONN mode over the
+> DTLS app layer, sctp-proto-matching wire parameters, the full
+> 8-channel NVST DCEP profile, bounded PLAY gating on sctp_up — the
+> design record, the SEVEN measured usrsctp landmines and the
+> deviations live in the NEW docs/SCTP.md; sandbox gates: test_knsctp
+> 33/33 under ASan+UBSan, ctest 18/18 ×2, cross real-body legs ×2.
+> Run 15 is its live measurement.)** R3-D: PLAN as below.
 > Original plan header (round XXIX, 2026-10-26): Provenance: nvst.rs @ a49b124
 > (line refs below), str0m vendored in the reference tree
 > (`native/opennow-streamer/vendor/str0m`), runs 6/9/10 evidence in
@@ -143,13 +152,19 @@ prerequisite for finishing stage 2.
   `ice_creds` now carries `unified` — answering open question 4 (which
   mode real seats describe) even when PLAY fails.
 
-### R3-C — SCTP over DTLS (usrsctp) + the rtcp1 channel
-* Vendor usrsctp (BOOTSTRAP's R3 choice) behind the third_party model;
-  open the `rtcp1` data channel (RTCP feedback for the video stream —
-  without it the rig may degrade/stop the stream; :411) and the input
-  channels (text/HID — feeds the stage-4 TUI).
-* This phase also unlocks sending the NACK-v2/IDR/RFI encoders that
-  kn_rx already produces (Next steps 6).
+### R3-C — SCTP over DTLS (usrsctp) + the rtcp1 channel — **SHIPPED (round XXXIII)**
+* DELIVERED: vendored usrsctp (pinned tarball + SHA-256, the mbedTLS
+  model) behind `kn_sctp` in AF_CONN mode; the association + ALL 8
+  channels of the profile (incl. `rtcp_on_sctp_private`, sid 14 — "a
+  must for One SDK video", :411) open on COMM_UP inside the pump
+  thread; the full record (wire parameters, the thread map, the SEVEN
+  measured usrsctp landmines, deviations D-t4..D-t7, the independent
+  Python reference + the 33-check suite) is **docs/SCTP.md**.
+* STILL OPEN within R3-C's scope (stage 3 proper): SENDING on the
+  channels — the kn_rx NACK-v2/IDR/RFI encoders over sid 14, RTCP RRs,
+  the input channels (text/HID — feeds the stage-4 TUI), and the
+  interpretation of whatever the rig sends (run 15's `sctp_first*`
+  capture is the design input).
 
 ### R3-D — WS control pings (small; ships with the media phase)
 * kn_ws gains an outbound PING (sequence-numbered) at the reference's

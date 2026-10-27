@@ -31,6 +31,7 @@
 #include "kn/kn_audio.h"
 #include "kn/kn_cert.h"
 #include "kn/kn_dtls.h"
+#include "kn/kn_sctp.h"
 #include "kn/kn_cm.h"
 #include "kn/kn_d3d.h"
 #include "kn/kn_decode.h"
@@ -93,6 +94,10 @@ static void usage(void)
            "         [--session-seconds=N] [--session-queue-timeout=N]\n"
            "         [--session-keep]  (leave the cloud session alive on abort\n"
            "                           so the GFN web UI can RESUME it)\n"
+           "         [--session-play-wait=N]   (ms to wait for DTLS+SCTP up\n"
+           "                                    before PLAY; default 2500)\n"
+           "         [--session-play-settle=N] (extra ms after sctp_up before\n"
+           "                                    PLAY; default 250)\n"
            "         [--session-expect-frames=N] [--session-au-dir=DIR]\n"
            "       [--log-dir=DIR]   (WASAPI synthetic PCM unless --no-audio)\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
@@ -2265,6 +2270,17 @@ typedef struct {
     unsigned dtls_app_records, dtls_app_bytes, dtls_first_app_len;
     uint8_t  dtls_first_app[64];
     unsigned vid_ka_sent;
+    /* round XXXIII (R3-C): the SCTP association over the DTLS app
+     * layer (run 14: the rig sends NO app data itself and answers PLAY
+     * 400 without our INIT — start_sctp(true) is the client's job,
+     * nvst.rs:8221) */
+    unsigned sctp_armed, sctp_up, sctp_fail;
+    unsigned sctp_opened, sctp_acked;      /* our OPENs sent / ACKed */
+    unsigned sctp_rig_opened, sctp_rig_acked; /* rig's OPENs / our ACKs */
+    unsigned sctp_msgs_in;                 /* non-DCEP rig messages */
+    unsigned sctp_first_sid, sctp_first_ppi, sctp_first_len;
+    uint8_t  sctp_first[16];               /* the first rig message head */
+    uint64_t sctp_up_ms;
     uint64_t pump_ms;
 } sess_ice_stats;
 
@@ -2299,6 +2315,11 @@ typedef struct {
      * main frees it AFTER the join — single-owner discipline). NULL =
      * not armed (honest STUN/NATT-only pumping, like runs 9-12). */
     struct kn_dtls *dtls;
+    /* R3-C: the SCTP association (created by the thread the moment
+     * DTLS goes ready; closed by main after the join — same single-
+     * owner contract as dtls) */
+    struct kn_sctp *sctp;
+    int sctp_tried;
     /* Round XXXII: the pre-PLAY Mjolnir NATT keepalive — the reference
      * arms BOTH workers before finish()/PLAY (lib.rs:937/:990): the
      * bundle worker (STUN+DTLS, above) AND the raw video worker whose
@@ -2338,6 +2359,114 @@ static void pump_set_str(char *dst, size_t dstsz, const char *src)
     if (n >= dstsz) n = dstsz - 1;
     memcpy(dst, src, n);
     dst[n] = '\0';
+}
+
+/* ---- round XXXIII (R3-C): the SCTP layer inside the pump thread ----
+ * The reference's bundle worker, the instant DTLS connects:
+ *   Event::Connected -> dtls_ready = true -> start_sctp(true) ->
+ *   NvstInputChannels::create (nvst.rs:8214-8233) — the CLIENT
+ *   initiates the association and opens the 8-channel NVST profile.
+ * Run 14 measured the rig waiting for exactly this: it sent no app
+ * data itself (app_records:0) and answered PLAY with an explicit 400.
+ * Wire path: usrsctp AF_CONN -> kn_sctp tx queue (thread boundary) ->
+ * kn_dtls_write_app -> the bundle socket; inbound: the pump's DTLS
+ * demux -> kn_dtls app ring -> kn_sctp_inject. */
+static int sess_sctp_write(void *ctx, const uint8_t *data, size_t len)
+{
+    sess_pump *p = (sess_pump *)ctx;
+    if (!p->dtls) return -1;
+    return kn_dtls_write_app(p->dtls, data, len) == KN_DTLS_OK ? 0 : -1;
+}
+
+static void sess_sctp_msg(void *ctx, uint16_t sid, uint16_t ssn,
+                          uint32_t ppi, int unordered,
+                          const uint8_t *data, size_t len)
+{
+    sess_pump *p = (sess_pump *)ctx;
+    (void)ssn; (void)unordered;
+    if (ppi == KN_SCTP_PPI_DCEP && len >= 1) {
+        if (data[0] == KN_SCTP_DCEP_MSG_OPEN) {
+            /* the rig opened a channel toward us: answer with the ACK
+             * (str0m sctp/mod.rs:1046-1060 does exactly this) */
+            uint8_t ack[4];
+            size_t alen = 0;
+            p->st.sctp_rig_opened++;
+            if (kn_sctp_dcep_ack_build(ack, sizeof ack, &alen) ==
+                    KN_SCTP_OK &&
+                kn_sctp_send(p->sctp, sid, KN_SCTP_PPI_DCEP, 1,
+                             ack, alen) == KN_SCTP_OK)
+                p->st.sctp_rig_acked++;
+            return;
+        }
+        if (data[0] == KN_SCTP_DCEP_MSG_ACK) {
+            p->st.sctp_acked++;
+            if (p->st.sctp_acked == p->st.sctp_opened &&
+                p->st.sctp_opened > 0) {
+                printf("{\"mode\":\"session\",\"event\":\"sctp_channels\","
+                       "\"opened\":%u,\"acked\":%u,\"rig_opened\":%u}\n",
+                       p->st.sctp_opened, p->st.sctp_acked,
+                       p->st.sctp_rig_opened);
+                fflush(stdout);
+            }
+            return;
+        }
+    }
+    /* any other message: the rig's control/rtcp payload — stage 3+
+     * interprets it; until then capture the first one's head as
+     * evidence (never silently dropped, the D-t4 discipline) */
+    p->st.sctp_msgs_in++;
+    if (p->st.sctp_first_len == 0 && p->st.sctp_first_ppi == 0) {
+        size_t c = len < sizeof p->st.sctp_first
+                       ? len : sizeof p->st.sctp_first;
+        memcpy(p->st.sctp_first, data, c);
+        p->st.sctp_first_sid = sid;
+        p->st.sctp_first_ppi = ppi;
+        p->st.sctp_first_len = (unsigned)len;
+    }
+}
+
+static void sess_sctp_event(void *ctx, int established)
+{
+    sess_pump *p = (sess_pump *)ctx;
+    if (established) {
+        int n;
+        if (p->st.sctp_up) return;         /* COMM_UP is one-shot here */
+        p->st.sctp_up = 1;
+        p->st.sctp_up_ms = kn_sctp_up_ms(p->sctp);
+        printf("{\"mode\":\"session\",\"event\":\"sctp_up\","
+               "\"ms\":%llu}\n",
+               (unsigned long long)p->st.sctp_up_ms);
+        fflush(stdout);
+        /* the reference opens the channels the instant the association
+         * is up (nvst.rs:8224-8233) */
+        n = kn_sctp_open_channels(p->sctp, kn_sctp_nvst_channels,
+                                  KN_SCTP_NVST_N_CHANNELS);
+        p->st.sctp_opened = (unsigned)n;
+    } else {
+        printf("{\"mode\":\"session\",\"event\":\"sctp_down\"}\n");
+        fflush(stdout);
+    }
+}
+
+/* one pump pass of the SCTP layer: DTLS app ring -> inject -> poll
+ * (flushes tx through sess_sctp_write, up-calls msgs/events) */
+static void sess_sctp_service(sess_pump *p)
+{
+    uint8_t abuf[KN_DTLS_MAX_RECORD];
+    size_t alen = 0;
+    int guard = 0;
+    while (kn_dtls_read_app(p->dtls, abuf, sizeof abuf, &alen) == 1 &&
+           ++guard < 64)
+        (void)kn_sctp_inject(p->sctp, abuf, alen);
+    if (kn_sctp_poll(p->sctp, sess_sctp_msg, p,
+                     sess_sctp_event, p) == KN_SCTP_ERR_LOST)
+        p->st.sctp_fail = 1;
+    {   /* mirror the counters for the snapshot / evidence lines */
+        kn_sctp_stats ss;
+        kn_sctp_stats_get(p->sctp, &ss);
+        p->st.sctp_msgs_in = ss.msgs_in;
+        if (ss.lost) p->st.sctp_fail = 1;
+    }
 }
 
 static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
@@ -2481,9 +2610,9 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
                 }
             }
         } else if (p->dtls && p->st.dtls_ready) {
-            /* keep the established session serviced: drains app records
-             * (the rig's SCTP until R3-C — counted, D-t4) and lets
-             * mbedTLS answer any post-handshake traffic */
+            /* keep the established DTLS session serviced: poll (drains
+             * app records into the ring, answers post-handshake
+             * traffic), then hand the ring to the SCTP layer (R3-C) */
             kn_dtls_stats ds;
             (void)kn_dtls_poll(p->dtls);
             kn_dtls_stats_get(p->dtls, &ds);
@@ -2494,6 +2623,21 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
             p->st.dtls_first_app_len = ds.first_app_len;
             memcpy(p->st.dtls_first_app, ds.first_app,
                    sizeof p->st.dtls_first_app);
+            if (!p->sctp && !p->sctp_tried) {
+                char serr[160];
+                p->sctp_tried = 1;
+                serr[0] = '\0';
+                p->sctp = kn_sctp_open(sess_sctp_write, p,
+                                       serr, sizeof serr);
+                p->st.sctp_armed = p->sctp ? 1u : 0u;
+                if (!p->sctp) p->st.sctp_fail = 2;
+                printf("{\"mode\":\"session\",\"event\":\"sctp_arm\","
+                       "\"armed\":%d,\"detail\":\"%.120s\"}\n",
+                       p->sctp ? 1 : 0, serr);
+                fflush(stdout);
+            }
+            if (p->sctp)
+                sess_sctp_service(p);
         }
         {   /* drain inbound: answer the rig's binding requests, count
              * its binding successes (handle_stun_datagram :5151-5172),
@@ -2883,7 +3027,8 @@ static int run_session(const char *token, const char *device_id,
                        long long app_id, const char *title,
                        const char *cm_host, long seconds,
                        long queue_timeout, int keep_on_abort,
-                       long expect_frames,
+                       long expect_frames, long play_wait_ms,
+                       long play_settle_ms,
                        const char *au_dir, const char *log_dir)
 {
     static uint8_t cm_rxb[64 * 1024];
@@ -3827,15 +3972,36 @@ static int run_session(const char *token, const char *device_id,
                                   ice_remote_ufrag, desc.remote_password,
                                   ufrag, pwd, ice_natt, pkt, sizeof pkt,
                                   400u, &pump.st);
-                else
+                else {
                     /* round XXIX warm-up: guarantee PLAY never lands
-                     * before the first bursts — and since round XXXI it
-                     * also gives the DTLS arm its first real-STUN gate
-                     * a window to fire, so the ClientHello is on the
-                     * wire before/while PLAY is in flight (the
-                     * reference's receiver is tens of ms ahead of
-                     * finish() by construction, lib.rs:894->1117). */
-                    sess_sleep(400u, NULL);
+                     * before the first bursts; round XXXIII: then WAIT
+                     * (bounded) for the DTLS handshake AND the SCTP
+                     * association before PLAY — runs 13/14 sent PLAY
+                     * ~12 ms after dtls_ready with zero SCTP and drew
+                     * the rig's explicit 400. The reference's finish()
+                     * lands only after its engine plumbing gave the
+                     * receivers a head start (lib.rs:937 -> :1117),
+                     * with start_sctp(true) firing AT dtls_ready
+                     * (:8221). Bounded on purpose: a dead DTLS/SCTP
+                     * must never eat the PLAY budget — PLAY is still
+                     * attempted (deviation D-t5, both knobs tunable). */
+                    sess_ice_stats gsnap;
+                    uint64_t t_wait = kn_sock_now_ms();
+                    sess_sleep(100u, NULL);      /* first-burst head start */
+                    for (;;) {
+                        sess_pump_snapshot(&pump, &gsnap);
+                        if (gsnap.sctp_up || gsnap.dtls_fail_rc ||
+                            gsnap.sctp_fail || g_knv_stop)
+                            break;
+                        if (play_wait_ms >= 0 &&
+                            kn_sock_now_ms() - t_wait >=
+                                (uint64_t)play_wait_ms)
+                            break;
+                        sess_sleep(25u, NULL);
+                    }
+                    if (gsnap.sctp_up && play_settle_ms > 0)
+                        sess_sleep((uint32_t)play_settle_ms, NULL);
+                }
             }
             rc = kn_rtsp_request(&rtc, "PLAY", sess.rtsps_endpoint,
                                  ah, 4, NULL, 0, 0, &resp);
@@ -3868,6 +4034,7 @@ static int run_session(const char *token, const char *device_id,
                                          * cannot bound hex digits at
                                          * 16 (they are); the slack
                                          * silences the over-approx */
+            char sctp_hex[4 * 16 + 1];
             {   /* the first app record's captured head, as hex (the
                  * rig's post-DTLS message — R3-C's design input) */
                 static const char hx[] = "0123456789abcdef";
@@ -3878,6 +4045,13 @@ static int run_session(const char *token, const char *device_id,
                     app_hex[2 * hb + 1] = hx[ice_st.dtls_first_app[hb] & 0xFu];
                 }
                 app_hex[2 * hn] = '\0';
+                hn = ice_st.sctp_first_len;
+                if (hn > 16) hn = 16;
+                for (hb = 0; hb < hn; ++hb) {
+                    sctp_hex[2 * hb]     = hx[ice_st.sctp_first[hb] >> 4];
+                    sctp_hex[2 * hb + 1] = hx[ice_st.sctp_first[hb] & 0xFu];
+                }
+                sctp_hex[2 * hn] = '\0';
             }
             printf("{\"mode\":\"session\",\"event\":\"ice_preplay\","
                    "\"stun_sent\":%u,\"natt_sent\":%u,\"req_in\":%u,"
@@ -3888,7 +4062,13 @@ static int run_session(const char *token, const char *device_id,
                    "\"dtls_ready\":%u,\"dtls_ms\":%llu,\"dtls_in\":%u,"
                    "\"dtls_out\":%u,\"dtls_fail_rc\":%u,\"vid_ka\":%u,"
                    "\"app_records\":%u,\"app_bytes\":%u,"
-                   "\"app_first_len\":%u,\"app_first\":\"%s\"}\n",
+                   "\"app_first_len\":%u,\"app_first\":\"%s\","
+                   "\"sctp_armed\":%u,\"sctp_up\":%u,\"sctp_ms\":%llu,"
+                   "\"sctp_opened\":%u,\"sctp_acked\":%u,"
+                   "\"sctp_rig_opened\":%u,\"sctp_msgs_in\":%u,"
+                   "\"sctp_fail\":%u,\"sctp_first_sid\":%u,"
+                   "\"sctp_first_ppi\":%u,\"sctp_first_len\":%u,"
+                   "\"sctp_first\":\"%s\"}\n",
                    ice_st.stun_sent, ice_st.natt_sent, ice_st.req_in,
                    ice_st.answered, ice_st.ok_in, ice_st.invalid_in,
                    ice_st.send_errors, ice_st.pongs_sent,
@@ -3900,7 +4080,14 @@ static int run_session(const char *token, const char *device_id,
                    ice_st.dtls_in, ice_st.dtls_out, ice_st.dtls_fail_rc,
                    ice_st.vid_ka_sent, ice_st.dtls_app_records,
                    ice_st.dtls_app_bytes, ice_st.dtls_first_app_len,
-                   app_hex);
+                   app_hex,
+                   ice_st.sctp_armed, ice_st.sctp_up,
+                   (unsigned long long)ice_st.sctp_up_ms,
+                   ice_st.sctp_opened, ice_st.sctp_acked,
+                   ice_st.sctp_rig_opened, ice_st.sctp_msgs_in,
+                   ice_st.sctp_fail, ice_st.sctp_first_sid,
+                   ice_st.sctp_first_ppi, ice_st.sctp_first_len,
+                   sctp_hex);
             fflush(stdout);
         }
         if (!desc.disable_play && (rc != KN_RTSP_OK || resp.status != 200)) {
@@ -4269,9 +4456,11 @@ static int run_session(const char *token, const char *device_id,
         c.stream = NULL;
         free(arena);
         arena = NULL;
-        /* R3-B stop order: join the bundle worker FIRST (it owns bsock
-         * and the dtls context while running), then free/close */
+        /* R3-B/C stop order: join the bundle worker FIRST (it owns
+         * bsock, the dtls + sctp contexts while running), then close
+         * sctp (its write path is dtls), then free dtls, then sockets */
         sess_pump_stop(&pump);
+        if (pump.sctp) { kn_sctp_close(pump.sctp); pump.sctp = NULL; }
         if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
         if (have_sock)  { kn_sock_udp_close(&sock);  have_sock = 0; }
         if (have_bsock) { kn_sock_udp_close(&bsock); have_bsock = 0; }
@@ -4279,6 +4468,7 @@ static int run_session(const char *token, const char *device_id,
 
     teardown_sock:
         sess_pump_stop(&pump);          /* idempotent (started flag) */
+        if (pump.sctp) { kn_sctp_close(pump.sctp); pump.sctp = NULL; }
         if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
         if (have_sock)  { kn_sock_udp_close(&sock);  have_sock = 0; }
         if (have_bsock) { kn_sock_udp_close(&bsock); have_bsock = 0; }
@@ -4345,6 +4535,11 @@ int main(int argc, char **argv)
      * 160+ deep; 180 s risked aborting a legitimate wait (the abort now
      * also cancels the session, but a seat is a seat) */
     long sess_seconds = 60, sess_queue_timeout = 600, sess_expect = 0;
+    long sess_play_wait = 2500, sess_play_settle = 250;   /* round XXXIII
+        PLAY gating: the reference's finish() lands after its receiver
+        plumbing gave DTLS+SCTP a head start (lib.rs:937->1117); runs
+        13/14 sent PLAY ~12 ms after dtls_ready and drew 400. A bounded
+        wait for sctp_up + a settle window remove the timing confound. */
     long cap_port = 4798, dec_port = 4798;
     long cap_seconds = 30, dec_seconds = 30;
     long dec_vps = 0, dec_expect = 0;
@@ -4407,6 +4602,10 @@ int main(int argc, char **argv)
             sess_seconds = strtol(a + 18, NULL, 10);
         else if (strncmp(a, "--session-queue-timeout=", 24) == 0)
             sess_queue_timeout = strtol(a + 24, NULL, 10);
+        else if (strncmp(a, "--session-play-wait=", 20) == 0)
+            sess_play_wait = strtol(a + 20, NULL, 10);
+        else if (strncmp(a, "--session-play-settle=", 22) == 0)
+            sess_play_settle = strtol(a + 22, NULL, 10);
         else if (strncmp(a, "--session-expect-frames=", 24) == 0)
             sess_expect = strtol(a + 24, NULL, 10);
         else if (strncmp(a, "--session-au-dir=", 17) == 0)
@@ -4454,7 +4653,8 @@ int main(int argc, char **argv)
                            sess_cm_host && sess_cm_host[0] ? sess_cm_host
                                : KN_CM_DEFAULT_BASE_HOST,
                            sess_seconds, sess_queue_timeout, sess_keep,
-                           sess_expect, sess_au_dir, log_dir);
+                           sess_expect, sess_play_wait, sess_play_settle,
+                           sess_au_dir, log_dir);
     }
     if (diagnostics) return run_diagnostics(log_dir);
     usage();

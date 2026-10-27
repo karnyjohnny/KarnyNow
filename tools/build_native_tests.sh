@@ -21,6 +21,7 @@ KNCORE="streamer/src/knlog.c streamer/src/knring.c streamer/src/knfec.c \
     streamer/src/kn_ws.c streamer/src/kn_rtsp.c \
     streamer/src/kn_json.c streamer/src/kn_http.c streamer/src/kn_cm.c \
     streamer/src/kn_cert.c streamer/src/kn_dtls.c \
+    streamer/src/kn_sctp.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
 $CC $CFLAGS $KNCORE streamer/tests/test_knlog.c -o build/test_knlog -pthread -lm
 $CC $CFLAGS $KNCORE streamer/tests/test_knring.c -o build/test_knring -pthread -lm
@@ -50,6 +51,8 @@ $CC $CFLAGS streamer/src/kn_cert.c streamer/tests/test_kncert.c \
 $CC $CFLAGS streamer/src/kn_dtls.c streamer/src/kn_sock.c streamer/src/kn_sha1.c \
     third_party/crypto-algorithms-sha1/sha1.c streamer/tests/test_kndtls.c \
     -o build/test_kndtls
+$CC $CFLAGS streamer/src/kn_sctp.c streamer/tests/test_knsctp.c \
+    -o build/test_knsctp
 $CC $CFLAGS $KNCORE streamer/src/knvstd_main.c -o build/knvstd -pthread -lm
 # round XXVII permanent gate (the T10-r20 target catch): GCC 16.2 flags
 # -Wunused-but-set-variable which sandbox GCC 12 does NOT put in -Wall;
@@ -128,6 +131,10 @@ echo "== run test_kndtls (stub mode here; the REAL DTLS handshake battery runs v
 rc19=0
 ./build/test_kndtls || rc19=$?
 
+echo "== run test_knsctp (stub mode here; the REAL usrsctp battery runs via ctest/T10 when third_party/usrsctp exists) =="
+rc20=0
+./build/test_knsctp || rc20=$?
+
 echo "== knvstd smoke: --list-selftests + --selftest=fec.vectors =="
 rc9=0
 ./build/knvstd --list-selftests > knvstd_list.json || rc9=$?
@@ -164,10 +171,10 @@ if [ $rc1 -eq 0 ] && [ $rc2 -eq 0 ] && [ $rc3 -eq 0 ] && [ $rc4 -eq 0 ] && \
    [ $rc9 -eq 0 ] && [ $rc10 -eq 0 ] && [ $rcff -eq 0 ] && [ $rc11 -eq 0 ] && \
    [ $rc12 -eq 0 ] && [ $rc13 -eq 0 ] && [ $rc14 -eq 0 ] && \
    [ $rc15 -eq 0 ] && [ $rc16 -eq 0 ] && [ $rc17 -eq 0 ] && [ $rc18 -eq 0 ] && \
-   [ $rc19 -eq 0 ]; then
+   [ $rc19 -eq 0 ] && [ $rc20 -eq 0 ]; then
     echo "NATIVE TESTS PASS"
 else
-    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19)"
+    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19 knsctp=$rc20)"
     exit 1
 fi
 

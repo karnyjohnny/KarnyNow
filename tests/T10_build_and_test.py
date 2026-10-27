@@ -267,6 +267,52 @@ def ensure_mbedtls_source(results):
         shutil.rmtree(stage, ignore_errors=True)
 
 
+USRSCTP_COMMIT = "c625e21950600460cb5c6075616eb1622df2b06a"
+USRSCTP_SHA256 = ("090b9d03bf068ce5989576c8e0ff6979d3031ea85e405acd"
+                  "263206f19166b41e")
+
+
+def ensure_usrsctp_source(results):
+    """Fetch the pinned usrsctp source (R3-C, the kn_sctp backend).
+
+    Same discipline as mbedTLS: a pinned commit tarball, SHA-256
+    verified before extraction, gitignored tree. CMake auto-detects the
+    directory; without it every build gets the honest kn_sctp stub and
+    test_knsctp runs its stub contract (still a PASS, but the target
+    expectation of the REAL battery would be silently unmet — so the
+    download failure is gated like mbedtls)."""
+    source = os.path.join(ROOT, "third_party", "usrsctp")
+    marker = os.path.join(source, "usrsctplib", "usrsctp.h")
+    if os.path.isfile(marker):
+        check(True, results, "usrsctp source already present")
+        return True
+    vendor_root = os.path.join(ROOT, "third_party")
+    stage = tempfile.mkdtemp(prefix="usrsctp-stage-", dir=vendor_root)
+    staged = os.path.join(stage, "usrsctp")
+    try:
+        _extract_pinned_tarball(
+            "https://codeload.github.com/sctplab/usrsctp/tar.gz/"
+            + USRSCTP_COMMIT,
+            USRSCTP_SHA256, staged)
+        if not os.path.isfile(os.path.join(staged, "usrsctplib",
+                                           "usrsctp.h")):
+            raise ValueError("downloaded tree lacks usrsctplib/usrsctp.h")
+        if os.path.exists(source):
+            raise ValueError(
+                "incomplete third_party/usrsctp exists; left untouched")
+        os.rename(staged, source)
+        check(True, results,
+              "pinned usrsctp source (%s) downloaded and verified"
+              % USRSCTP_COMMIT[:12])
+        return True
+    except (OSError, urllib.error.URLError, tarfile.TarError,
+            ValueError) as exc:
+        check(False, results, "usrsctp source available (%s)" % exc)
+        return False
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
 def net_tls_finding(ev):
     """Render the per-host measurements available in the selected TLS probe."""
     if not isinstance(ev, dict):
@@ -294,7 +340,9 @@ def main():
           "TLS backend is supported (%s)" % TLS_BACKEND)
     if TLS_BACKEND == "mbedtls":
         tls_backend_ok = ensure_mbedtls_source(results) and tls_backend_ok
-    dependencies_ok = dependencies_ok and tls_backend_ok
+    sctp_backend_ok = ensure_usrsctp_source(results)
+    dependencies_ok = (dependencies_ok and tls_backend_ok
+                       and sctp_backend_ok)
 
     # ---- 0. toolchain ------------------------------------------------
     log("\n=== toolchain ===")
@@ -369,7 +417,7 @@ def main():
     suites = ["test_knlog", "test_knring", "test_knfec", "test_knsrtp",
               "test_kndiag", "test_knselftest", "test_kngs", "test_knaudio",
               "test_knrx", "test_knsock", "test_knws", "test_knrtsp",
-              "test_kncm", "test_kncert", "test_kndtls"]
+              "test_kncm", "test_kncert", "test_kndtls", "test_knsctp"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out

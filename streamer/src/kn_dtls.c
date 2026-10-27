@@ -63,6 +63,13 @@ struct kn_dtls {
     uint16_t qlen[KN_DTLS_QUEUE_SLOTS];
     unsigned q_head, q_count;
 
+    /* R3-C: decrypted app records, drained by kn_dtls_read_app (the
+     * SCTP feed). Same single-owner discipline: the pump thread fills
+     * (inside poll) and empties it. */
+    uint8_t  appq[KN_DTLS_APPQ_SLOTS][KN_DTLS_MAX_RECORD];
+    uint16_t applen[KN_DTLS_APPQ_SLOTS];
+    unsigned app_head, app_count;
+
     /* state */
     int      ready;
     int      pin_matched;     /* verify cb saw SHA-256(der) == pin */
@@ -227,6 +234,18 @@ static void dtls_drain_app(kn_dtls *d)
                 memcpy(d->st.first_app, buf, cap);
                 d->st.first_app_len = (unsigned)n;
             }
+            /* R3-C: hand it to the app ring for kn_dtls_read_app (the
+             * SCTP feed). A full ring drops NEW records, counted —
+             * SCTP's own retransmission recovers the loss. */
+            if (d->app_count < KN_DTLS_APPQ_SLOTS) {
+                unsigned slot = (d->app_head + d->app_count)
+                                % KN_DTLS_APPQ_SLOTS;
+                memcpy(d->appq[slot], buf, (size_t)n);
+                d->applen[slot] = (uint16_t)n;
+                d->app_count++;
+            } else {
+                d->st.app_q_dropped++;
+            }
             continue;
         }
         if (n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
@@ -347,6 +366,16 @@ int kn_dtls_inject(kn_dtls *d, const uint8_t *data, size_t len)
 {
     unsigned slot;
     if (!d || !data || len == 0) return KN_DTLS_ERR_ARGS;
+    /* round XXXIII: run 14's mystery record — the FIRST datagram
+     * injected after ready is captured at the wire level (its record
+     * header names it: ContentType 20/21/22/23). Post-ready only; the
+     * handshake's own records are not interesting here. */
+    if (d->ready && d->st.first_post_ready_len == 0) {
+        size_t cap = len < sizeof d->st.first_post_ready
+                         ? len : sizeof d->st.first_post_ready;
+        memcpy(d->st.first_post_ready, data, cap);
+        d->st.first_post_ready_len = (unsigned)len;
+    }
     if (len > KN_DTLS_MAX_RECORD) {
         d->st.records_dropped++;
         return KN_DTLS_ERR_ARGS;        /* oversize: never a real record */
@@ -410,6 +439,47 @@ int kn_dtls_poll(kn_dtls *d)
 }
 
 int kn_dtls_ready(const kn_dtls *d) { return (d && d->ready) ? 1 : 0; }
+
+int kn_dtls_write_app(kn_dtls *d, const uint8_t *data, size_t len)
+{
+    int n;
+    if (!d || !data || len == 0) return KN_DTLS_ERR_ARGS;
+    if (!d->ready) return KN_DTLS_ERR_STATE;
+    if (d->fatal) return d->fatal;
+    if (len > KN_DTLS_MAX_RECORD) return KN_DTLS_ERR_ARGS;
+    n = mbedtls_ssl_write(&d->ssl, data, len);
+    if (n < 0) {
+        if (n == MBEDTLS_ERR_SSL_WANT_WRITE) return KN_DTLS_OK; /* retry
+            on the next poll — our BIO send never blocks, this is
+            belt-and-braces */
+        d->st.last_rc = n;
+        d->st.send_errors++;
+        d->fatal = KN_DTLS_ERR_IO;
+        return KN_DTLS_ERR_IO;
+    }
+    if ((size_t)n != len) {
+        /* partial write: mbedTLS does this only mid-record; treat as
+         * an IO failure honestly rather than corrupting the stream */
+        d->fatal = KN_DTLS_ERR_IO;
+        return KN_DTLS_ERR_IO;
+    }
+    return KN_DTLS_OK;
+}
+
+int kn_dtls_read_app(kn_dtls *d, uint8_t *buf, size_t cap, size_t *out_len)
+{
+    size_t n;
+    if (!d || !buf || !out_len) return KN_DTLS_ERR_ARGS;
+    if (d->app_count == 0) return 0;
+    n = d->applen[d->app_head];
+    if (n > cap) return KN_DTLS_ERR_ARGS;   /* caller buffer too small —
+                                               the record stays queued */
+    memcpy(buf, d->appq[d->app_head], n);
+    d->app_head = (d->app_head + 1u) % KN_DTLS_APPQ_SLOTS;
+    d->app_count--;
+    *out_len = n;
+    return 1;
+}
 
 const char *kn_dtls_version(const kn_dtls *d)
 {
@@ -487,6 +557,18 @@ int kn_dtls_inject(kn_dtls *d, const uint8_t *data, size_t len)
 
 int kn_dtls_poll(kn_dtls *d) { (void)d; return KN_DTLS_ERR_STATE; }
 int kn_dtls_ready(const kn_dtls *d) { (void)d; return 0; }
+
+int kn_dtls_write_app(kn_dtls *d, const uint8_t *data, size_t len)
+{
+    (void)d; (void)data; (void)len;
+    return KN_DTLS_ERR_STATE;
+}
+
+int kn_dtls_read_app(kn_dtls *d, uint8_t *buf, size_t cap, size_t *out_len)
+{
+    (void)d; (void)buf; (void)cap; (void)out_len;
+    return KN_DTLS_ERR_STATE;
+}
 const char *kn_dtls_version(const kn_dtls *d) { (void)d; return ""; }
 
 int kn_dtls_ciphersuite(const kn_dtls *d, char *out, size_t outsz)

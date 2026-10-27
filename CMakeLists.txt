@@ -52,6 +52,7 @@ add_library(kncore STATIC
   streamer/src/kn_cm.c
   streamer/src/kn_cert.c
   streamer/src/kn_dtls.c
+  streamer/src/kn_sctp.c
   third_party/tiny-aes-c/aes.c
   third_party/crypto-algorithms-sha1/sha1.c
 )
@@ -184,7 +185,7 @@ target_compile_definitions(kncore PRIVATE
   KN_DIAG_BUILD_EXTRA="${_kn_ffmpeg}")
 
 enable_testing()
-foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert kndtls)
+foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert kndtls knsctp)
   add_executable(test_${t} streamer/tests/test_${t}.c)
   target_link_libraries(test_${t} PRIVATE kncore)
   # tests include the generated KAT vector headers, which live in src/
@@ -212,6 +213,34 @@ endif()
 # leg executes for real on the Linux host too.
 if(KN_TLS_BACKEND STREQUAL "mbedtls")
   target_compile_definitions(test_kndtls PRIVATE KN_TLS_BACKEND_MBEDTLS=1)
+endif()
+
+# Round XXXIII (R3-C): the vendored usrsctp static library — same model
+# as mbedTLS (pinned tarball fetched/verified by T10, gitignored tree).
+# The real kn_sctp body compiles when the tree exists, on BOTH platforms
+# (the round-XXII rule); without it every build gets the honest stub.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/usrsctp/usrsctplib/CMakeLists.txt")
+  set(sctp_debug 0 CACHE BOOL "" FORCE)
+  set(sctp_werror 0 CACHE BOOL "" FORCE)
+  set(sctp_invariants 0 CACHE BOOL "" FORCE)
+  set(sctp_build_programs 0 CACHE BOOL "" FORCE)
+  set(sctp_build_shared_lib 0 CACHE BOOL "" FORCE)
+  set(sctp_build_fuzzer 0 CACHE BOOL "" FORCE)
+  set(sctp_inet 1 CACHE BOOL "" FORCE)
+  set(sctp_inet6 0 CACHE BOOL "" FORCE)
+  add_subdirectory(third_party/usrsctp EXCLUDE_FROM_ALL)
+  # Vendored code: ALL warnings off for the usrsctp target only (the
+  # project's zero-warning gate is for OUR code; the mbedtls precedent).
+  target_compile_options(usrsctp PRIVATE -w)
+  target_compile_definitions(kncore PRIVATE KN_SCTP_BACKEND_USRSCTP=1)
+  target_link_libraries(kncore PUBLIC usrsctp)
+  if(WIN32)
+    target_link_libraries(usrsctp PUBLIC ws2_32)
+  endif()
+  target_compile_definitions(test_knsctp PRIVATE KN_SCTP_BACKEND_USRSCTP=1)
+  message(STATUS "kn_sctp: usrsctp backend ENABLED (third_party/usrsctp)")
+else()
+  message(STATUS "kn_sctp: usrsctp tree absent — honest stub build")
 endif()
 
 # knvstd — the streamer executable. Pre-stage-1 skeleton: --selftest,
