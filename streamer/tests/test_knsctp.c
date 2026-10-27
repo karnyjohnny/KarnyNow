@@ -177,6 +177,10 @@ static void test_dcep_goldens(void)
         size_t i5;
         int cok = 1;
         t_sctp_pkt p;
+        memset(&p, 0, sizeof p);   /* target GCC 16.2 -Wmaybe-
+                                     uninitialized: t_parse fills the INIT
+                                     fields conditionally (the round-XXVII
+                                     warning-class discipline) */
         for (i5 = 0; i5 < KN_SCTP_KAT_N_CRC32C; ++i5) {
             if (t_crc32c((const uint8_t *)kn_sctp_kat_crc32c[i5].in,
                          strlen(kn_sctp_kat_crc32c[i5].in)) !=
@@ -390,6 +394,10 @@ static void test_real_mode(void)
                           "(fire-and-forget on open, like start_sctp)");
         if (cap.n >= 1) {
             t_sctp_pkt p;
+        memset(&p, 0, sizeof p);   /* target GCC 16.2 -Wmaybe-
+                                     uninitialized: t_parse fills the INIT
+                                     fields conditionally (the round-XXVII
+                                     warning-class discipline) */
             int prc = t_parse(cap.pkts[0], cap.lens[0], &p);
             CHECK(prc == 0 && t_pkt_crc_ok(cap.pkts[0], cap.lens[0]),
                   "the live INIT packet passes the INDEPENDENT parser "

@@ -45,6 +45,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     # gitignored; T10/prepare scripts fetch it, CI-less sandboxes skip.
     if [ -d third_party/mbedtls/include/mbedtls ]; then
         $CC $CFLAGS -DKN_TLS_BACKEND_MBEDTLS=1 -Ithird_party/mbedtls/include \
+            '-DMBEDTLS_USER_CONFIG_FILE="kn_mbedtls_user_config.h"' \
             -c streamer/src/kn_net_mbedtls.c -o build/cross/kn_net_mbedtls_$arch.o
     else
         echo "SKIP kn_net_mbedtls cross-compile (third_party/mbedtls absent)"
@@ -60,6 +61,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     # flag set whenever the mbedTLS tree exists (the round-XXII rule)
     if [ -d third_party/mbedtls/include/mbedtls ]; then
         $CC $CFLAGS -DKN_TLS_BACKEND_MBEDTLS=1 -Ithird_party/mbedtls/include \
+            '-DMBEDTLS_USER_CONFIG_FILE="kn_mbedtls_user_config.h"' \
             -c streamer/src/kn_cert.c -o build/cross/kn_cert_real_$arch.o
     else
         echo "SKIP kn_cert real-body cross-compile (third_party/mbedtls absent)"
@@ -104,8 +106,10 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     # the sandbox shell gates never define the backend)
     if [ -d third_party/mbedtls/include/mbedtls ]; then
         $CC $CFLAGS -DKN_TLS_BACKEND_MBEDTLS=1 -Ithird_party/mbedtls/include \
+            '-DMBEDTLS_USER_CONFIG_FILE="kn_mbedtls_user_config.h"' \
             -c streamer/src/kn_dtls.c -o build/cross/kn_dtls_real_$arch.o
         $CC $CFLAGS -DKN_TLS_BACKEND_MBEDTLS=1 -Ithird_party/mbedtls/include \
+            '-DMBEDTLS_USER_CONFIG_FILE="kn_mbedtls_user_config.h"' \
             -c streamer/tests/test_kndtls.c -o build/cross/test_kndtls_real_$arch.o
     else
         echo "SKIP kn_dtls real-body cross-compile (third_party/mbedtls absent)"

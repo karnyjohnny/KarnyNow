@@ -173,6 +173,16 @@ int kn_dtls_ciphersuite(const kn_dtls *d, char *out, size_t outsz);
 /* Milliseconds between create and ready (0 before ready). */
 uint64_t kn_dtls_ready_ms(const kn_dtls *d);
 
+/* The negotiated DTLS-SRTP protection profile (RFC 5764 use_srtp;
+ * round XXXV / deviation D-t9): the IANA id (0x0001 =
+ * SRTP_AES128_CM_HMAC_SHA1_80 — the intersection of the reference's
+ * offer list and mbedTLS 3.6's ceiling), or 0 when not negotiated
+ * (a server without a common profile omits the extension — the
+ * handshake still completes; the test pins BOTH outcomes). The
+ * keying material itself is the audio stage's business (§7: shapes
+ * and ids in the log, never keys). */
+unsigned kn_dtls_srtp_profile(const kn_dtls *d);
+
 void kn_dtls_stats_get(const kn_dtls *d, kn_dtls_stats *out);
 
 void kn_dtls_free(kn_dtls *d);   /* free(NULL)-safe (NOT double-free —

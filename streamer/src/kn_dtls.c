@@ -341,6 +341,29 @@ kn_dtls *kn_dtls_client(kn_sock_udp *sock, uint32_t dest_ip,
      * chain check — the pin IS the policy. */
     mbedtls_ssl_conf_authmode(&d->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
     mbedtls_ssl_conf_verify(&d->conf, dtls_verify, d);
+#ifdef MBEDTLS_SSL_DTLS_SRTP
+    /* The use_srtp offer (round XXXV, D-t9): the reference's str0m
+     * offers [AEAD_AES_256_GCM 0x0008, AEAD_AES_128_GCM 0x0007,
+     * AES128_CM_SHA1_80 0x0001] and derives the bundle audio's SRTP
+     * keys from the DTLS session (KeyingMaterial). mbedTLS 3.6 tops
+     * out at the CM profiles — we offer the intersection, 0x0001, the
+     * mandatory WebRTC profile. No MKI (str0m uses none). A rig
+     * without a common profile simply omits the extension (RFC 5764)
+     * — the handshake is never put at risk (test-pinned). */
+    {
+        static const mbedtls_ssl_srtp_profile offer[] = {
+            MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
+            MBEDTLS_TLS_SRTP_UNSET
+        };
+        ret = mbedtls_ssl_conf_dtls_srtp_protection_profiles(&d->conf,
+                                                             offer);
+        if (ret != 0) {
+            kn_dtls_fail(err, errsz, "srtp profiles", ret);
+            kn_dtls_free(d);
+            return NULL;
+        }
+    }
+#endif
     /* the ANNOUNCE'd identity: the rig pins this certificate by the
      * fingerprint we already sent (start_dtls(true) = client-active,
      * nvst.rs:6300) */
@@ -505,6 +528,20 @@ uint64_t kn_dtls_ready_ms(const kn_dtls *d)
     return d->t_ready - d->t_create;
 }
 
+unsigned kn_dtls_srtp_profile(const kn_dtls *d)
+{
+#ifdef MBEDTLS_SSL_DTLS_SRTP
+    mbedtls_dtls_srtp_info info;
+    if (!d || !d->ready) return 0;
+    memset(&info, 0, sizeof info);
+    mbedtls_ssl_get_dtls_srtp_negotiation_result(&d->ssl, &info);
+    return (unsigned)info.MBEDTLS_PRIVATE(chosen_dtls_srtp_profile);
+#else
+    (void)d;
+    return 0;
+#endif
+}
+
 void kn_dtls_stats_get(const kn_dtls *d, kn_dtls_stats *out)
 {
     if (!d || !out) return;
@@ -579,6 +616,7 @@ int kn_dtls_ciphersuite(const kn_dtls *d, char *out, size_t outsz)
 }
 
 uint64_t kn_dtls_ready_ms(const kn_dtls *d) { (void)d; return 0; }
+unsigned kn_dtls_srtp_profile(const kn_dtls *d) { (void)d; return 0; }
 
 void kn_dtls_stats_get(const kn_dtls *d, kn_dtls_stats *out)
 {

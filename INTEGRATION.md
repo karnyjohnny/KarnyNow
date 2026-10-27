@@ -1,4 +1,196 @@
-# INTEGRATION NOTES — Round XXXIII delta, rev 23 (R7 run 14 = the 400 captured: empty body, echo headers, app_records:0 → the rig waits for OUR SCTP INIT → R3-C SHIPPED: kn_sctp on vendored usrsctp + the 8-channel DCEP profile + bounded PLAY gating)
+# INTEGRATION NOTES — Round XXXV delta, rev 25 (sandbox-only round between runs: the reference re-read found fidelity gap #2 — str0m negotiates DTLS-SRTP (use_srtp) and the bundle audio's keys come from it → MBEDTLS_SSL_DTLS_SRTP enabled via user-config, kn_dtls offers 0x0001 (D-t9), wire-pinned by an independent parser + negotiated through OpenSSL)
+
+> **Rev 25 supersedes rev 1-24.** Canonical state: `PROJECT-STATE.md`.
+> Design records: **`docs/RTSP.md` §22** (the finding + the shipped
+> delta + the run-16 two-hypothesis matrix), §21 (run 15 + the
+> nomination), `docs/SCTP.md`, `docs/DTLS.md` (Q3 updated).
+>
+> **Round XXXV headline: str0m's DTLS emits `KeyingMaterial(km,
+> profile)` right after Connected (vendor lib.rs:1648-1658 →
+> session.rs:259-272) — the reference's ClientHello carries the RFC
+> 5764 `use_srtp` extension, offering [AEAD_AES_256_GCM 0x0008,
+> AEAD_AES_128_GCM 0x0007, AES128_CM_SHA1_80 0x0001]
+> (crypto/srtp.rs ALL), and the bundle audio (rtcAudioOnNativeBundle:1
+> — which OUR announce mirrors) takes its SRTP keys from that
+> negotiation. Runs 13-15 sent NO use_srtp (D-t3). Shipped: mbedTLS's
+> MBEDTLS_SSL_DTLS_SRTP enabled through the sanctioned
+> MBEDTLS_USER_CONFIG_FILE (vendor tree untouched), kn_dtls offers
+> [0x0001] no-MKI (D-t9 = the intersection with mbedTLS 3.6's
+> ceiling; RFC 5764 omission semantics make it regression-proof,
+> test-pinned), `kn_dtls_srtp_profile()` + `srtp_prof` in the
+> dtls_ready evidence. Run 16 now tests nomination (D-t8) + use_srtp
+> (D-t9) TOGETHER — deconfounded by the evidence lines.**
+>
+> ## Changed files (round XXXV)
+> 1. `streamer/src/kn_mbedtls_user_config.h` (NEW) — the additive user
+>    config: `#define MBEDTLS_SSL_DTLS_SRTP` (requires only
+>    MBEDTLS_SSL_PROTO_DTLS, on by default). **ABI WARNING documented
+>    in the header: the define changes the layout of
+>    mbedtls_ssl_context/config — EVERY TU including mbedtls/ssl.h
+>    must see it** (CMake: PUBLIC on the mbedtls target → all
+>    consumers inherit; cross_check: the flag on all four mbedtls
+>    legs; ad-hoc sanitizer/manual builds linking the CMake libraries:
+>    add `-DMBEDTLS_USER_CONFIG_FILE='"kn_mbedtls_user_config.h"'`
+>    with -Istreamer/src — the round-XXXV ASan legs did).
+> 2. `CMakeLists.txt` — `target_compile_definitions(mbedtls PUBLIC
+>    "MBEDTLS_USER_CONFIG_FILE=\"${CMAKE_CURRENT_SOURCE_DIR}/streamer/
+>    src/kn_mbedtls_user_config.h\"")` in the mbedtls block (absolute
+>    path — streamer/src is not on the mbedtls target's include path).
+> 3. `streamer/{include/kn,src}/kn_dtls.{h,c}` — the use_srtp offer
+>    (`#ifdef MBEDTLS_SSL_DTLS_SRTP`, graceful no-op without: a static
+>    [0x0001, UNSET] list → conf_dtls_srtp_protection_profiles) +
+>    `kn_dtls_srtp_profile()` (the negotiated id via
+>    `MBEDTLS_PRIVATE(chosen_dtls_srtp_profile)` — the 3.x field
+>    convention, kn_net_mbedtls precedent) + the stub twin. The
+>    keying material is NOT extracted (bundle audio = stage 3; §7
+>    shapes-only — the id rides the evidence line).
+> 4. `streamer/src/knvstd_main.c` — `dtls_ready` grew `"srtp_prof"`
+>    (1 = the rig negotiated 0x0001; 0 = RFC omission, the runs-13-15
+>    wire).
+> 5. `streamer/tests/test_kndtls.c` — 32→**39 checks**: (a) the
+>    ClientHello capture leg — a SECOND loopback socket receives the
+>    first flight (kn_dtls's BIO owns its send path — no write_cb
+>    exists; the first draft wrongly borrowed the kn_sctp capture
+>    pattern and saw zero packets) and an INDEPENDENT hand parser
+>    (record 13 B + hs header 12 B + CH body walk + extension scan)
+>    asserts use_srtp 0x000e with ONE profile 0x0001 and an empty MKI
+>    — the parser caught its own bug against the live wire: RFC 5764's
+>    SrtpProfiles is a BYTE-LENGTH vector (`<2..2^16-1>`), not a
+>    count; (b) negotiation asserted on BOTH ends of the loopback pair
+>    (0x0001 chosen); (c) the NEGATIVE leg: a profile-less server
+>    completes the handshake with profile 0 — pinning that the offer
+>    can never regress the runs-13-15 wire. tsrv_init grew with_srtp.
+> 6. `tools/dtls_openssl_check.py` — second leg: `s_server -dtls1_2
+>    -use_srtp SRTP_AES128_CM_SHA1_80` (OpenSSL's flag name measured:
+>    `-use_srtp`, NOT `-srtp`) → the client asserts
+>    `srtp_profile=0x0001`; **an INDEPENDENT stack negotiates our
+>    offer**. The plain leg now also asserts 0x0000 (omission
+>    semantics cross-verified). `test_kndtls --openssl PORT FP [srtp]`.
+> 7. `tools/cross_check.sh` — the user-config define on all FOUR
+>    mbedtls legs (kn_net_mbedtls, kn_cert real, kn_dtls real,
+>    test_kndtls real section; bare-name form — CFLAGS carries
+>    -Istreamer/src). One -Werror=comment catch fixed pre-ship (a `/*`
+>    inside the new parser's doc comment).
+> 8. Docs: `docs/RTSP.md` §22, `docs/DTLS.md` (Q3 updated: the live
+>    hypotheses are nomination + use_srtp), `PROJECT-STATE.md` (round
+>    XXXV), this file.
+>
+> ## Verification status (what ran WHERE, round XXXV)
+> * Sandbox: native 16 suites PASS; cross x64+i686 -Werror PASS incl.
+>   the four re-defined mbedtls legs + the usrsctp link leg; paranoid
+>   knvstd legs clean ×3; ctest **18/18 ×2 with FRESH rebuilds** (the
+>   layout change demands it); ASan+UBSan+LSan test_kndtls **39/39**;
+>   the OpenSSL interop BOTH legs PASS (0x0000 plain / 0x0001
+>   -use_srtp); sandbox_session_e2e **43/43**; T10 POSIX dry ALL PASS
+>   **66**; T13 ALL PASS **63**.
+> * Target (PENDING — round XXXVI asks for): T10 (expect ALL PASS
+>   **76**, zero warnings; the first build recompiles mbedTLS with the
+>   new layout, ~1 min extra) + **R7 run 16** — the two-hypothesis run
+>   (matrix in PROJECT-STATE Next steps 2 + RTSP.md §22). Paste
+>   dtls_ready (srtp_prof!), sctp_arm/sctp_up, PLAY, rtsp_response,
+>   and the FULL ice_preplay (nom_sent/post_first/sctp_out).
+>
+> ## Notes for the target build
+> * Sync list (round XXXIV+XXXV together): kn_sock.{h,c}, kn_dtls.{h,c},
+>   knvstd_main.c, test_knsock.c, test_kndtls.c, test_knsctp.c,
+>   kn_mbedtls_user_config.h (NEW), CMakeLists.txt,
+>   tools/{cross_check.sh,dtls_openssl_check.py}, docs. T10 harness
+>   UNCHANGED since rev 23b (expectation **76**).
+> * The mbedTLS layout change is ABI-internal to the build (all TUs
+>   recompile together via the PUBLIC define; no shipped interface
+>   changes). If a stale build dir lingers on the target, T10's
+>   `cmake --fresh` already handles it.
+
+# Round XXXIV delta, rev 24 (R7 run 15 = usrsctp LIVE on Win7: the SCTP INIT flew inside DTLS and the rig stayed silent; PLAY 400 #4 → the ICE nomination hypothesis: USE-CANDIDATE ships with independent goldens; the mystery post-ready record finally prints; the seventh target catch fixed)
+
+> **Rev 24 supersedes rev 1-23.** Canonical state: `PROJECT-STATE.md`.
+> Design records: **`docs/RTSP.md` §21** (run 15 + the nomination
+> analysis + the run-16 matrix), `docs/SCTP.md` §8 (the INIT-silence
+> measurement), `docs/DTLS.md` (D-t8 retires D-t1).
+>
+> **Round XXXIV headline: run 15 proved the R3-C stack live (sctp_arm
+> armed:1 — usrsctp up on Win7, the INIT left inside a DTLS app
+> record, dtls_out 3→4) and the rig IGNORED it (sctp_up:0 after the
+> full bounded wait; app_records:0; no COMM_LOST — silence) with PLAY
+> 400 #4 across two rigs. The remaining wire difference vs the
+> reference: its str0m CONTROLLING agent nominates the valid pair
+> (USE-CANDIDATE) while ours never did — a Bifrost-class rig plausibly
+> gates the data plane on the SELECTED pair (DTLS gates only on
+> connectivity — four successful handshakes fit). Shipped:
+> kn_sock_stun_build2 + the nomination (same real-STUN gate as the
+> DTLS arm; post-ready one nominated request per 100 ms tick; D-t8),
+> byte-exact vs an independently generated golden whose Python builder
+> self-proved against the round-XXV goldens first (incl. GFN's
+> non-RFC 0x5354554E fingerprint XOR); the run-15 evidence gaps
+> closed (post_first/peer_closed/nom_sent/sctp_out/sctp_in in
+> ice_preplay — the thrice-seen mystery post-ready record finally
+> gets its ContentType printed); the target's 3 -Wmaybe-uninitialized
+> warnings fixed (the SEVENTH target catch). Gates: test_knsock
+> 98→102 (ASan clean), ctest 18/18 ×2, cross ×2 + the usrsctp link
+> leg, native 16, E2E 43/43, T10 dry 66, T13 63.**
+>
+> ## Changed files (round XXXIV)
+> 1. `streamer/{include/kn,src}/kn_sock.*` — `KN_SOCK_STUN_ATTR_USE_
+>    CANDIDATE 0x0025` + `kn_sock_stun_build2` (the two-attribute
+>    form; attr2_type 0 omits it; `kn_sock_stun_build` is now the
+>    attr2-less wrapper — wire-identical, the existing goldens
+>    re-prove it). Attribute order attr1→attr2 is wire-pinned by the
+>    new golden.
+> 2. `streamer/tests/test_knsock.c` — 98→**102 checks**: the
+>    nominated-request golden (USERNAME+USE-CANDIDATE, byte-exact,
+>    generated by the independent Python builder AFTER it reproduced
+>    k_req/k_succ byte-for-byte — the vectors-self-prove rule),
+>    integrity+inspect round-trips past the extra attribute, the
+>    undersized-buffer refusal.
+> 3. `streamer/src/knvstd_main.c` — the pump nominates: the gate is
+>    `(req_in || ok_in)` — the SAME first-real-inbound-STUN rule as
+>    the DTLS arm (:8196, never synthesized); pre-ready the 3× bursts
+>    carry the flag (`build2`), post-ready ONE nominated request per
+>    100 ms tick beside the NATT ping (the str0m selected-pair
+>    traffic mirror — deviation **D-t8 retires D-t1**). ice_preplay
+>    grew `nom_sent`, `post_first`/`post_first_len` (the kn_dtls
+>    inject-level RAW capture of the first post-ready record — the
+>    mystery record's ContentType: 0x14 CCS / 0x15 alert / 0x16
+>    handshake / 0x17 app), `peer_closed`, `sctp_out`/`sctp_in` (the
+>    kn_sctp packet counters — the INIT-left proof at the SCTP layer);
+>    `sctp_fail` class 3 = send errors. sess_ice_stats carries the
+>    snapshot-safe copies.
+> 4. `streamer/tests/test_knsctp.c` — the seventh-target-catch fix:
+>    both `t_sctp_pkt p` declarations zero-init (GCC 16.2's
+>    -Wmaybe-uninitialized cannot prove the conditional-fill invariant
+>    through the `prc == 0 &&` short-circuit; sandbox GCC 12 silent —
+>    the two-tier gate working as designed).
+> 5. Docs: `docs/RTSP.md` §21, `docs/SCTP.md` §8 (the answer),
+>    `docs/DTLS.md` (D-t8), `PROJECT-STATE.md` (round XXXIV).
+>
+> ## Verification status (what ran WHERE, round XXXIV)
+> * Sandbox: native 16 suites PASS (test_knsock 102); cross x64+i686
+>   -Werror PASS incl. the usrsctp cross-build + F1 link leg; paranoid
+>   knvstd legs clean ×3 with BOTH backend defines; ctest **18/18 ×2**;
+>   ASan+UBSan+LSan: test_knsctp 33/33 + test_knsock 102/102;
+>   sandbox_session_e2e **43/43**; T10 POSIX dry ALL PASS **66**; T13
+>   ALL PASS **63**. Toolchain note: the sandbox reset between messages
+>   (R26) and the apt mirror hung — recovered via round XXVI's extended
+>   fallback (aliyun → deb.debian.org rewrite).
+> * Target (round XXXIV's evidence, user-reported): T10 **FAIL 3/76 =
+>   ONLY the 3 warnings** (everything else passed — incl. the usrsctp
+>   Win32 download/build/link, proving the rev-23b hotfix); R7 run 15
+>   (docs/RTSP.md §21).
+> * Target (PENDING — round XXXV asks for): T10 (expect ALL PASS
+>   **76**, zero warnings) + **R7 run 16** — the nomination run;
+>   matrix in PROJECT-STATE Next steps 2. Paste the FULL ice_preplay
+>   (nom_sent/post_first/sctp_out are the new deciders).
+>
+> ## Notes for the target build
+> * No new files to wire: kn_sock.{h,c}, test_knsock.c, test_knsctp.c,
+>   knvstd_main.c changed; the gates/T10 harness are unchanged since
+>   rev 23b (expectation stays **76**).
+> * The nomination changes ONLY the STUN attribute list on our own
+>   requests — a rig that ignores USE-CANDIDATE behaves exactly as in
+>   runs 9-15 (the attribute is integrity-covered like everything
+>   else; four rigs have been validating our MI all along).
+
+# Round XXXIII delta, rev 23 (R7 run 14 = the 400 captured: empty body, echo headers, app_records:0 → the rig waits for OUR SCTP INIT → R3-C SHIPPED: kn_sctp on vendored usrsctp + the 8-channel DCEP profile + bounded PLAY gating)
 
 > **Rev 23 supersedes rev 1-22.** Canonical state: `PROJECT-STATE.md`.
 > Design records: **`docs/SCTP.md`** (NEW — kn_sctp's full record:

@@ -212,7 +212,7 @@ static void tsrv_free(tsrv *s)
 static int tsrv_init(tsrv *s, kn_sock_udp *sock, uint32_t dest_ip,
                      uint16_t dest_port, kn_cert *id,
                      const uint8_t client_pin[32],
-                     const char *transport_id)
+                     const char *transport_id, int with_srtp)
 {
     int ret;
     memset(s, 0, sizeof *s);
@@ -246,6 +246,19 @@ static int tsrv_init(tsrv *s, kn_sock_udp *sock, uint32_t dest_ip,
     mbedtls_ssl_conf_verify(&s->conf, tsrv_verify, s);
     mbedtls_ssl_conf_dtls_cookies(&s->conf, mbedtls_ssl_cookie_write,
                                   mbedtls_ssl_cookie_check, &s->cookie);
+#ifdef MBEDTLS_SSL_DTLS_SRTP
+    if (with_srtp) {
+        static const mbedtls_ssl_srtp_profile srv_profiles[] = {
+            MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
+            MBEDTLS_TLS_SRTP_UNSET
+        };
+        ret = mbedtls_ssl_conf_dtls_srtp_protection_profiles(&s->conf,
+                                                             srv_profiles);
+        if (ret != 0) return ret;
+    }
+#else
+    (void)with_srtp;
+#endif
     ret = mbedtls_ssl_conf_own_cert(&s->conf,
                                     (mbedtls_x509_crt *)kn_cert_x509(id),
                                     (mbedtls_pk_context *)kn_cert_pk(id));
@@ -295,6 +308,67 @@ static int tsrv_step(tsrv *s)
     return ret;
 }
 
+/* The use_srtp extension scanner for a captured DTLS ClientHello
+ * record — hand-parsed from RFC 6347 record/framing + RFC 5246 body
+ * (independent of mbedTLS): record(13) + handshake header(12) +
+ * version/random/session_id/cookie/ciphersuites/compression, then the
+ * extension walk looking for type 0x000e (RFC 5764 use_srtp).
+ * Returns 1 = found (nprofs, first, mki_len filled), 0 = absent,
+ * -1 = malformed. */
+static int ch_find_use_srtp(const uint8_t *rec, size_t len,
+                            unsigned *nprofs, uint16_t *first,
+                            unsigned *mki_len)
+{
+    size_t o;
+    uint16_t ext_len;
+    if (len < 25u + 2u + 32u + 1u + 1u + 2u + 1u + 2u) return -1;
+    if (rec[0] != 22) return -1;              /* Handshake record */
+    if (rec[13] != 1) return -1;              /* ClientHello */
+    o = 25u;                                  /* 13 record + 12 hs hdr */
+    o += 2u + 32u;                            /* version + random */
+    if (o >= len) return -1;
+    o += 1u + rec[o];                         /* session_id */
+    if (o >= len) return -1;
+    o += 1u + rec[o];                         /* cookie */
+    if (o + 2u > len) return -1;
+    {
+        size_t cs = ((size_t)rec[o] << 8) | rec[o + 1];
+        o += 2u + cs;                         /* cipher_suites */
+    }
+    if (o + 1u > len) return -1;
+    o += 1u + rec[o];                         /* compression methods */
+    if (o + 2u > len) return -1;
+    ext_len = (uint16_t)(((uint16_t)rec[o] << 8) | rec[o + 1]);
+    o += 2u;
+    if (o + ext_len > len) return -1;
+    {
+        size_t end = o + ext_len;
+        while (o + 4u <= end) {
+            uint16_t et = (uint16_t)(((uint16_t)rec[o] << 8) | rec[o + 1]);
+            uint16_t el = (uint16_t)(((uint16_t)rec[o + 2] << 8) | rec[o + 3]);
+            o += 4u;
+            if (o + el > end) return -1;
+            if (et == 0x000eu) {              /* use_srtp (RFC 5764:
+                the 2-byte field is the BYTE LENGTH of the profile
+                list, not a count — SrtpProfiles<2..2^16-1>) */
+                unsigned list_bytes, n;
+                if (el < 3u) return -1;
+                list_bytes = (unsigned)(((unsigned)rec[o] << 8) |
+                                        rec[o + 1]);
+                if (list_bytes < 2u || (list_bytes & 1u) ||
+                    el < 2u + list_bytes + 1u) return -1;
+                n = list_bytes / 2u;
+                *nprofs = n;
+                *first = (uint16_t)(((uint16_t)rec[o + 2] << 8) | rec[o + 3]);
+                *mki_len = rec[o + 2u + list_bytes];
+                return 1;
+            }
+            o += el;
+        }
+    }
+    return 0;
+}
+
 /* ------------------------------------------------- the pair harness */
 
 typedef struct {
@@ -321,8 +395,9 @@ static void pair_free(pair_t *p)
 /* wrong_pin: pin a THIRD identity's fingerprint (never presented).
  * drop_*: the harness discards the first N datagrams in each direction
  * (loss legs — the retransmission timers must recover). */
-static int pair_setup(pair_t *p, int wrong_pin, unsigned drop_to_cli,
-                      unsigned drop_to_srv, char *err, size_t errsz)
+static int pair_setup(pair_t *p, int wrong_pin, int no_srv_srtp,
+                      unsigned drop_to_cli, unsigned drop_to_srv,
+                      char *err, size_t errsz)
 {
     char cfpc[KN_CERT_FP_LEN + 1];
     char tid[32];
@@ -363,8 +438,8 @@ static int pair_setup(pair_t *p, int wrong_pin, unsigned drop_to_cli,
             bin[i] = (uint8_t)v;
         }
         snprintf(tid, sizeof tid, "127.0.0.1:%u", p->cport);
-        if (tsrv_init(&p->srv, &p->ssock, lo, p->cport, p->sid, bin, tid)
-            != 0) { pair_free(p); return -9; }
+        if (tsrv_init(&p->srv, &p->ssock, lo, p->cport, p->sid, bin, tid,
+                      !no_srv_srtp) != 0) { pair_free(p); return -9; }
     }
     {   /* the client's pin: sid's fingerprint, or the wrong cert's */
         char fp[KN_CERT_FP_LEN + 1];
@@ -473,9 +548,57 @@ static void test_real_mode(void)
         kn_sock_udp_close(&s);
     }
 
+    /* ---- round XXXV (D-t9): the ClientHello carries use_srtp ---- */
+    {
+        kn_sock_udp cs, rx;
+        kn_cert *cid = kn_cert_generate(err, sizeof err);
+        uint32_t lo = 0;
+        (void)kn_sock_ipv4_parse("127.0.0.1", &lo);
+        rc = kn_sock_udp_open(&cs, "127.0.0.1", 0, 262144, err, sizeof err);
+        if (rc == KN_SOCK_OK)
+            rc = kn_sock_udp_open(&rx, "127.0.0.1", 0, 262144,
+                                  err, sizeof err);
+        CHECK(rc == KN_SOCK_OK && cid != NULL, "CH-capture fixtures open");
+        if (rc == KN_SOCK_OK && cid) {
+            char fp[KN_CERT_FP_LEN + 1];
+            kn_dtls *d;
+            /* kn_dtls's BIO sends through the socket itself — so the
+             * capture is a SECOND loopback socket the ClientHello is
+             * addressed to (no server; the pin just needs to parse) */
+            (void)kn_cert_fingerprint(cid, fp, sizeof fp);
+            d = kn_dtls_client(&cs, lo, kn_sock_udp_port(&rx), cid, fp,
+                               err, sizeof err);
+            CHECK(d != NULL, "CH capture: client arms");
+            if (d) {
+                uint8_t pkt[2048];
+                size_t plen = 0;
+                unsigned nprofs = 0, mki = 99;
+                uint16_t first = 0;
+                int found, got;
+                (void)kn_dtls_poll(d);        /* the ClientHello flies */
+                got = kn_sock_udp_recv(&rx, pkt, sizeof pkt, 500u,
+                                       &plen, NULL);
+                CHECK(got == 1 && plen > 40,
+                      "the ClientHello arrived at the capture socket");
+                found = ch_find_use_srtp(pkt, plen, &nprofs, &first, &mki);
+                CHECK(found == 1 && nprofs == 1 && first == 0x0001 &&
+                      mki == 0,
+                      "ClientHello carries use_srtp (0x000e) offering "
+                      "SRTP_AES128_CM_HMAC_SHA1_80 (0x0001) with an "
+                      "empty MKI — the reference's wire shape (str0m "
+                      "KeyingMaterial), the mbedTLS-ceiling subset "
+                      "(D-t9)");
+                kn_dtls_free(d);
+            }
+            kn_cert_free(cid);
+        }
+        kn_sock_udp_close(&cs);
+        kn_sock_udp_close(&rx);
+    }
+
     /* ---- the full handshake, rig-shaped server ---- */
     err[0] = '\0';
-    rc = pair_setup(&p, 0, 0, 0, err, sizeof err);
+    rc = pair_setup(&p, 0, 0, 0, 0, err, sizeof err);
     if (rc != 0) printf("pair_setup rc=%d err=%s\n", rc, err);
     CHECK(rc == 0, "pair: loopback fixture arms (client + pinned server)");
     if (rc == 0) {
@@ -515,6 +638,18 @@ static void test_real_mode(void)
               "ciphersuite is an ECDHE-ECDSA suite (the P-256 identity)");
         CHECK(kn_dtls_ready_ms(p.cli) > 0 && kn_dtls_ready_ms(p.cli) < 15000,
               "ready_ms is a plausible wall duration");
+        {   /* round XXXV: use_srtp negotiated on BOTH sides */
+            mbedtls_dtls_srtp_info sinfo;
+            memset(&sinfo, 0, sizeof sinfo);
+            mbedtls_ssl_get_dtls_srtp_negotiation_result(&p.srv.ssl,
+                                                         &sinfo);
+            CHECK(kn_dtls_srtp_profile(p.cli) == 0x0001u &&
+                  sinfo.MBEDTLS_PRIVATE(chosen_dtls_srtp_profile) ==
+                      MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
+                  "use_srtp negotiated: 0x0001 chosen on both ends "
+                  "(the bundle audio's future key source — the "
+                  "reference extracts KeyingMaterial here)");
+        }
         CHECK(p.srv.pin_matched == 1 && p.srv.saw_client_cert == 1,
               "SERVER side pinned us too: the client certificate flew and "
               "matched the announced fingerprint (the rig's shape — "
@@ -547,7 +682,7 @@ static void test_real_mode(void)
 
     /* ---- loss legs: the retransmission timers must carry it ---- */
     err[0] = '\0';
-    rc = pair_setup(&p, 0, 1, 1, err, sizeof err);
+    rc = pair_setup(&p, 0, 0, 1, 1, err, sizeof err);
     CHECK(rc == 0, "loss pair arms");
     if (rc == 0) {
         /* first datagram dropped in EACH direction: without working
@@ -562,7 +697,7 @@ static void test_real_mode(void)
 
     /* ---- wrong pin: fatal, latched, honest ---- */
     err[0] = '\0';
-    rc = pair_setup(&p, 1, 0, 0, err, sizeof err);
+    rc = pair_setup(&p, 1, 0, 0, 0, err, sizeof err);
     CHECK(rc == 0, "wrong-pin pair arms");
     if (rc == 0) {
         int run = pair_run(&p, 15000u, 0);
@@ -584,9 +719,26 @@ static void test_real_mode(void)
         pair_free(&p);
     }
 
+    /* ---- round XXXV negative leg: a server that does not offer
+     * use_srtp — RFC 5764 omission semantics: the handshake MUST still
+     * complete with profile 0. This is the runs-13-15 wire (no
+     * extension answer) and proves the offer can never regress it. ---- */
+    err[0] = '\0';
+    rc = pair_setup(&p, 0, 1, 0, 0, err, sizeof err);
+    CHECK(rc == 0, "no-srtp pair arms");
+    if (rc == 0) {
+        int run = pair_run(&p, 15000u, 0);
+        CHECK(run == 1 && kn_dtls_ready(p.cli) == 1 &&
+              kn_dtls_srtp_profile(p.cli) == 0,
+              "a server omitting use_srtp: the handshake STILL completes "
+              "and the profile reports 0 (the extension is an offer, "
+              "never a requirement)");
+        pair_free(&p);
+    }
+
     /* ---- inject queue: bounded, drop-new, counted ---- */
     err[0] = '\0';
-    rc = pair_setup(&p, 0, 0, 0, err, sizeof err);
+    rc = pair_setup(&p, 0, 0, 0, 0, err, sizeof err);
     CHECK(rc == 0, "overflow pair arms");
     if (rc == 0) {
         uint8_t rec[8] = { 22, 0xfe, 0xfd, 0, 0, 0, 0, 1 };
@@ -629,7 +781,8 @@ static void test_real_mode(void)
  * Exit 0 + "openssl-interop: PASS" on success. Sandbox-only (the Win7
  * target has no openssl; its authority is test_kndtls's own battery
  * under T10). */
-static int openssl_client_leg(const char *port_s, const char *fp)
+static int openssl_client_leg(const char *port_s, const char *fp,
+                              int want_srtp)
 {
     char err[256];
     kn_sock_udp sock;
@@ -667,14 +820,17 @@ static int openssl_client_leg(const char *port_s, const char *fp)
         if (drc == KN_DTLS_READY) {
             kn_dtls_stats st;
             char cs[80];
+            unsigned sprof = kn_dtls_srtp_profile(d);
             kn_dtls_stats_get(d, &st);
             (void)kn_dtls_ciphersuite(d, cs, sizeof cs);
-            printf("openssl-interop: PASS (version=%s cipher=%.60s "
-                   "ready_ms=%llu records_in=%u records_out=%u)\n",
+            printf("openssl-interop: %s (version=%s cipher=%.60s "
+                   "ready_ms=%llu records_in=%u records_out=%u "
+                   "srtp_profile=0x%04x)\n",
+                   (!want_srtp || sprof == 0x0001u) ? "PASS" : "FAIL",
                    kn_dtls_version(d), cs,
                    (unsigned long long)kn_dtls_ready_ms(d),
-                   st.records_in, st.records_out);
-            rc_out = 0;
+                   st.records_in, st.records_out, sprof);
+            if (!want_srtp || sprof == 0x0001u) rc_out = 0;
             break;
         }
         if (drc < 0) {
@@ -699,8 +855,10 @@ static int openssl_client_leg(const char *port_s, const char *fp)
 int main(int argc, char **argv)
 {
 #ifdef KN_TLS_BACKEND_MBEDTLS
-    if (argc == 4 && strcmp(argv[1], "--openssl") == 0)
-        return openssl_client_leg(argv[2], argv[3]);
+    if (argc >= 4 && strcmp(argv[1], "--openssl") == 0)
+        return openssl_client_leg(argv[2], argv[3],
+                                  argc >= 5 &&
+                                  strcmp(argv[4], "srtp") == 0);
 #else
     (void)argc; (void)argv;
 #endif

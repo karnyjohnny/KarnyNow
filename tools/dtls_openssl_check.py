@@ -101,8 +101,40 @@ def main():
         except subprocess.TimeoutExpired:
             pass
 
+    # 5. round XXXV leg: the SAME client against a server that DOES
+    #    offer DTLS-SRTP (-srtp): the use_srtp extension must negotiate
+    #    to 0x0001 through an independent stack (the client asserts
+    #    srtp_profile=0x0001 in "srtp" mode)
+    srv2 = subprocess.Popen(
+        ["openssl", "s_server", "-dtls1_2", "-accept", str(port),
+         "-cert", crt, "-key", key, "-quiet",
+         "-use_srtp", "SRTP_AES128_CM_SHA1_80"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE)
+    time.sleep(0.6)
+    if srv2.poll() is not None:
+        err = srv2.stderr.read().decode(errors="replace") if srv2.stderr \
+            else ""
+        fail("s_server (-use_srtp) exited early: %s" % err.strip()[:300])
+    try:
+        r = subprocess.run([args.binary, "--openssl", str(port), fp,
+                            "srtp"],
+                           capture_output=True, text=True, timeout=60)
+        out = (r.stdout or "") + (r.stderr or "")
+        print(out.strip())
+        if r.returncode != 0 or "openssl-interop: PASS" not in out or \
+                "srtp_profile=0x0001" not in out:
+            fail("srtp leg rc=%d" % r.returncode)
+    finally:
+        srv2.kill()
+        try:
+            srv2.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
     print("DTLS-OPENSSL CHECK PASS (independent stack accepted our "
-          "ClientHello/cookie/cert/Finished; pin=%s...)" % fp[:17])
+          "ClientHello/cookie/cert/Finished AND negotiated use_srtp "
+          "0x0001; pin=%s...)" % fp[:17])
     sys.exit(0)
 
 

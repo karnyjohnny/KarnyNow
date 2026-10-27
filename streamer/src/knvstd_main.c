@@ -2281,6 +2281,14 @@ typedef struct {
     unsigned sctp_first_sid, sctp_first_ppi, sctp_first_len;
     uint8_t  sctp_first[16];               /* the first rig message head */
     uint64_t sctp_up_ms;
+    /* round XXXIV (run 15's evidence gaps): the nomination counter,
+     * the kn_dtls post-ready RAW record capture (the mystery record —
+     * captured since XXXIII but never printed!), peer_closed, and the
+     * kn_sctp packet counters (proof the INIT actually left) */
+    unsigned nom_sent;
+    unsigned dtls_peer_closed, dtls_post_first_len;
+    uint8_t  dtls_post_first[32];
+    unsigned sctp_out, sctp_in;
     uint64_t pump_ms;
 } sess_ice_stats;
 
@@ -2465,6 +2473,9 @@ static void sess_sctp_service(sess_pump *p)
         kn_sctp_stats ss;
         kn_sctp_stats_get(p->sctp, &ss);
         p->st.sctp_msgs_in = ss.msgs_in;
+        p->st.sctp_out = ss.pkts_out;
+        p->st.sctp_in = ss.pkts_in;
+        if (ss.send_errors && !p->st.sctp_fail) p->st.sctp_fail = 3;
         if (ss.lost) p->st.sctp_fail = 1;
     }
 }
@@ -2481,7 +2492,7 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
         uint8_t tid[12];
         char uname[400];
         size_t plen;
-        int i, n;
+        int i, n, nominate;
         unsigned cadence;
         /* live total (round XXXII: the persist-mode snapshot used to
          * read 0 — pump_ms only landed at thread exit) */
@@ -2517,25 +2528,66 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
          * (PING_INTERVAL_AFTER_CONNECTION :243). STUN requests from the
          * rig keep being answered in BOTH regimes (below). */
         cadence = p->st.dtls_ready ? 100u : 20u;
+        /* RFC 8445 nomination (deviation D-t8, retiring D-t1): once the
+         * pair is proven by REAL inbound traffic, our binding requests
+         * carry USE-CANDIDATE — the controlling-agent flag str0m's ICE
+         * agent sends in the reference (it runs alongside the hand-built
+         * bursts there: every STUN datagram feeds rtc.handle_input,
+         * nvst.rs:8652). Run 15's hypothesis: the rig gates its data
+         * plane on the SELECTED pair. After dtls_ready the hand-built
+         * layer is NATT-only, but str0m keeps its nominated pair alive —
+         * we mirror that with ONE nominated request per 100 ms tick. */
+        nominate = (p->st.req_in || p->st.ok_in);
         if (kn_sock_now_ms() - last_burst >= cadence) {
             if (!p->st.dtls_ready) {
                 snprintf(uname, sizeof uname, "%s:%s", p->remote_ufrag,
                          p->local_ufrag);
                 for (i = 0; i < 3; ++i) {      /* the ICE burst (:7848) */
                     if (kn_ws_rand(tid, sizeof tid) != 0) break;
-                    if (kn_sock_stun_build(tx, sizeof tx, &plen,
-                                           KN_SOCK_STUN_BINDING_REQUEST, tid,
-                                           (const uint8_t *)p->remote_pwd,
-                                           strlen(p->remote_pwd),
-                                           KN_SOCK_STUN_ATTR_USERNAME,
-                                           (const uint8_t *)uname,
-                                           strlen(uname)) != KN_SOCK_OK)
+                    if (kn_sock_stun_build2(tx, sizeof tx, &plen,
+                                            KN_SOCK_STUN_BINDING_REQUEST,
+                                            tid,
+                                            (const uint8_t *)p->remote_pwd,
+                                            strlen(p->remote_pwd),
+                                            KN_SOCK_STUN_ATTR_USERNAME,
+                                            (const uint8_t *)uname,
+                                            strlen(uname),
+                                            nominate
+                                                ? KN_SOCK_STUN_ATTR_USE_CANDIDATE
+                                                : 0,
+                                            NULL, 0) != KN_SOCK_OK)
                         continue;
                     if (kn_sock_udp_sendto(p->sock, p->dest_ip, p->dest_port,
-                                           tx, plen) == KN_SOCK_OK)
+                                           tx, plen) == KN_SOCK_OK) {
                         p->st.stun_sent++;
-                    else
+                        if (nominate) p->st.nom_sent++;
+                    } else {
                         p->st.send_errors++;
+                    }
+                }
+            } else if (nominate) {
+                /* the post-ready nominated keepalive (the str0m agent's
+                 * selected-pair traffic; the NATT ping follows below) */
+                snprintf(uname, sizeof uname, "%s:%s", p->remote_ufrag,
+                         p->local_ufrag);
+                if (kn_ws_rand(tid, sizeof tid) == 0 &&
+                    kn_sock_stun_build2(tx, sizeof tx, &plen,
+                                        KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                        (const uint8_t *)p->remote_pwd,
+                                        strlen(p->remote_pwd),
+                                        KN_SOCK_STUN_ATTR_USERNAME,
+                                        (const uint8_t *)uname,
+                                        strlen(uname),
+                                        KN_SOCK_STUN_ATTR_USE_CANDIDATE,
+                                        NULL, 0) == KN_SOCK_OK) {
+                    if (kn_sock_udp_sendto(p->sock, p->dest_ip,
+                                           p->dest_port, tx,
+                                           plen) == KN_SOCK_OK) {
+                        p->st.stun_sent++;
+                        p->st.nom_sent++;
+                    } else {
+                        p->st.send_errors++;
+                    }
                 }
             }
             /* the NATT hole-punch ping (:5033-5050, :7868-7890) */
@@ -2586,10 +2638,12 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
                     printf("{\"mode\":\"session\",\"event\":\"dtls_ready\","
                            "\"ms\":%llu,\"version\":\"%.16s\","
                            "\"cipher\":\"%.48s\",\"records_in\":%u,"
-                           "\"records_out\":%u,\"verify\":%d}\n",
+                           "\"records_out\":%u,\"verify\":%d,"
+                           "\"srtp_prof\":%u}\n",
                            (unsigned long long)p->st.dtls_ready_ms,
                            kn_dtls_version(p->dtls), cs, ds.records_in,
-                           ds.records_out, ds.verify_result);
+                           ds.records_out, ds.verify_result,
+                           kn_dtls_srtp_profile(p->dtls));
                     fflush(stdout);
                 } else if (drc < 0) {
                     kn_dtls_stats ds;
@@ -2623,6 +2677,10 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
             p->st.dtls_first_app_len = ds.first_app_len;
             memcpy(p->st.dtls_first_app, ds.first_app,
                    sizeof p->st.dtls_first_app);
+            p->st.dtls_peer_closed = ds.peer_closed;
+            p->st.dtls_post_first_len = ds.first_post_ready_len;
+            memcpy(p->st.dtls_post_first, ds.first_post_ready,
+                   sizeof p->st.dtls_post_first);
             if (!p->sctp && !p->sctp_tried) {
                 char serr[160];
                 p->sctp_tried = 1;
@@ -2797,8 +2855,9 @@ static void sess_ice_pump(kn_sock_udp *sock, uint32_t dest_ip,
     st->invalid_in += p.st.invalid_in;
     st->send_errors += p.st.send_errors;
     st->pongs_sent += p.st.pongs_sent;
+    st->nom_sent += p.st.nom_sent;
     st->pump_ms += p.st.pump_ms;
-    /* dtls_* stay zero on the sequential path (it never arms DTLS) */
+    /* the dtls/sctp fields stay zero on the sequential path */
 }
 static void sess_sleep(uint32_t ms, void *c);   /* fwd (snapshot helper) */
 
@@ -4035,6 +4094,7 @@ static int run_session(const char *token, const char *device_id,
                                          * 16 (they are); the slack
                                          * silences the over-approx */
             char sctp_hex[4 * 16 + 1];
+            char post_hex[4 * 32 + 1];
             {   /* the first app record's captured head, as hex (the
                  * rig's post-DTLS message — R3-C's design input) */
                 static const char hx[] = "0123456789abcdef";
@@ -4052,6 +4112,13 @@ static int run_session(const char *token, const char *device_id,
                     sctp_hex[2 * hb + 1] = hx[ice_st.sctp_first[hb] & 0xFu];
                 }
                 sctp_hex[2 * hn] = '\0';
+                hn = ice_st.dtls_post_first_len;
+                if (hn > 32) hn = 32;
+                for (hb = 0; hb < hn; ++hb) {
+                    post_hex[2 * hb]     = hx[ice_st.dtls_post_first[hb] >> 4];
+                    post_hex[2 * hb + 1] = hx[ice_st.dtls_post_first[hb] & 0xFu];
+                }
+                post_hex[2 * hn] = '\0';
             }
             printf("{\"mode\":\"session\",\"event\":\"ice_preplay\","
                    "\"stun_sent\":%u,\"natt_sent\":%u,\"req_in\":%u,"
@@ -4068,7 +4135,10 @@ static int run_session(const char *token, const char *device_id,
                    "\"sctp_rig_opened\":%u,\"sctp_msgs_in\":%u,"
                    "\"sctp_fail\":%u,\"sctp_first_sid\":%u,"
                    "\"sctp_first_ppi\":%u,\"sctp_first_len\":%u,"
-                   "\"sctp_first\":\"%s\"}\n",
+                   "\"sctp_first\":\"%s\",\"nom_sent\":%u,"
+                   "\"sctp_out\":%u,\"sctp_in\":%u,"
+                   "\"peer_closed\":%u,\"post_first_len\":%u,"
+                   "\"post_first\":\"%s\"}\n",
                    ice_st.stun_sent, ice_st.natt_sent, ice_st.req_in,
                    ice_st.answered, ice_st.ok_in, ice_st.invalid_in,
                    ice_st.send_errors, ice_st.pongs_sent,
@@ -4087,7 +4157,9 @@ static int run_session(const char *token, const char *device_id,
                    ice_st.sctp_rig_opened, ice_st.sctp_msgs_in,
                    ice_st.sctp_fail, ice_st.sctp_first_sid,
                    ice_st.sctp_first_ppi, ice_st.sctp_first_len,
-                   sctp_hex);
+                   sctp_hex, ice_st.nom_sent, ice_st.sctp_out,
+                   ice_st.sctp_in, ice_st.dtls_peer_closed,
+                   ice_st.dtls_post_first_len, post_hex);
             fflush(stdout);
         }
         if (!desc.disable_play && (rc != KN_RTSP_OK || resp.status != 200)) {

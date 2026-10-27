@@ -417,15 +417,36 @@ int kn_sock_stun_build(uint8_t *out, size_t outsz, size_t *outlen,
                        uint16_t attr_type, const uint8_t *attr,
                        size_t attrlen)
 {
-    size_t len, pad, need;
+    return kn_sock_stun_build2(out, outsz, outlen, msg_type, tid, key,
+                               keylen, attr_type, attr, attrlen, 0, NULL, 0);
+}
+
+/* The general two-attribute builder — build() is the attr2-less case.
+ * Wire order: header, attr1 (+pad), attr2 (+pad, when attr2_type != 0),
+ * MESSAGE-INTEGRITY (HMAC over the packet with the length pre-adjusted
+ * to the MI end, nvst.rs:4992), FINGERPRINT (CRC-32 ^ 0x5354554E over
+ * everything before it, :5002-5004 — GFN's XOR constant is NOT the
+ * RFC's 0x53845545; the live rig validates ours, runs 9-15). */
+int kn_sock_stun_build2(uint8_t *out, size_t outsz, size_t *outlen,
+                        uint16_t msg_type, const uint8_t tid[12],
+                        const uint8_t *key, size_t keylen,
+                        uint16_t attr1_type, const uint8_t *attr1,
+                        size_t attr1len,
+                        uint16_t attr2_type, const uint8_t *attr2,
+                        size_t attr2len)
+{
+    size_t len, pad, pad2, need;
     uint16_t l;
     uint32_t crc;
     uint8_t mi[KN_SHA1_DIGEST_LEN];
-    if (!out || !outlen || !tid || !key || (attrlen && !attr))
+    if (!out || !outlen || !tid || !key || (attr1len && !attr1) ||
+        (attr2len && !attr2))
         return KN_SOCK_ERR_ARGS;
-    if (attrlen > 0xFFFFu) return KN_SOCK_ERR_ARGS;
-    pad = (4u - (attrlen & 3u)) & 3u;
-    need = KN_SOCK_STUN_HEADER_LEN + 4u + attrlen + pad + 24u + 8u;
+    if (attr1len > 0xFFFFu || attr2len > 0xFFFFu) return KN_SOCK_ERR_ARGS;
+    pad = (4u - (attr1len & 3u)) & 3u;
+    pad2 = attr2_type ? (4u - (attr2len & 3u)) & 3u : 0u;
+    need = KN_SOCK_STUN_HEADER_LEN + 4u + attr1len + pad + 24u + 8u
+         + (attr2_type ? 4u + attr2len + pad2 : 0u);
     if (need > outsz || need > KN_SOCK_STUN_MAX_PKT) return KN_SOCK_ERR_ARGS;
     out[0] = (uint8_t)(msg_type >> 8);
     out[1] = (uint8_t)(msg_type & 0xFF);
@@ -433,13 +454,22 @@ int kn_sock_stun_build(uint8_t *out, size_t outsz, size_t *outlen,
     out[4] = 0x21; out[5] = 0x12; out[6] = 0xA4; out[7] = 0x42;
     memcpy(out + 8, tid, 12);
     len = KN_SOCK_STUN_HEADER_LEN;
-    out[len++] = (uint8_t)(attr_type >> 8);
-    out[len++] = (uint8_t)(attr_type & 0xFF);
-    l = (uint16_t)attrlen;
+    out[len++] = (uint8_t)(attr1_type >> 8);
+    out[len++] = (uint8_t)(attr1_type & 0xFF);
+    l = (uint16_t)attr1len;
     out[len++] = (uint8_t)(l >> 8);
     out[len++] = (uint8_t)(l & 0xFF);
-    if (attrlen) { memcpy(out + len, attr, attrlen); len += attrlen; }
+    if (attr1len) { memcpy(out + len, attr1, attr1len); len += attr1len; }
     if (pad) { memset(out + len, 0, pad); len += pad; }
+    if (attr2_type) {
+        out[len++] = (uint8_t)(attr2_type >> 8);
+        out[len++] = (uint8_t)(attr2_type & 0xFF);
+        l = (uint16_t)attr2len;
+        out[len++] = (uint8_t)(l >> 8);
+        out[len++] = (uint8_t)(l & 0xFF);
+        if (attr2len) { memcpy(out + len, attr2, attr2len); len += attr2len; }
+        if (pad2) { memset(out + len, 0, pad2); len += pad2; }
+    }
     /* HMAC covers the packet with the length field adjusted to reach the
      * END of the MESSAGE-INTEGRITY attribute (:4992) */
     l = (uint16_t)(len - KN_SOCK_STUN_HEADER_LEN + 24u);

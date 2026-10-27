@@ -192,12 +192,19 @@ stage 3 sends the kn_rx NACK-v2/IDR/RFI encoders there.
   `kn_sctp_open_peer`) is TEST infrastructure — production never
   listens (the rig is always the SCTP server, `start_sctp(true)`).
 
-## 8. Open questions (answered BY run 15, not before)
+## 8. Open questions — run 15 ANSWERED the first one negatively
 
-1. Does the rig's 400 disappear once the association is up? (The
-   leading theory; the alternative — it wants the 8 OPENs ACKed by ITS
-   side, or specific channel data — is covered by the same run since we
-   open all 8 and capture everything that comes back.)
+1. ~~Does the rig's 400 disappear once the association is up?~~ —
+   **MEASURED (run 15, RTSP.md §21): the association never came up.**
+   The INIT left (dtls_out 3→4, sctp_arm armed:1 — usrsctp live on
+   Win7) and the rig stayed SILENT (sctp_up:0 after the full bounded
+   wait, app_records:0, no COMM_LOST) → PLAY 400 #4. A well-formed
+   client INIT alone does not move it. The round-XXXIV response: ICE
+   NOMINATION (USE-CANDIDATE, D-t8) — the hypothesis is that the rig's
+   SCTP endpoint arms only on a SELECTED pair (run 16 decides), with
+   the mystery post-ready DTLS record (now printed as `post_first`) as
+   the fallback clue: an alert would point at the record layer /
+   use_srtp instead.
 2. Does the rig open channels of its own (odd sids) or send control
    messages right after COMM_UP? (`sctp_rig_opened` / `sctp_msgs_in` /
    `sctp_first*` in ice_preplay answer it.)

@@ -78,6 +78,14 @@ if(KN_TLS_BACKEND STREQUAL "mbedtls")
     target_compile_options(mbedtls PRIVATE
       -Wno-unterminated-string-initialization)
   endif()
+  # Round XXXV (D-t9): the additive user config enabling
+  # MBEDTLS_SSL_DTLS_SRTP (the use_srtp extension the reference's
+  # ClientHello carries — str0m KeyingMaterial, crypto/srtp.rs ALL).
+  # PUBLIC on the mbedtls target: the define CHANGES THE STRUCT
+  # LAYOUT, so every consumer (kncore -> knvstd/tests) inherits it —
+  # an asymmetric build would be silent memory corruption.
+  target_compile_definitions(mbedtls PUBLIC
+    "MBEDTLS_USER_CONFIG_FILE=\"${CMAKE_CURRENT_SOURCE_DIR}/streamer/src/kn_mbedtls_user_config.h\"")
   target_compile_definitions(kncore PRIVATE KN_TLS_BACKEND_MBEDTLS=1)
   target_sources(kncore PRIVATE streamer/src/kn_net_mbedtls.c)
   target_link_libraries(kncore PUBLIC mbedtls mbedx509 mbedcrypto)

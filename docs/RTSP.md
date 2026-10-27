@@ -1503,3 +1503,186 @@ in the NEW `docs/SCTP.md`):
 4. Any outcome: paste `sock_pair`, `dtls_ready`, `sctp_arm`, `sctp_up`,
    `sctp_channels`, PLAY, `rtsp_response` (if non-200), `ice_preplay`
    verbatim; on PLAY 200 also `handoff` + the summary.
+
+## 21. Round XXXIV — R7 run 15 (usrsctp LIVE on Win7: the INIT flew, the rig stayed silent, PLAY 400 #4 → the nomination hypothesis: USE-CANDIDATE ships) + the target-warning fix (the seventh catch)
+
+**Target T10 (the round-XXXIII tree): FAIL on exactly ONE check —
+`zero compiler warnings (3 seen)`**; everything else passed (75/76),
+incl. the usrsctp download/build and test_knsctp on Win7. GCC 16.2
+flagged `-Wmaybe-uninitialized` on `test_knsctp.c`'s `t_sctp_pkt p`
+(the independent INIT parser fills the INIT fields conditionally; the
+`prc == 0 &&` short-circuit protects the reads, but GCC's value-range
+pass cannot prove the interprocedural invariant — sandbox GCC 12 at
+-O1/-O3 was silent). **The seventh target-catch incident** (R28's
+pattern holds); fix: zero-init both declarations (the round-XXVII
+warning-class discipline). This log also PROVES the round-XXXIII
+hotfix worked: the usrsctp Win32 build/link is clean on the target.
+
+**Run 15 (live production, rig #7 = 80-84-170-153 — run 12's rig
+again):** queue clean (19 relearns, cap-53 glimpses 50/14/15/13/17/6,
+1→3→ready). Then the R3-C layer flew for the first time:
+* `sock_pair 49005/49006 preferred, unified:0` (third consecutive
+  seat on the reserved pair).
+* OPTIONS/DESCRIBE/SETUP/ANNOUNCE 200 (4137 B), identity cert:real,
+  `dtls_ready ms:178` — the FOURTH consecutive live DTLS handshake
+  (388/293/190/178 ms — the layer is boring now, exactly as it
+  should be).
+* **`sctp_arm {"armed":1}` — usrsctp initialized and the SCTP INIT
+  left the building on Win7** (`dtls_out` 3→4 = exactly one app
+  record post-ready; `sctp_out` was not yet in the evidence — added
+  this round).
+* **The rig NEVER answered the INIT**: `sctp_up:0` after the full
+  bounded wait (`pump_ms:2596` = 100 ms head start + the 2500 ms
+  play-wait — the D-t5 gate worked as designed), `app_records:0`
+  again, `sctp_fail:0` (no COMM_LOST — just silence). usrsctp's first
+  INIT retransmit (RTO 3000 ms) never got its chance inside the
+  window — honest and reference-shaped (unlimited retries).
+* **PLAY: 400 again** — the FOURTH identical refusal (`reason:"OK"`,
+  echo headers, empty body). Two rigs now refuse identically
+  post-DTLS (80-250-96-38 ×2, 185-136-70-139, 80-84-170-153).
+* `vid_ka:127` (the video keepalive pumped the whole window),
+  post-ready cadence switch visible: `stun_sent 24 / natt_sent 32`
+  (NATT outlives STUN exactly like :7837-7896), `dtls_in 8` vs
+  `records_in 7` at ready — **the mystery post-ready record arrived
+  AGAIN** (third run in a row; captured since XXXIII but NOT printed
+  — this round's evidence fix).
+
+**The analysis (what run 15 eliminated, what remains):**
+* SCTP INIT alone does not move the rig. Either it (a) never sees the
+  INIT as legitimate (framing? checksum? — the sandbox suite verified
+  both against independent implementations, but the live path adds the
+  DTLS record layer — `dtls_out:4` says one record left; the rig's
+  silence could also be a deliberate pre-PLAY posture), or (b) its
+  data-plane arming waits on something else entirely.
+* The strongest remaining ICE-layer difference vs the reference is
+  **nomination**: the reference runs str0m's FULL ICE agent alongside
+  the hand-built bursts (every STUN datagram feeds `rtc.handle_input`,
+  nvst.rs:8652; poll_output ships whatever str0m emits, :8160-8180),
+  and a CONTROLLING str0m agent nominates the valid pair with
+  USE-CANDIDATE (RFC 8445 §5.2 — `set_ice_controlling(true)`,
+  :6295). A libwebrtc-derived rig (Bifrost) plausibly gates its
+  transport-ready state — and with it the SCTP endpoint and the PLAY
+  handler — on the SELECTED pair, which only a nomination creates.
+  DTLS completing without it fits: stacks gate DTLS on connectivity,
+  not on selection.
+* Alternative hypotheses kept alive by the missing print: the mystery
+  post-ready record could be a DTLS alert/close (the rig unhappy with
+  something at the record layer) — `post_first` hex now names it
+  (ContentType byte: 20 CCS / 21 alert / 22 handshake / 23 app).
+  use_srtp (D-t3) stays a candidate only if that record turns out to
+  be an alert.
+
+**Round XXXIV delta:**
+* **USE-CANDIDATE nomination ships (D-t8 retires D-t1):**
+  `kn_sock_stun_build2` (the two-attribute form; `build` is the
+  attr2-less case — wire-identical, the existing goldens re-prove it)
+  + `KN_SOCK_STUN_ATTR_USE_CANDIDATE 0x0025` (zero-length). The pump
+  nominates from the SAME gate as the DTLS arm (the first REAL inbound
+  STUN evidence — never synthesized, the :8196 rule): pre-ready the
+  3× bursts carry the flag; post-ready ONE nominated request rides
+  each 100 ms tick alongside the NATT ping (mirroring str0m's
+  selected-pair traffic beside the hand-built layer). `nom_sent`
+  counter in ice_preplay. KAT: the nominated packet is byte-exact vs
+  an independently generated golden — the Python builder SELF-PROVED
+  first by reproducing the round-XXV k_req/k_succ goldens byte-for-byte
+  (incl. GFN's non-RFC `0x5354554E` fingerprint XOR, nvst.rs:258 —
+  live-validated by four rigs answering our requests). test_knsock
+  98→**102**.
+* **The evidence gaps closed:** ice_preplay grew `post_first`/
+  `post_first_len` (the mystery record's raw head — captured since
+  XXXIII, printed at last), `peer_closed`, `nom_sent`, `sctp_out`/
+  `sctp_in` (kn_sctp packet counters — proof the INIT left at the
+  SCTP layer, not just the DTLS layer), and `sctp_fail` gained the
+  send-error class (3).
+* The test_knsctp zero-init warning fix (the seventh target catch,
+  above).
+* Gates re-run on the final tree: native 16 suites (test_knsock 102),
+  cross ×2 incl. the usrsctp link leg, ctest **18/18 ×2**, ASan+UBSan
+  test_knsctp 33/33 + test_knsock 102/102, E2E 43/43, T10 dry 66,
+  T13 63.
+
+**What run 16 tests (same command):**
+1. `nom_sent > 0` + **the rig's reaction**: does `sctp_up:1` finally
+   fire (nomination armed its data plane → it answers the INIT)? Does
+   PLAY turn 200?
+2. `post_first` names the mystery record (expect one of: 21+02 00 =
+   close_notify, 21+02 xx = alert (xx names the complaint — e.g.
+   unexpected_message could point at use_srtp expectations), 22 =
+   renegotiation HelloRequest, 23 = app data that arrived between
+   ready and the first drain).
+3. If nomination changes NOTHING and post_first is benign: the
+   remaining wire-level suspect list narrows to the DTLS record layer
+   itself (use_srtp extension, D-t3) and the rig's expectation of
+   specific channel data — both actionable next round.
+4. As always: paste sock_pair → dtls_ready → sctp_arm → sctp_up (or
+   its absence) → PLAY → rtsp_response → ice_preplay verbatim.
+
+## 22. Round XXXV (sandbox, pre-run-16) — the SECOND fidelity gap found by re-reading the reference: str0m's ClientHello carries use_srtp (DTLS-SRTP, RFC 5764) and derives the bundle audio's keys from it → kn_dtls now offers AES128_CM_HMAC_SHA1_80 (D-t9), wire-pinned + OpenSSL-negotiated
+
+**The finding (read, not guessed):** str0m's DTLS layer emits
+`DtlsOutput::KeyingMaterial(km, profile)` right after Connected
+(vendor str0m src/lib.rs:1648-1658 → `session.set_keying_material`,
+session.rs:259-272) — i.e. the reference NEGOTIATES DTLS-SRTP (the
+RFC 5764 `use_srtp` ClientHello extension) and takes the bundle
+audio's SRTP keys from the DTLS session. Its offer list (crypto/
+srtp.rs `SrtpProfile::ALL`, most-preferred first): **AEAD_AES_256_GCM
+(0x0008), AEAD_AES_128_GCM (0x0007), AES128_CM_SHA1_80 (0x0001)**.
+Our own ANNOUNCE mirrors `rtcAudioOnNativeBundle:1` — audio on the
+bundle is part of the session shape we advertise, yet our ClientHello
+(runs 13-15) carried no use_srtp at all (deviation D-t3, until now).
+A Bifrost-class rig MAY treat a transport without negotiated SRTP as
+non-media-capable — hypothesis #2 beside run 15's nomination gap, and
+a fidelity fix regardless of the rig's opinion (the R32 rule: be the
+reference on the wire).
+
+**What shipped (round XXXV, sandbox-only round — no live run consumed):**
+* **mbedTLS DTLS-SRTP enabled the sanctioned way**: NEW
+  `streamer/src/kn_mbedtls_user_config.h` via the
+  `MBEDTLS_USER_CONFIG_FILE` mechanism (the pinned vendor tree stays
+  untouched — the sha1.c discipline). CMake sets the define PUBLIC on
+  the mbedtls target: it CHANGES THE STRUCT LAYOUT of
+  mbedtls_ssl_context/config, so every consumer (kncore → knvstd →
+  tests) inherits it — an asymmetric build would be silent memory
+  corruption. The four cross_check mbedtls legs carry the same define.
+* **kn_dtls offers `[SRTP_AES128_CM_HMAC_SHA1_80 (0x0001)]`, no MKI** —
+  the INTERSECTION of the reference's list and mbedTLS 3.6's ceiling
+  (no AEAD-GCM SRTP profiles in 3.6) and the mandatory WebRTC profile
+  (**deviation D-t9**, subsumes D-t3). New API
+  `kn_dtls_srtp_profile()` → the negotiated IANA id (0 = not
+  negotiated). RFC 5764 semantics make this SAFE by construction: a
+  server without a common profile simply omits the extension and the
+  handshake proceeds exactly as in runs 13-15 — pinned by a test leg.
+* **The keying material itself is NOT extracted yet** — bundle audio
+  is a later stage; §7 shapes-only evidence: the `dtls_ready` line
+  grew `"srtp_prof"` (the negotiated id).
+* **Tests (test_kndtls 32→39):** the ClientHello is captured on a
+  second loopback socket and an INDEPENDENT hand parser (RFC 6347
+  record + RFC 5246 body + the extension walk) asserts `use_srtp
+  0x000e` with ONE profile 0x0001 and an empty MKI — the parser bug
+  it caught on the way is itself evidence: RFC 5764's profile vector
+  is a BYTE LENGTH (`<2..2^16-1>`), not a count. Plus: negotiation
+  asserted on BOTH ends of the loopback pair (0x0001 chosen), and the
+  NEGATIVE leg — a server without profiles still completes the
+  handshake with profile 0 (the runs-13-15 wire can never regress).
+* **OpenSSL interop grew a second leg**: the same client against
+  `s_server -dtls1_2 -use_srtp SRTP_AES128_CM_SHA1_80` →
+  **`srtp_profile=0x0001` negotiated through an INDEPENDENT stack**;
+  the plain leg still passes with 0x0000 (the RFC omission semantics,
+  cross-verified).
+* Gates: native 16 suites, cross ×2 (the four mbedtls legs + usrsctp
+  link leg), ctest **18/18 ×2** (fresh rebuilds — layout change),
+  ASan+UBSan+LSan 39/39, E2E 43/43, T10 dry 66, T13 63.
+
+**Run 16 now tests TWO reference-faithful additions at once** (both
+individually justified by the reference read; the evidence lines
+deconfound them): the USE-CANDIDATE nomination (round XXXIV, D-t8) and
+use_srtp (this round, D-t9). Reading the tea leaves:
+* `sctp_up:1` → the nomination armed the rig's data plane (SCTP
+  answers the INIT on a SELECTED pair) — hypothesis #1.
+* `dtls_ready … "srtp_prof":1` + PLAY 200 with sctp still down → the
+  SRTP-capable transport was the gate — hypothesis #2.
+* PLAY 200 with everything up → R32's final stage-2 gate (media).
+* Nothing changes → `post_first` (the mystery record's ContentType,
+  printed since XXXIV) becomes the primary clue: 0x15 (alert) points
+  at the record layer, 0x17 (app) at a rig-initiated protocol, 0x16
+  (handshake) at renegotiation.

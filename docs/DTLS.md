@@ -133,10 +133,17 @@ prerequisite for finishing stage 2.
   test :2955 pins 49006). The old single-socket save/restore reconnect
   dance is gone — one peer per socket for life. Literal `PING` gets a
   `PONG` (:8605-8614).
-* ICE role: unchanged (controlling-consistent bursts; no USE-CANDIDATE
-  — the reference's OWN hand-built bursts are USERNAME-only,
-  :5013-5028; str0m's parallel agent nomination stays deviation D-t1,
-  measured per run).
+* ICE role: **UPDATED (round XXXIV, D-t8 retires D-t1):** run 15
+  measured the rig ignoring our client-initiated SCTP INIT while DTLS
+  kept succeeding — the prime suspect became the missing NOMINATION
+  (the reference's str0m controlling agent sends USE-CANDIDATE on the
+  valid pair; a Bifrost-class rig plausibly gates its data plane on
+  the SELECTED pair while DTLS gates only on connectivity).
+  kn_sock_stun_build2 + the nomination now ship: the pump carries
+  USE-CANDIDATE from the same real-inbound-STUN gate as the DTLS arm,
+  and keeps ONE nominated request per 100 ms tick post-ready (the
+  str0m selected-pair traffic beside the hand-built layer).
+  Byte-exact vs an independent golden (RTSP.md §21).
 * Gates (all green in the sandbox): test_kndtls 31/31 (in-test mbedTLS
   server shaped like the rig: HVR cookies + client-cert pinned
   server-side = pinning BOTH directions; loss/retransmit legs both
@@ -183,8 +190,11 @@ prerequisite for finishing stage 2.
    **PARTIALLY ANSWERED (run 13):** DTLS COMPLETES (388/293 ms) and
    PLAY still fails — but now with an explicit **400** instead of
    silence/455, so DTLS completion moved the state machine forward.
-   Whether the 400 wants SCTP (R3-C) or something else is run 14's
-   captured-body measurement.
+   Runs 14/15: the 400's body is EMPTY (generic refusal) and even a
+   client-initiated SCTP INIT (usrsctp live on Win7) drew no answer —
+   the live hypotheses are the ICE nomination (D-t8, round XXXIV) and
+   the missing use_srtp transport capability (D-t9, round XXXV);
+   run 16's evidence lines deconfound them (RTSP.md §22).
 4. unified vs paired sockets on real PL-region seats — **ANSWERED
    (run 13): `unified:0`** — real seats describe the NON-unified
    two-socket layout; the pair + the persisting bundle worker are the

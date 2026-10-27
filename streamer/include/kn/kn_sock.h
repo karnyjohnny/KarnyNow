@@ -193,6 +193,14 @@ enum {
     KN_SOCK_STUN_ATTR_USERNAME        = 0x0006,
     KN_SOCK_STUN_ATTR_MESSAGE_INTEGRITY = 0x0008,
     KN_SOCK_STUN_ATTR_XOR_MAPPED_ADDRESS = 0x0020,
+    /* RFC 8445 §5.2: the controlling agent's nomination flag — zero
+     * length. Round XXXIV (run 15's verdict): the reference runs
+     * str0m's ICE agent alongside the hand-built bursts (nvst.rs:8652
+     * feeds every STUN datagram to rtc.handle_input; poll_output sends
+     * whatever str0m emits), and a controlling str0m nominates the
+     * valid pair — the rig may gate its data plane on the nomination
+     * (deviation D-t8 retires D-t1). */
+    KN_SOCK_STUN_ATTR_USE_CANDIDATE   = 0x0025,
     KN_SOCK_STUN_ATTR_FINGERPRINT     = 0x8028
 };
 
@@ -210,6 +218,19 @@ int kn_sock_stun_build(uint8_t *out, size_t outsz, size_t *outlen,
                        const uint8_t *key, size_t keylen,
                        uint16_t attr_type, const uint8_t *attr,
                        size_t attrlen);
+
+/* The two-attribute form (round XXXIV): attr1 + an OPTIONAL attr2
+ * (attr2_type == 0 omits it; a zero-length attr2 like USE-CANDIDATE
+ * passes attr2=NULL, attr2len=0). Attribute ORDER matters for the
+ * wire bytes: attr1 first (USERNAME), attr2 second (USE-CANDIDATE) —
+ * the golden in test_knsock pins the exact layout. Same MI/FP rules. */
+int kn_sock_stun_build2(uint8_t *out, size_t outsz, size_t *outlen,
+                        uint16_t msg_type, const uint8_t tid[12],
+                        const uint8_t *key, size_t keylen,
+                        uint16_t attr1_type, const uint8_t *attr1,
+                        size_t attr1len,
+                        uint16_t attr2_type, const uint8_t *attr2,
+                        size_t attr2len);
 
 /* The XOR-MAPPED-ADDRESS value for an IPv4 source (family 1): 8 bytes,
  * port XOR (cookie>>16), octets XOR the cookie. */
