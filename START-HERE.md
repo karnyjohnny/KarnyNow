@@ -1,4 +1,4 @@
-# START HERE — KarnyNow entry point and living handoff (created at the close of round XXXVIII, 2026-10-27; updated at round XLIV close, 2026-10-28)
+# START HERE — KarnyNow entry point and living handoff (created at the close of round XXXVIII, 2026-10-27; updated at round XLV close, 2026-10-28)
 
 > **You are an agent continuing this project.** This file replaces
 > `docs/archive/PROJECT-STATE.md` as the living handoff document.
@@ -49,12 +49,12 @@ stream **sustainability** (see §3).
 3. **`docs/BOOTSTRAP.md`** — the project map: mission, stage gates,
    logging spec (§7), decision register D1–D13, risk register, research
    provenance. Still authoritative for philosophy and stage definitions.
-4. **`docs/RTSP.md` §31–§32** — the two most recent rounds' records
-   (run 24's clone draw, the F2/F3 yields, the 403 seat probe, the
-   lottery driver; run 25's false-keeper catch, the full
-   SESSION_LENGTH_TIMER, the F6 exit-code fix). §1–§30 are the
-   run-by-run history of the live protocol work.
-5. **`docs/INTEGRATION.md` rev 35 (the top block)** — the current delta:
+4. **`docs/RTSP.md` §32–§33** — the two most recent rounds' records
+   (run 25's false-keeper catch, the full SESSION_LENGTH_TIMER, the F6
+   exit-code fix; run 26's five-draw sitting, the measured CM
+   refusals, the jiggle A/B rationale). §1–§31 are the run-by-run
+   history of the live protocol work.
+5. **`docs/INTEGRATION.md` rev 36 (the top block)** — the current delta:
    new/changed files, integration traps, gate results. Older revs below
    it are superseded history.
 6. **The layer doc for whatever you touch**: `docs/RX.md` (receive
@@ -74,7 +74,7 @@ stream **sustainability** (see §3).
    recovery document; historical only. `docs/archive/analiza/` — the
    round 0–3 analyses (Polish), incl. the byte-level NVST spec (04).
 
-## 3. Current state (as of round XLIV close, 2026-10-28)
+## 3. Current state (as of round XLV close, 2026-10-28)
 
 **Live progress (R7 runs against the real production cloud):**
 
@@ -89,6 +89,7 @@ stream **sustainability** (see §3).
 | 23 | XLII | **THE DECISION-MATRIX RUN — INPUT ELIMINATED**: the XLI.1 jiggle flew exactly as designed (`first_send` t+1.28 s, **198** reports on sid 6 — opened 8/8 acked, `dropped:0`) and the server froze every plane ANYWAY at **10.58 s** of pristine video (319/319 AUs decoded @ 30.15 fps continuous, zero gaps, BWE warm at **34.8 Mbps** peak) — EARLIER than run 22's zero-input 41 s. **D8's live debut to the second**: stall+5 s → recover + 50 IDR/PLI → +5 s → terminal → `stop_reason:"recovery_exhausted"`, clean exit at 20.6 s (vs run 22's 248 s of dead air). The 0x010a sequence is IDENTICAL to run 22's: Arknights: Endfield never got past its own **Qt launcher portal** (`QtWebEngineProcess.exe`, foreground lost to pid 0) in either run. With the same app state freezing at 41 s once and 10.6 s once, the run-16→22 fidelity ladder is DEAD: media survival (10.2, 11.0, 30.5, ~1.3, ~1.2, ~41, 10.6 s over runs 16–23) is a **rig-side lottery**. WSS has NEVER ponged in any run. Ships F2 (0x010a cap 800→2400 hex — the 566 B `SESSION_LENGTH_TIMER` was truncated by our own cap in both runs) + F3 (`rel_ms` on the control-evidence lines) — full analysis `docs/RTSP.md` §30 |
 | 24 | XLIII | **LOTTERY DRAW #4 — A NEAR-EXACT CLONE OF RUN 23**: same app state (Arknights' Qt launcher portal), freeze at **10.43 s** of media (vs 10.58 s), `recovery_exhausted` at wall **20.54 s** (vs 20.56 s), 314/314 AUs decoded, zero gaps, BWE warm (31.7 Mbps peak), jiggle 200 reports / 0 drops. **F3's first flight**: ALL control traffic arrived inside the first 10 s (`ctrl_in rel_ms:10000`, 15 msgs, no 0x0101) — the freeze lands on an already-silent control plane. **F2's first flight**: the eight-notification startup burst decoded IN FULL (t+257–264 ms; two payloads at 936/970 hex chars were truncated by the old 800 cap in runs 22–23) — the rig ran this Arknights session under **`drsProfileName:"EA Desktop"`**, final foreground `Games.exe fullscreen:false`; NO `SESSION_LENGTH_TIMER` this draw (run 23 had one — the notification set varies per draw). The ~10.5 s mode is now the plurality (4 of 8 draws). The operator's post-run probe settled the deferred restart question: instant cm_create → bare **HTTP 403** twice, same token queued after a pause ⇒ **403 = seat cooldown, token reusable** — full analysis `docs/RTSP.md` §31 |
 | 25 | XLIV | **THE LOTTERY'S FIRST LIVE FLIGHT — AND ITS FIRST BUG CATCH**: F5 stopped at draw 1 of 5 because `run_session`'s exit code returned **0 for any session with ≥1 datagram** (pre-D8 legacy — runs 23/24 exited 0 too, nobody consumed the code until the lottery did) so the frozen draw looked like a keeper. **F6** ships the honest contract (only `"time"`/`"expect_frames"` exit 0; every terminal stop_reason exits 1) + the corrected lottery stop rule (only rc 1 re-draws; rc 0 = keeper; 2/3/Ctrl-C = abort). The single draw still paid twice: **F2 read the FULL `SESSION_LENGTH_TIMER` — `beforeEventMS:3599657` ≈ a ONE-HOUR budget — killing the session-limit theory of the early freezes**; and it was the first LOSSY draw on record (gaps 2, fec_repaired 6, nack 5, withheld 90, lossy_frames 5 — yet **257/257 AUs decoded**; BWE all-time peak **45.9 Mbps**) on a DIFFERENT rig (80.250.97.36). 0x0101 returned; `sctl_unknown` = opcode 0x020e (the reference doesn't know it either); the EA-Desktop drsProfile misclassification reproduced exactly; media died at **11.59 s** — the ~10–12 s band is now **5 of 9 draws**. Target T10 on the XLIII build: **ALL PASS 79** (knrx 243) — full analysis `docs/RTSP.md` §32 |
+| 26 | XLV | **THE LOTTERY'S FIRST REAL SITTING — 5 draws, 2 sessions, 3 lost at the CM door, BOTH refusals measured**: draw 1 dead at **13.15 s** media (379/379 AUs; lossy: gaps 1 / fec 1 / withheld 16 — decoded perfectly; BWE 36.6 Mbps); draw 2 **403 ×4 over ~90 s** (the seat cooldown is now bounded from below at >90 s); draw 3 **HTTP 429** — CloudMatch rate-limits session creates (first on record; F4 didn't retry it); draw 4 queued after ONE 20 s backoff, dead at **11.34 s** (342/342, clean); draw 5 403×3 → 429. **F6a/F6b live-proven**: honest rc 1 ×5, `lottery_summary draws:5`, exit 1, and `wire_session.log` (the exit≠0 ring dump) reappeared. Both draws: ALL control ≤10 s (`rel_ms:10000`, 0x0101 ×3/×1), NO SESSION_LENGTH_TIMER (intermittent: 23/25 yes, 24/26 no — the one-hour-budget fact stands). **The pattern reopening the jiggle question**: all FIVE jiggle-on draws ever died at 10.4–13.2 s; the only TWO long draws (18/22: 30.5/41 s) were activation-WITHOUT-jiggle — input was eliminated as a SAVIOUR (run 23) but never tested as a DEPRESSANT. Band now **7 of 11 draws**. Target T10 on XLIV: **ALL PASS 79** — full analysis `docs/RTSP.md` §33 |
 
 **Round XXXVIII shipped** (target-verified in round XXXIX: **T10 ALL PASS
 79 on Win7**, `test_knbw` reported 387 checks on target = sandbox — the
@@ -361,20 +362,54 @@ driver-side only, no wire-format change):**
   "recovery_exhausted"` IS the bug report); validator unchanged at
   **112** blocks, summary **74 = 74**. **Build stamp → `"XLIV"`.**
 
-**Sandbox gates at XLIV close (all green):** `build_native_tests.sh`
-**NATIVE TESTS PASS** (per-suite counts unchanged: knrx 218, kninput
-548, knbw 387, knselftest 117; paranoid legs incl.) · `cross_check.sh`
-PASS ×2 arches, zero warnings · ctest **20/20 ×3** (native + mbedTLS +
-schannel) · T10 POSIX dry **69 checks, 0 failed** · T13 **ALL PASS
-63** · summary-printf validation **112** blocks, 0 mismatches,
-summary skeleton `json.loads` PASS · F6b field test (`--lottery=5` on
-the TLS-less build: stops after draw 1, `last_rc:3`, exit 3, envelope
-`json.loads` 4/4, stamp XLIV) · `sandbox_session_e2e` 43/43 carried
-from XLIII (e2e links no file XLIV touched) · ASan/UBSan carried from
-XLI.1 (no wire/decoder code touched in XLIII/XLIV).
+**Round XLV shipped (run-26 analysis + CM patience + the jiggle A/B —
+driver-side only, no wire-format change):**
+
+- **Run 26's verdict** (RTSP §33): the lottery completed 5 honest
+  draws (F6 live-proven: rc 1 per dead draw, no false keeper, exit 1,
+  the `wire_session.log` ring dump reachable again). Two real
+  sessions, both dead in the band (13.15 s / 11.34 s; 379/379 +
+  342/342 AUs; draw 1 lossy and decoded perfectly). Three draws lost
+  at CloudMatch: the seat cooldown exceeded 90 s (403 ×4), and the
+  first-ever **429 rate limiter** killed two draws instantly (F4 only
+  retried 403).
+- **F7**: cm_create patience widened — retry on 403 + the whole
+  `cm_status_transient()` class (incl. 429), escalating
+  **20/40/80/160 s** (≤ ~5 min per draw, 5 attempts); event renamed
+  **`cm_create_backoff`** with a `"status"` field (403 vs 429 are now
+  distinguishable in evidence).
+- **F8**: `--session-jiggle=MS` (0–10000, default 100 = unchanged;
+  **0 = OFF**) — run_session takes it as a parameter; the media-loop
+  gate short-circuits on 0 (no `input_jiggle` line,
+  `feedback.jiggle` stays 0). The jiggle stops being a controlled
+  constant and becomes the variable under test: ALL five jiggle-on
+  draws died at 10.4–13.2 s; the only two long draws ever (runs 18/22)
+  were activation-WITHOUT-jiggle. Direction caveat for the XLII
+  verdict: input is eliminated as a SAVIOUR (run 23), untested as a
+  DEPRESSANT — run 27 answers it.
+- **Field correction (rev 36 trap 2)**: the knlog channel files
+  **APPEND across lottery draws** within one process (run 26's
+  `transport.log` held both sessions; diag rotates at ~2 MB) — the
+  rev-34 "overwritten per draw" note was wrong; a lottery run's
+  `logs/` directory holds the WHOLE run.
+- **Evidence**: one renamed + reshaped line (`cm_create_backoff`),
+  validator unchanged at **112** blocks, summary **74 = 74**.
+  **Build stamp → `"XLV"`.**
+
+**Sandbox gates at XLV close (all green):** `build_native_tests.sh`
+**NATIVE TESTS PASS** (per-suite counts unchanged; paranoid legs
+incl.) · `cross_check.sh` PASS ×2 arches, zero warnings · ctest
+**20/20 ×3** (native + mbedTLS + schannel) · T10 POSIX dry **69
+checks, 0 failed** · T13 **ALL PASS 63** · summary-printf validation
+**112** blocks, 0 mismatches, skeleton `json.loads` PASS · F8 field
+tests (`--session-jiggle=10001`/`=-1` → exit 2; usage renders;
+`--lottery=5 --session-jiggle=0` on the TLS-less build → stop after
+draw 1 rc:3, stamp XLV, `json.loads` 4/4) · `sandbox_session_e2e`
+**43/43** (run from the repo ROOT — cwd-sensitive) · ASan/UBSan
+carried from XLI.1 (no wire/decoder code touched XLIII–XLV).
 
 **Codebase shape:** 28 `streamer/src/*.c` + 26 `streamer/include/kn/*.h`;
-the production binary is `knvstd` (`knvstd_main.c`, 6744 lines: modes
+the production binary is `knvstd` (`knvstd_main.c`, 6765 lines: modes
 `--capture`, `--decode`, `--replay-capture`, `--session`, `--selftest`,
 `--list-selftests`); 15 registered production self-tests; 18 native test
 suites. Third-party (vendored, gitignored, re-stage if cleaned):
@@ -385,8 +420,8 @@ tiny-AES-c, crypto-algorithms-sha1, usrsctp, mbedTLS 3.6.0 (+framework).
 > The operator asked for **very simple, step-by-step** instructions —
 > this section is written to be followed literally, one step at a time.
 
-**Step 1 — sync these 4 files** (round XLIV delta, on top of the
-already-synced XLIII set):
+**Step 1 — sync these 4 files** (round XLV delta, on top of the
+already-synced XLIV set):
 
 - `streamer/src/knvstd_main.c`
 - `docs/RTSP.md`
@@ -397,50 +432,49 @@ already-synced XLIII set):
 delete the build tree, build, run T10 in full.
 Expected verdict: **ALL PASS 79**, `test_knrx` **243**,
 `test_kninput` **548**, `input.vectors` **50** — identical to run
-25's fresh T10 (XLIV changed no test file).
+26's T10 (XLV changed no test file).
 
-**Step 3 — run 26, the lottery — the SAME command as run 25** (only
-the file names change; replace `<TOKEN>`):
+**Step 3 — run 27, the JIGGLE-OFF lottery.** ONE command — run 26's
+command plus `--session-jiggle=0` (replace `<TOKEN>`):
 
 ```
-knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 --session-seconds=360 --lottery=5 --lottery-gap=30 --session-au-dir=logs\aus_r26 > logs\run26.log
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 --session-seconds=360 --lottery=5 --lottery-gap=30 --session-jiggle=0 --session-au-dir=logs\aus_r27 > logs\run27.log
 ```
 
-What happens NOW (after the F6 fix): each dead draw (`recovery_
-exhausted`) exits 1 → the lottery waits 30 s and **draws again**, up
-to 5 times. It stops early ONLY if a draw survives the full 360 s
-(that is a keeper — leave the machine alone, it is streaming). HTTP
-403 seat cooldowns are handled automatically (`cm_create_403_
-backoff` lines are NORMAL between draws). Ctrl+C ends everything.
-Expect ~20–60 minutes total (5 × queue + ~20 s per dead draw +
-pauses).
+What happens: up to 5 draws, this time WITHOUT the mouse jiggle
+(everything else identical). Between draws the log may show
+`cm_create_backoff {"status":403...}` or `{"status":429...}` waits of
+20–160 s — that is the new F7 patience working, NOT an error; the
+whole run can take up to ~40 minutes. It stops early ONLY on a draw
+that survives the full 360 s (a keeper — leave the machine alone).
+Ctrl+C ends everything.
 
-**Step 4 — check the first line** of `logs\run26.log`:
-`{"mode":"build","compiled":"...","round":"XLIV"}` — if it says
-`XLIII`, the rebuild did not take; redo Step 2.
+**Step 4 — check the first line** of `logs\run27.log`:
+`{"mode":"build","compiled":"...","round":"XLV"}` — if it says
+`XLIV`, the rebuild did not take; redo Step 2. Also: NO
+`input_jiggle` line may appear anywhere, and every draw's summary
+must show `"jiggle":0` (the off-switch proof).
 
 **Step 5 — send back:**
 
-1. `logs\run26.log` — the WHOLE file (every draw's summary is in it);
-2. the entire `logs\` directory (the LAST draw's knlog channels);
+1. `logs\run27.log` — the WHOLE file (every draw's summary is in it);
+2. the entire `logs\` directory (it APPENDS across draws — it holds
+   the whole run, including `diag.1.log` if present);
 3. the fresh `T10_skrot.txt` + `T10_wynik.txt` pair.
 
-**Read matrix for run 26 (agent side, RTSP §32.5):** five dead draws
-⇒ the ~10–12 s modal band is confirmed at n=5 in one sitting and the
-practical stage-2 exit is a persistence lottery (or a gameplay-
-reaching app); ANY draw surviving > 60 s ⇒ long draws are reachable
-on demand — keep drawing until a full-length keeper closes stage 2;
-`lottery_summary draws:K last_rc:0` with K < 5 ⇒ a keeper happened —
-the run that changes everything. If the operator can supply a
-gameplay-reaching app id, swapping `--session-app=` remains the
-single most valuable variable (the Arknights portal draws are now
-fully characterised: 1-hour budget, EA-Desktop profile, ~10–12 s
-modal death).
+**Read matrix for run 27 (agent side, RTSP §33.4):** ANY draw
+surviving > 30 s ⇒ **the jiggle suppresses long draws** — input
+flips from "eliminated as saviour" to "active depressant", the
+default goes OFF and long draws become farmable; all draws ~10–13 s
+⇒ the jiggle is exonerated a second time (12 draws total) and the
+long-draw mode is pure rig-side luck — keep drawing until a keeper.
+Either answer closes the question XLII left open. A gameplay-reaching
+app id remains the single most valuable missing input if the operator
+can ever supply one.
 
 **Still deferred (unchanged):** D-t13 (decode-side watchdog), G3
-keyboard/wheel/text (deprioritised — input is eliminated as a
-survival factor), bundle audio extraction, G1 (input handshake
-timeout), G4 (server cursor payloads).
+keyboard/wheel/text (deprioritised), bundle audio extraction, G1
+(input handshake timeout), G4 (server cursor payloads).
 
 ## 5. Binding working agreements (carried through every round)
 
@@ -522,7 +556,7 @@ knvstd --session:  CloudMatch create/poll (kn_cm)  →  session context
    → evidence: one JSONL line per event; summary JSON at exit.
 ```
 
-## 8. Traps that will bite you (curated; full list in docs/INTEGRATION.md rev 35 §traps)
+## 8. Traps that will bite you (curated; full list in docs/INTEGRATION.md rev 36 §traps)
 
 1. **Clock exactness is load-bearing**: all estimator math runs on
    **integer nanoseconds** (int64) exactly like the reference's
@@ -597,12 +631,16 @@ knvstd --session:  CloudMatch create/poll (kn_cm)  →  session context
     and the POSIX stub (tail of `kn_net_mbedtls.c`). Fixes go in the
     Win32 body; in the sandbox only the cross `-DKN_TLS_BACKEND_MBEDTLS=1`
     legs even COMPILE it — there is no runtime test off-target.
-13. **A bare HTTP 403 from cm_create is a SEAT COOLDOWN, not a dead
-    token** (run24v2: two instant 403s after a recovery_exhausted
-    exit, then the SAME token queued fine after a pause). F4 backs
-    off automatically (20 s × 3, `cm_create_403_backoff` lines). The
-    JSON-body sibling `cloud_status 11 = SESSION_LIMIT` is a
-    different signal and is deliberately NOT retried.
+13. **CloudMatch's door has TWO waitables, not one** (run 26): a bare
+    HTTP 403 = seat cooldown (can exceed 90 s; run24v2 proved the
+    token stays valid) and HTTP **429** = create-rate limiter (draws
+    3/5 died to it under the old 403-only F4). F7 (XLV) retries both —
+    plus the rest of the transient class — on an escalating
+    20/40/80/160 s schedule, logging `cm_create_backoff` with a
+    `"status"` field (the XLIII/XLIV `cm_create_403_backoff` name is
+    GONE — update any parsers). The JSON-body sibling
+    `cloud_status 11 = SESSION_LIMIT` remains deliberately NOT
+    retried.
 14. **The live-session exit code only became honest in XLIV (F6a)**:
     pre-XLIV builds exited **0 even for `recovery_exhausted`** (any
     media at all ⇒ 0) — which is why run 25's lottery stopped at
@@ -610,6 +648,11 @@ knvstd --session:  CloudMatch create/poll (kn_cm)  →  session context
     `--session-seconds` (or met `--session-expect-frames`)"; every
     terminal stop_reason exits 1. Never build automation on pre-XLIV
     exit-code folklore.
+15. **Lottery knlog files APPEND across draws** (run 26 field
+    correction: `transport.log` held both sessions' stats; the
+    rev-34 "overwritten per draw" claim was wrong) and diag rotates
+    at ~2 MB (`diag.1.log`). A lottery run's `logs/` directory is
+    whole-run evidence — always request it in full.
 
 ## 9. Repository map
 
@@ -670,6 +713,7 @@ logs/                   ALL logs/evidence (gitignored): knvstd --log-dir
 | XLII | **run 23 = the decision-matrix run: THE JIGGLE FLEW (198 reports, sid 6, 0 drops) AND THE FREEZE CAME ANYWAY at 10.58 s** — earlier than run 22's zero-input 41 s ⇒ **input eliminated**, the fidelity ladder is dead, media survival (1.2–41 s over runs 16–23) is a **rig-side lottery**. **D8's live debut to the second** (stall+5 s → recover + 50 IDR/PLI → +5 s → terminal → `recovery_exhausted`, exit 20.6 s vs run 22's 248 s dead air). 0x010a IDENTICAL to run 22: Arknights never left its **Qt launcher portal** (foreground lost pid 0) — the untested variable is the APP. WSS never ponged in any run. Target T10 **79** (knrx +15=243 cmake-recipe, kninput 548, vectors 50). Ships **F2** (010a cap 800→2400 — `SESSION_LENGTH_TIMER` was self-truncated in both runs) + **F3** (`rel_ms` on ctrl evidence) + stamp XLII; jiggle stays ON. Run 24 = a gameplay-reaching app + optional 2–3 lottery draws |
 | XLIII | **run 24 = lottery draw #4, a near-exact CLONE of run 23** (freeze 10.43 s vs 10.58 s of media, `recovery_exhausted` 20.54 s vs 20.56 s; 314/314 AUs, zero gaps, jiggle 200/0) — **F3** proved all control traffic arrived inside the first 10 s (the freeze lands on a silent control plane); **F2** decoded the eight-notification burst in full (t+257–264 ms; two payloads had been truncated by the old 800 hex cap) and exposed the rig's classification: the Arknights session runs under **`drsProfileName:"EA Desktop"`** (it follows the Qt window, not our cmsId); NO SESSION_LENGTH_TIMER this draw — the set varies per draw. The ~10.5 s mode is now the plurality (4 of 8 draws). Operator probe: instant cm_create after exit → bare **HTTP 403** ×2, same token queued after a pause ⇒ seat cooldown, token reusable. Ships **F4** (403 backoff 20 s × 3, TLS rebuilt per retry) + **F5** (`--lottery=N`/`--lottery-gap=SEC` in-process re-draw driver with `lottery_gap/draw/summary` envelope, early stop on rc==0, full re-callability audit of `run_session()`) + stamp **XLIII**; validator 112 blocks. Run 25 = the first unattended lottery: five draws, one command |
 | XLIV | **run 25 = the lottery's first live flight caught our own bug**: it stopped at draw 1 of 5 because `run_session` exited **0 for any session with ≥1 datagram** (pre-D8 legacy contract drift — runs 23/24 exited 0 too) and F5 read rc 0 as "keeper". **F6a** restores the documented contract (only `"time"`/`"expect_frames"` exit 0; every terminal stop_reason exits 1) and **F6b** fixes the stop rule (only rc 1 re-draws; 0 = keeper; 2/3/Ctrl-C = abort). The lone draw still made the round: **F2 read the FULL `SESSION_LENGTH_TIMER` — `beforeEventMS:3599657` = a ONE-HOUR budget ⇒ the session-limit theory of the ~10–12 s freezes is DEAD**; first LOSSY draw (gaps 2, fec 6, nack 5, withheld 90 — 257/257 decoded: the pipeline is loss-proven live; BWE record 45.9 Mbps) on a different rig IP; 0x0101 back; 0x020e logged as `sctl_unknown` (the reference doesn't know it either); EA-Desktop drsProfile reproduced. Media 11.59 s — the band is **5 of 9 draws**. Target T10 (XLIII build): ALL PASS 79, knrx 243. Stamp **XLIV**. Run 26 = the same command — five real draws |
+| XLV | **run 26 = the lottery's first real sitting: 5 draws, 2 sessions (dead at 13.15 s + 11.34 s, both in-band; 379/379 + 342/342 AUs), 3 lost at the CM door — BOTH refusals measured**: seat cooldown >90 s (403 ×4) and the first-ever **429 create-rate-limiter** (killed draws 3/5 instantly under 403-only F4). F6 live-proven (honest rc 1 ×5, exit 1, `wire_session.log` returned). No SESSION_LENGTH_TIMER in either draw (intermittent: 23/25 yes, 24/26 no); all control ≤10 s again; band now **7 of 11 draws**. The pattern reopening the jiggle question: 5/5 jiggle-on draws in-band vs the only 2 long draws ever (18/22) jiggle-OFF — input eliminated as SAVIOUR (run 23), never tested as DEPRESSANT. Ships **F7** (retry 403+transient incl. 429, escalating 20/40/80/160 s, `cm_create_backoff {"status":...}`) + **F8** (`--session-jiggle=MS`, 0 = OFF — the A/B knob) + the knlog-APPEND field correction. Stamp **XLV**. Run 27 = the jiggle-OFF lottery |
 
 ## 11. The user protocol
 

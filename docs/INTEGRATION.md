@@ -1,3 +1,87 @@
+# INTEGRATION NOTES — Round XLV delta, rev 36 (RUN 26 = THE LOTTERY'S FIRST REAL SITTING: 5 draws, 2 real sessions, 3 lost at the CloudMatch door — and the door refusals are now MEASURED: the seat cooldown can exceed **90 s** (draw 2: 30 s gap + F4's 3×20 s retries, still 403) and repeated creates trip an **HTTP 429 rate limiter** (draws 3 and 5; F4 only retried 403, so both died instantly). F6a/F6b passed their live proof — every dead draw exited 1 honestly, the lottery ran all 5, `wire_session.log` (the exit≠0 ring dump) reappeared. The two real draws died in the band again (**13.15 s** and **11.34 s**; 379/379 + 342/342 AUs; draw 1 lossy — gaps 1, fec 1, withheld 16 — decoded perfectly), completing the pattern that reopens the jiggle question as a controlled A/B: **all FIVE jiggle-on draws ever died at 10.4–13.2 s; the only TWO long draws in history (runs 18/22: 30.5/41 s) were activation-WITHOUT-jiggle.** XLII eliminated input as a saviour but never tested it as a depressant. Ships **F7** (cm_create patience: retry 403 + the whole `cm_status_transient` class incl. 429, escalating **20/40/80/160 s**, event renamed `cm_create_backoff` + `"status"` field) and **F8** (`--session-jiggle=MS`, 0–10000, default 100 unchanged, **0 = OFF** — the A/B knob). No SESSION_LENGTH_TIMER in either draw (delivery is intermittent: present 23/25, absent 24/26×2 — the one-hour-budget fact of §32.2 stands). Stamp **XLV**. Run 27 = the jiggle-OFF lottery.)
+
+> **Rev 36 supersedes rev 1-35 as the current delta.** Canonical state:
+> **`START-HERE.md`** (repo root). Design record: **`docs/RTSP.md` §33**
+> (run 26 draw-by-draw, the F7 schedule, the jiggle A/B rationale and
+> the 11-draw table, the run-27 read matrix).
+
+## Changed files (round XLV)
+
+| file | change |
+|---|---|
+| `streamer/src/knvstd_main.c` | **F7**: the F4 retry loop widened — retry iff `http_status == 403 \|\| cm_status_transient(http_status)` (408/425/429/500/502/503/504 — the polling loop's existing class), escalating wait `SESS_CM_BACKOFF_BASE_MS << attempt` = 20/40/80/160 s, `SESS_CM_RETRIES 4` (5 attempts, ≤ ~5 min patience per draw); event line renamed `cm_create_403_backoff` → **`cm_create_backoff`** with `"status"` added (shape: `{"status":%d,"attempt":%d,"wait_ms":%u}`). Old defines `SESS_CM_403_*` replaced. **F8**: `run_session()` gains a `long jiggle_ms` parameter (before `au_dir`); `const uint32_t jiggle_interval` replaces both `SESS_JIGGLE_INTERVAL_MS` uses in the media loop and the gate becomes `jiggle_interval &&`; new flag `--session-jiggle=MS` (0–10000, default `SESS_JIGGLE_INTERVAL_MS` = 100; 0 disables the block — no `input_jiggle` line, `feedback.jiggle` stays 0); both call sites pass it; validation + usage() updated (the three XLIII usage lines also got their missing source indentation). Build stamp `XLIV`→`XLV`. 6744 → 6765 lines. No wire-format changes. |
+| `docs/RTSP.md` | §33 — the full round-XLV record. |
+| `START-HERE.md` | state → XLV; run-26 row; the XLV-shipped block; §4 = run 27 (jiggle-OFF lottery, same simple step-by-step); trap: transport channels APPEND across draws; history +XLV. |
+
+## Integration notes / traps for the next agent
+
+1. **`cm_create_backoff` replaced `cm_create_403_backoff`** (XLV):
+   log parsers/regexes keyed on the old name must be updated; the new
+   line carries `"status"` so 403 (seat) and 429 (rate limit) are
+   distinguishable in evidence. Patience budget per draw: 20+40+80+160
+   = 300 s worst case — a 5-draw lottery can now legitimately take
+   ~30+ minutes without anything being wrong.
+2. **The knlog channel files APPEND across lottery draws within one
+   process** (field-corrected in run 26: `transport.log` held 44
+   session_stats lines spanning draw 1 at 19:33Z and draw 4 at 19:39Z;
+   draw 5's cm-failure added nothing). Rev 34/35's "overwritten per
+   draw" was WRONG — `kn_log_init` appends. The `logs/` directory of a
+   lottery run therefore holds the WHOLE run's knlog evidence (diag
+   rotates at ~2 MB: `diag.1.log` + `diag.log`), and stdout still
+   holds every draw's summary. Deliver both, as always.
+3. **The jiggle is a VARIABLE again (F8)** — XLII's "jiggle stays ON
+   as a controlled constant" is superseded by run 26's pattern (5/5
+   jiggle-on draws in the band; 2/2 long draws jiggle-off). Until run
+   27 answers it, do NOT cite "input eliminated" without the
+   direction caveat: input is eliminated as a SAVIOUR (run 23),
+   untested as a DEPRESSANT (run 27's job). Default remains 100 ms —
+   the flag changes nothing unless asked.
+4. **`wire_session.log` is back in the evidence set**: the ring dump
+   only writes when exit ≠ 0, which the pre-F6 exit code suppressed on
+   frozen sessions. It is draw-N's media ring (last failed draw with a
+   ring); 167 KB in run 26 = draw 4's media bytes.
+5. **SESSION_LENGTH_TIMER delivery is intermittent** (present runs
+   23/25, absent 24/26×2): never treat its absence as a protocol
+   regression, and keep F2's 2400 cap — when it arrives it is 567 B /
+   1126 hex chars.
+6. Everything from rev 35 stands (F6a exit-code contract: 0 = the
+   draw survived; F6b lottery rc semantics; 403 = seat cooldown;
+   run_session re-callability; drsAppName/drsProfileName in the 0x010a
+   tails; knrx 218 raw / 243 cmake; summary-printf ritual — 112
+   blocks).
+
+## Gate results (sandbox, this round)
+
+| gate | result |
+|---|---|
+| `tools/build_native_tests.sh` | **NATIVE TESTS PASS** (per-suite counts unchanged; paranoid legs incl.) |
+| `tools/cross_check.sh` ×2 arches | **CROSS-CHECK PASS**, zero warnings |
+| ctest native / mbedTLS / schannel | **20/20 ×3** |
+| T10 POSIX dry | **69 checks, 0 failed** |
+| T13 | **ALL PASS 63** |
+| summary-printf validator | **112** blocks, 0 mismatches; summary **74 = 74**; skeleton `json.loads` PASS (the renamed `cm_create_backoff` block re-validated in place) |
+| F8 field tests | `--session-jiggle=10001` / `=-1` → usage exit 2; usage() renders the flag; `--lottery=5 --session-jiggle=0` on the TLS-less build → stops after draw 1 `rc:3`, stamp `"XLV"`, envelope `json.loads` 4/4 |
+| `sandbox_session_e2e` | **43/43 PASS** (from the repo root — the binary is cwd-sensitive for the fake-rig spawn) |
+| ASan/UBSan | carried from XLI.1 (no wire/decoder code touched XLIII–XLV) |
+
+## Target expectations (Win7, run 27)
+
+- **T10**: ALL PASS **79**, knrx **243**, kninput **548**,
+  `input.vectors` **50** — unchanged (XLV touched no test file).
+- First stdout line of every run: `"round":"XLV"`.
+- **Run 27** (the jiggle-OFF lottery — one flag added to run 26's
+  command):
+  `knvstd.exe --session --session-token=<tok> --session-app=107057914 --session-seconds=360 --lottery=5 --lottery-gap=30 --session-jiggle=0 --session-au-dir=logs\aus_r27 > logs\run27.log`
+- Per draw: NO `input_jiggle` line, summary `feedback.jiggle` **0**
+  (the off-switch proof); `cm_create_backoff {"status":403|429,...}`
+  lines are NORMAL between draws (F7 patience — waits up to 160 s);
+  envelope lines as in run 26. A surviving draw → `lottery_draw rc:0`
+  + early stop + process exit 0.
+- Deliver: `run27.log` (whole file) + the entire `logs/` directory
+  (appends across draws — it holds the whole run) + the fresh T10 pair.
+
+---
+
 # INTEGRATION NOTES — Round XLIV delta, rev 35 (RUN 25 = THE LOTTERY'S FIRST LIVE FLIGHT — IT STOPPED AT DRAW 1 OF 5 AND THE REASON IS OUR OWN BUG, FOUND AND FIXED: `run_session`'s exit code returned **0 for any session that received ≥1 datagram and wasn't `socket_error`**, so `recovery_exhausted` exited 0 (runs 23–25 all did — the code was simply never consumed before F5) and the lottery's "rc 0 = keeper" rule misread the dead draw as a survivor. **F6a** makes the exit code honest per the documented contract (only the natural endings `"time"` / `"expect_frames"` can exit 0; every terminal/interrupted stop_reason exits 1) and **F6b** corrects the lottery stop rule (only rc 1 re-draws; rc 0 = keeper; rc 2/3 = abort; Ctrl-C aborts). The single draw still paid for the run: **F2 read the FULL `SESSION_LENGTH_TIMER` for the first time — `beforeEventMS: 3599657` ≈ a ONE-HOUR session budget — killing the session-limit theory of the early freezes**; the draw was the first LOSSY one on record (gaps 2, fec_repaired 6, nack 5, withheld 90, lossy_frames 5, yet 257/257 decoded; BWE all-time peak 45.9 Mbps) on a DIFFERENT rig IP (80.250.97.36); 0x0101 returned; the EA-Desktop drsProfile misclassification reproduced exactly; media died at 11.59 s — the ~10–12 s band is now **5 of 9 draws**. Stamp **XLIV**. Run 26 = the same command, this time it will actually draw five times.)
 
 > **Rev 35 supersedes rev 1-34 as the current delta.** Canonical state:

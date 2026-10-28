@@ -3280,3 +3280,95 @@ stage 2; `cm_create_403_backoff` lines ⇒ F4's live proof and the
 seat-cooldown bound. Every draw prints its own summary + envelope
 lines; stdout is the complete record (the knlog `logs/` channels hold
 the LAST draw only).
+
+---
+
+## 33. Round XLV — R7 run 26: **THE LOTTERY RAN FOR REAL — 5 draws, 2 real sessions, 3 lost at the CloudMatch door, and the two refusals are now measured: the seat cooldown can exceed 90 s (draw 2: 30 s gap + 3×20 s F4 retries, still 403) and repeated creates trip an HTTP 429 rate limiter (draws 3 and 5 — F4 did not retry 429, so both died instantly).** F6a/F6b passed their live proof (every dead draw exited 1 honestly, the lottery completed all 5, and `wire_session.log` — the exit≠0 ring dump — reappeared for the first time since the pre-D8 runs). The two real draws both died in the band (**13.15 s** and **11.34 s** of media; 379/379 and 342/342 AUs; draw 1 lossy again — gaps 1, fec 1, withheld 16 — decoded perfectly), which completes a pattern worth a controlled test: **all FIVE jiggle-on draws ever (runs 23–26) died at 10.4–13.2 s, while the only TWO long draws in history (runs 18/22: 30.5/41 s) were activation-WITHOUT-jiggle.** Ships **F7** (cm_create retries 403 + the whole transient class incl. 429, escalating 20/40/80/160 s, event renamed `cm_create_backoff` + `status` field) and **F8** (`--session-jiggle=MS`, 0 = OFF — the jiggle stops being a controlled constant and becomes the variable under test). Stamp **XLV**. Run 27 = the jiggle-OFF lottery.
+
+### 33.1 Run 26, draw by draw
+
+| draw | fate | detail |
+|---|---|---|
+| 1 | **session, dead at 13.15 s media** | queue instant (`queue_position:0`); `recovery_exhausted`, wall 23.3 s; 379/379 AUs, 11 keyframes; gaps 1, fec_repaired 1, withheld 16, lossy_frames 3 — decoded perfectly; BWE 36.6 Mbps; rig handoff normal |
+| 2 | **cm_create 403 ×4 → died at the door** | 30 s lottery gap + F4's 3×20 s backoff = ~90 s of patience, STILL 403 ⇒ the seat cooldown exceeded 90 s (run 24's manual probe suggested "a pause" — now bounded from below) |
+| 3 | **cm_create 429 → died instantly** | the FIRST 429 on record: CloudMatch rate-limits session CREATES (≈7 creates in ~6 minutes triggered it); F4 only retried 403 → no patience applied |
+| 4 | **session, dead at 11.34 s media** | queued after ONE 20 s backoff (seat freed); `recovery_exhausted`, wall 21.6 s; 342/342 AUs, gaps 0, clean; BWE 33.8 Mbps |
+| 5 | **cm_create 403 ×3 → 429 → died** | the refusals compose: seat first, then the rate limiter on the retries |
+
+`lottery_summary {"draws":5,"of":5,"last_rc":1}` — F6b re-drew on every
+rc 1 and never mistook a dead draw for a keeper; the process exited 1
+("no keeper this evening"), exactly the new contract. The 167 KB
+`wire_session.log` (draw 4's media ring, dumped because exit ≠ 0) is
+the first ring dump since the exit-code fix made it reachable again.
+
+Control plane, both draws (F3): `ctrl_in rel_ms:10000` — draw 1: 18
+msgs (`020e`×1 `0111`×2 `010a`×9 `010f`×1 `0106`×1 `010e`×1
+**`0101`×3**), draw 4: 17 msgs (**`0101`×1**). ALL control traffic
+inside the first 10 s again; the freeze lands on silence again.
+**No SESSION_LENGTH_TIMER in either draw** (9 = the 8-notification
+burst + one extra foreground/process variant) — the timer's delivery
+is intermittent: present in runs 23 (~12.9 s) and 25 (1.67 s), absent
+in 24, 26×2. The one-hour budget fact from §32.2 stands; its delivery
+is simply per-draw luck.
+
+### 33.2 F7 — the CloudMatch patience schedule
+
+Run 26 measured both refusal classes and F4's insufficiency. F7:
+
+- retry when `http_status == 403 || cm_status_transient(http_status)`
+  — reusing the polling loop's existing class (408/425/**429**/500/
+  502/503/504); every other status aborts instantly as before;
+- escalating waits `SESS_CM_BACKOFF_BASE_MS << attempt` =
+  **20 → 40 → 80 → 160 s** (`SESS_CM_RETRIES 4`; ≤ 5 min of patience
+  per draw, 5 attempts total) — covers the >90 s seat cooldown with
+  margin and gives a 429 limiter minutes to clear;
+- event line renamed `cm_create_403_backoff` → **`cm_create_backoff`**
+  with a `"status"` field (`{"status":429,"attempt":2,"wait_ms":40000}`).
+
+Worst-case lottery wall time grows (5 draws × up to ~5 min of CM
+patience) but every wait is bounded and every line is evidence.
+
+### 33.3 The jiggle question reopens — as a controlled A/B (F8)
+
+The survival record after 11 measured draws:
+
+| run | 16 | 17 | 18 | 20 | 21 | 22 | 23 | 24 | 25 | 26a | 26d |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| media s | 10.2 | 11.0 | **30.5** | ~1.3 | ~1.2 | **~41** | 10.6 | 10.4 | 11.6 | **13.2** | 11.3 |
+| activation | – | – | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| jiggle | – | – | – | – | – | – | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+The band (~10–13 s) holds 7 of 11 draws — including runs 16/17 (no
+activation, no jiggle) and every jiggle-on draw. The TWO long draws
+ever recorded (18: 30.5 s; 22: ~41 s) share exactly one
+configuration: **activation without jiggle**. XLII eliminated input as
+a SAVIOUR (run 23 froze WITH the jiggle flying, earlier than run 22
+without it) — but it never tested the opposite direction: could the
+jiggle be *suppressing* the long-draw mode (a server-side
+synthetic-input policy, an encoder interaction, or pure chance at
+n=5)? Confounders are real (different evenings, different rig pools —
+run 26 drew a fresh IP), which is why this needs draws, not argument.
+
+**F8** makes the jiggle a run parameter: `--session-jiggle=MS`
+(0–10000, default 100 = unchanged behaviour; **0 = OFF** — the gate
+`jiggle_interval &&` short-circuits the media-loop block; the
+`input_jiggle` first_send line and the `feedback.jiggle` counter then
+simply never fire). The activation chain is untouched — run 27 is
+"run 22's configuration inside run 26's lottery".
+
+### 33.4 Run 27 — the jiggle-OFF lottery
+
+```
+knvstd.exe --session --session-token=<tok> --session-app=107057914 --session-seconds=360 --lottery=5 --lottery-gap=30 --session-jiggle=0 --session-au-dir=logs\aus_r27 > logs\run27.log
+```
+
+Read matrix:
+
+| outcome | verdict |
+|---|---|
+| ANY draw > 30 s (esp. a 360 s keeper → rc 0, early stop) | **the jiggle suppresses long draws** — input flips from "eliminated as saviour" to "active depressant"; default goes OFF and the long-draw mode becomes farmable |
+| all draws ~10–13 s again | the jiggle is exonerated a second time (7 jiggle-on + 5 jiggle-off draws, same band) ⇒ the long-draw mode is pure rig-side luck; keep the jiggle ON or OFF indifferently and farm draws until a keeper |
+| `cm_create_backoff {"status":429/403,...}` lines followed by queued draws | F7 proven live; the CM patience schedule measured against the real limiter |
+
+Every draw prints its own summary; `feedback.jiggle` MUST read 0 in
+run 27 (the off-switch proof), and no `input_jiggle` line may appear.

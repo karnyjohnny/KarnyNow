@@ -100,9 +100,11 @@ static void usage(void)
            "         [--session-play-settle=N] (extra ms after sctp_up before\n"
            "                                    PLAY; default 250)\n"
            "         [--session-expect-frames=N] [--session-au-dir=DIR]\n"
-"         [--lottery=N] [--lottery-gap=SEC]  (re-draw the WHOLE\n"
-"          bring-up to N times after a terminal draw, SEC pause\n"
-"          between draws, default 20; round XLIII media lottery)\n"
+           "         [--session-jiggle=MS] (mouse-jiggle period in ms;\n"
+           "                                    0 = OFF, default 100)\n"
+           "         [--lottery=N] [--lottery-gap=SEC]  (re-draw the WHOLE\n"
+           "          bring-up to N times after a terminal draw, SEC pause\n"
+           "          between draws, default 20; round XLIII media lottery)\n"
            "       [--log-dir=DIR]   (WASAPI synthetic PCM unless --no-audio)\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
            "  knvstd --list-selftests\n"
@@ -1667,14 +1669,17 @@ static int64_t sess_bw_now_ns(void *ud)
  * feel at 30 fps without claiming a fidelity we cannot prove. */
 #define SESS_JIGGLE_INTERVAL_MS  100u
 #define SESS_FRAME_TIME_US       16666u
-/* Round XLIII (F4): cm_create seat-cooldown backoff. The run-24 field
- * probe (run24v2.log) showed a bare HTTP 403 (cloud_status 0, empty
- * desc) when cm_create fires seconds after the previous session's
- * recovery_exhausted exit — the rig still holds the seat — while the
- * SAME token queued fine minutes later. 20 s x 3 retries covers the
- * observed cooldown without a new knob. */
-#define SESS_CM_403_BACKOFF_MS   20000
-#define SESS_CM_403_RETRIES      3
+/* Round XLIII (F4) / XLV (F7): cm_create backoff. Run 24's probe
+ * showed the bare 403 seat cooldown; run 26's live lottery then
+ * measured BOTH of CloudMatch's refusals: the seat cooldown can
+ * exceed 90 s (draw 2: 30 s gap + 3x20 s retries still 403) and
+ * repeated creates trip an HTTP 429 rate limiter (draws 3 and 5 —
+ * F4 did not retry 429 and lost both draws at the door). F7 retries
+ * 403 + the whole cm_status_transient() class (408/425/429/500/502/
+ * 503/504) with an escalating 20/40/80/160 s schedule (<= 5 min of
+ * patience per draw, 5 attempts total). */
+#define SESS_CM_BACKOFF_BASE_MS  20000
+#define SESS_CM_RETRIES          4
 /* Round XL: the reference's IDR_RETRY_INTERVAL (nvst.rs:104) — the armed
  * keyframe latch re-fires every 100 ms until a keyframe is assembled
  * (bundle-loop retry :8092-8110). Run 20 died on a ONE-SHOT idr on the
@@ -4438,7 +4443,7 @@ static int run_session(const char *token, const char *device_id,
                        const char *cm_host, long seconds,
                        long queue_timeout, int keep_on_abort,
                        long expect_frames, long play_wait_ms,
-                       long play_settle_ms,
+                       long play_settle_ms, long jiggle_ms,
                        const char *au_dir, const char *log_dir)
 {
     static uint8_t cm_rxb[64 * 1024];
@@ -4533,7 +4538,14 @@ static int run_session(const char *token, const char *device_id,
     size_t tag_len = 8;
     const char *profile_name;
     int rc, http_status = 0, ring_ok, exit_code = 1, i;
-    int cm_try = 0;                    /* round XLIII (F4): 403 backoff */
+    int cm_try = 0;                    /* round XLIII (F4): CM backoff */
+    /* Round XLV (F8): the jiggle interval became a RUN parameter —
+     * run 26 completed the picture (all FIVE jiggle-on draws died in
+     * the ~10-13 s band; the only two long draws ever, runs 18/22 at
+     * 30.5/41 s, were activation-WITHOUT-jiggle), so the jiggle is now
+     * the variable under test, not a constant. 0 disables it. */
+    const uint32_t jiggle_interval = (uint32_t)(jiggle_ms > 0
+                                                    ? jiggle_ms : 0);
     uint16_t ws_port = 0;
     uint64_t t_start, next_poll_ms, now_ms, t_last_stats;
     uint64_t ctrl_ping_next_ms = 0;    /* R3-D service beat */
@@ -4597,12 +4609,12 @@ static int run_session(const char *token, const char *device_id,
         kn_lctx_str(&b, "token", "redacted");
         kn_log_emit(&b);
     }
-    /* Round XLIII (F4): a bare HTTP 403 from cm_create means "the rig
-     * still holds your previous seat", not "dead token" (run24v2 field
-     * probe: two instant 403s after a recovery_exhausted exit, then the
-     * SAME token queued fine after a pause). Back off 20 s and rebuild
-     * the TLS stream, up to SESS_CM_403_RETRIES times; every other
-     * failure aborts at once, exactly as before. */
+    /* Round XLIII (F4), widened by XLV (F7) after run 26: a bare 403
+     * means "the rig still holds your previous seat" and a 429 means
+     * "you are creating sessions too fast" — BOTH are waitables, not
+     * dead tokens (run24v2 + run-26 field probes). Back off on an
+     * escalating schedule and rebuild the TLS stream per retry; every
+     * other failure aborts at once, exactly as before. */
     for (cm_try = 0;; ++cm_try) {
         cm_tls = kn_net_tls_stream_open(cm_host, 443, 15000, err,
                                         sizeof err);
@@ -4623,12 +4635,14 @@ static int run_session(const char *token, const char *device_id,
         kn_net_tls_stream_close(cm_tls);
         cm_tls = NULL;
         if (rc == KN_HTTP_OK && http_status == 200) break;
-        if (http_status != 403 || cm_try >= SESS_CM_403_RETRIES) break;
-        printf("{\"mode\":\"session\",\"event\":\"cm_create_403_backoff\","
-               "\"attempt\":%d,\"wait_ms\":%d}\n",
-               cm_try + 1, SESS_CM_403_BACKOFF_MS);
+        if (!(http_status == 403 || cm_status_transient(http_status)) ||
+            cm_try >= SESS_CM_RETRIES) break;
+        printf("{\"mode\":\"session\",\"event\":\"cm_create_backoff\","
+               "\"status\":%d,\"attempt\":%d,\"wait_ms\":%u}\n",
+               http_status, cm_try + 1,
+               (unsigned)(SESS_CM_BACKOFF_BASE_MS << cm_try));
         fflush(stdout);
-        sess_sleep((uint32_t)SESS_CM_403_BACKOFF_MS, NULL);
+        sess_sleep((uint32_t)(SESS_CM_BACKOFF_BASE_MS << cm_try), NULL);
     }
     if (rc != KN_HTTP_OK || http_status != 200) {
         char esc[96];
@@ -6034,7 +6048,7 @@ static int run_session(const char *token, const char *device_id,
                  * writer; the sctl_* precedent). The timestamp rides
                  * pump.origin_us, the activation chain's own epoch. */
                 if (pump_persist && pump.input_active &&
-                    now_ms >= c.next_jiggle_ms) {
+                    jiggle_interval && now_ms >= c.next_jiggle_ms) {
                     uint8_t jm[KN_INPUT_CMD_MAX];
                     uint64_t jts = kn_sock_now_us() - pump.origin_us;
                     int jn = kn_input_mouse_relative(c.jiggle_dx, 0, jts,
@@ -6049,7 +6063,7 @@ static int run_session(const char *token, const char *device_id,
                                        "\"action\":\"first_send\","
                                        "\"sid\":6,\"interval_ms\":%u,"
                                        "\"ts_us\":%llu}\n",
-                                       (unsigned)SESS_JIGGLE_INTERVAL_MS,
+                                       (unsigned)jiggle_interval,
                                        (unsigned long long)jts);
                                 fflush(stdout);
                             }
@@ -6058,7 +6072,7 @@ static int run_session(const char *token, const char *device_id,
                         c.jiggle_build_fail++;
                     }
                     c.jiggle_dx = -c.jiggle_dx;
-                    c.next_jiggle_ms = now_ms + SESS_JIGGLE_INTERVAL_MS;
+                    c.next_jiggle_ms = now_ms + jiggle_interval;
                 }
                 if (have_rr && (c.rtcp_fb_open || unified_mode)) {
                     uint64_t nf = 0, nl = 0;
@@ -6544,6 +6558,9 @@ int main(int argc, char **argv)
      * 160+ deep; 180 s risked aborting a legitimate wait (the abort now
      * also cancels the session, but a seat is a seat) */
     long sess_seconds = 60, sess_queue_timeout = 600, sess_expect = 0;
+    long sess_jiggle_ms = SESS_JIGGLE_INTERVAL_MS;  /* round XLV (F8):
+        --session-jiggle=MS; 0 = OFF. The A/B knob for the run-27
+        jiggle-off lottery (see run_session's F8 comment). */
     long lottery_n = 1, lottery_gap_s = 20;  /* round XLIII (F5): the
         media-survival lottery driver — runs 16-24 drew 1.2-41 s of media
         from the SAME app with identical client behaviour, so one user
@@ -6624,6 +6641,8 @@ int main(int argc, char **argv)
             sess_expect = strtol(a + 24, NULL, 10);
         else if (strncmp(a, "--session-au-dir=", 17) == 0)
             sess_au_dir = a + 17;
+        else if (strncmp(a, "--session-jiggle=", 17) == 0)
+            sess_jiggle_ms = strtol(a + 17, NULL, 10);
         else if (strncmp(a, "--lottery=", 10) == 0)
             lottery_n = strtol(a + 10, NULL, 10);
         else if (strncmp(a, "--lottery-gap=", 14) == 0)
@@ -6654,7 +6673,7 @@ int main(int argc, char **argv)
      * that contract (the native gate's json.load validators). --version
      * already prints the full build.json for the deep identity. */
     if (!list && !version && !(selftest && selftest[0]) && !diagnostics) {
-        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLIV\"}\n",
+        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLV\"}\n",
                __DATE__, __TIME__);
         fflush(stdout);
     }
@@ -6680,7 +6699,8 @@ int main(int argc, char **argv)
             sess_queue_timeout < 0 || sess_queue_timeout > 86400 ||
             sess_expect < 0 || sess_expect > 100000000 ||
             lottery_n < 1 || lottery_n > 100 ||
-            lottery_gap_s < 0 || lottery_gap_s > 3600) {
+            lottery_gap_s < 0 || lottery_gap_s > 3600 ||
+            sess_jiggle_ms < 0 || sess_jiggle_ms > 10000) {
             usage();
             return 2;
         }
@@ -6691,7 +6711,7 @@ int main(int argc, char **argv)
                                    : KN_CM_DEFAULT_BASE_HOST,
                                sess_seconds, sess_queue_timeout, sess_keep,
                                sess_expect, sess_play_wait, sess_play_settle,
-                               sess_au_dir, log_dir);
+                               sess_jiggle_ms, sess_au_dir, log_dir);
         /* Round XLIII (F5): lottery driver. run_session() is re-callable
          * by construction — every stateful static is re-initialised at
          * entry (memset &c, memset &pump + sess_fb_init) and destroyed
@@ -6723,7 +6743,8 @@ int main(int argc, char **argv)
                                   sess_title, cmh, sess_seconds,
                                   sess_queue_timeout, sess_keep,
                                   sess_expect, sess_play_wait,
-                                  sess_play_settle, sess_au_dir, log_dir);
+                                  sess_play_settle, sess_jiggle_ms,
+                                  sess_au_dir, log_dir);
                 done = draw;
                 printf("{\"mode\":\"session\",\"event\":\"lottery_draw\","
                        "\"draw\":%ld,\"of\":%ld,\"rc\":%d}\n",
