@@ -1705,13 +1705,19 @@ static void bw_feed(kn_rx_video *v, uint32_t ssrc, const kn_gs_rtp *rtp,
 
 int kn_rx_video_rr_snapshot(const kn_rx_video *v, uint32_t *ssrc,
                             uint32_t *base, uint32_t *highest,
-                            uint64_t *received)
+                            uint64_t *received, uint32_t *jitter)
 {
     if (!v || !v->have_bound_ssrc || !v->have_base_sequence) return 0;
     if (ssrc)     *ssrc = v->bound_ssrc;
     if (base)     *base = v->base_sequence;
     if (highest)  *highest = v->highest_sequence_received;
     if (received) *received = v->authenticated_packets;
+    if (jitter) {
+        /* report_snapshot (:1251-1261): timing.jitter clamped to u32. */
+        double j = v->timing_jitter;
+        *jitter = j < 0.0 ? 0u
+                : (j > 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)j);
+    }
     return 1;
 }
 
@@ -2321,6 +2327,16 @@ static void consume_result(kn_rx_video *v, const kn_rx_result *result,
         v->last_stream_packet_index = video.stream_packet_index;
         v->have_last_spi = 1;
 
+        /* Round XL: the wall clock of the FIRST packet of the AU being
+         * accumulated — the reference's CompletedFrameFeedback
+         * timing.first_at, which frame_ack serializes as
+         * first_packet_time_ms (nvst.rs:447-462). Recorded at the frame
+         * boundary: either the assembler is idle, or this packet belongs
+         * to a different frame than the one in progress. */
+        if (!v->assembler.active ||
+            v->assembler.current_frame != video.frame_index)
+            v->cur_au_first_ms = now_ms;
+
         rc = kn_gs_au_assembler_push(&v->assembler, &video, pkt->rtp.timestamp,
                                      bytes + poff, plen, &au);
         if (rc == KN_GS_AU_COMPLETE) {
@@ -2338,6 +2354,7 @@ static void consume_result(kn_rx_video *v, const kn_rx_result *result,
             f.contiguous = au.contiguous;
             f.bytes = au.bytes;
             f.bytes_len = au.bytes_len;
+            f.first_packet_ms = v->cur_au_first_ms;
 
             loss_before = !v->next_frame_contiguous;
             v->next_frame_contiguous = 1;
@@ -2468,6 +2485,34 @@ static void process_authenticated(kn_rx_video *v, uint64_t index,
     if (feed_bw)
         bw_feed(v, rtp->ssrc, rtp, plain, plain_len, seq32, reordered,
                 retransmitted, now_ms);
+
+    /* Round XL — publish_stream_packet's reception-timing block
+     * (nvst.rs:917-940), the RFC 3550 interarrival jitter in 90 kHz
+     * ticks that the RTCP RR carries (:1251-1261). It runs for EVERY
+     * authenticated packet (the reference's timing lock is outside the
+     * `video` Option), anchors on the first one, and skips packets whose
+     * RTP timestamp repeats the previous one. Note the deliberate u32
+     * wrap (NOT sign extension) in rtp_ticks — `i64::from(u32
+     * wrapping_sub)` — and the u64 abs_diff into the EWMA. Until round XL
+     * we sent jitter=0 in every RR; the reference sends this. */
+    if (!v->have_timing_first) {
+        v->have_timing_first = 1;
+        v->timing_first_ms = now_ms;
+        v->timing_first_rtp = rtp->timestamp;
+        v->timing_last_rtp = rtp->timestamp;
+        v->timing_last_transit = 0;
+    } else if (v->timing_last_rtp != rtp->timestamp) {
+        int64_t arrival_ticks =
+            (int64_t)((now_ms - v->timing_first_ms) * 90ull);
+        int64_t rtp_ticks =
+            (int64_t)(uint32_t)(rtp->timestamp - v->timing_first_rtp);
+        int64_t transit = arrival_ticks - rtp_ticks;
+        int64_t diff = transit - v->timing_last_transit;
+        double delta = (double)(diff < 0 ? -diff : diff);
+        v->timing_last_rtp = rtp->timestamp;
+        v->timing_last_transit = transit;
+        v->timing_jitter += (delta - v->timing_jitter) / 16.0;
+    }
 
     /* Routing (4712-4725): a valid FEC layout goes to the FEC reorder
      * buffer, everything else to the plain RTP reorder buffer. */
@@ -2756,6 +2801,14 @@ int kn_rx_video_take_keyframe_request(kn_rx_video *v)
     had = v->keyframe_needed;
     v->keyframe_needed = 0;
     return had;
+}
+
+int kn_rx_video_keyframe_request_pending(const kn_rx_video *v)
+{
+    /* keyframe_request_pending (nvst.rs:1266-1268): the NON-clearing read
+     * the 100 ms IDR/PLI retry loop gates on. Only an assembled keyframe
+     * clears the latch (:994 — mirrored at the emit site below). */
+    return v ? v->keyframe_needed : 0;
 }
 
 void kn_rx_video_request_keyframe(kn_rx_video *v)

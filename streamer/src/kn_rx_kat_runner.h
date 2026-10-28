@@ -584,6 +584,11 @@ typedef struct {
 
 typedef struct {
     rxt_frame frames[RXT_MAX_FRAMES];
+    /* round XL (D6): f->first_packet_ms kept OUTSIDE rxt_frame on
+     * purpose — P2/P3/P5 memcmp whole rxt_frame structs for content
+     * identity across feed orders, and arrival wall clocks legitimately
+     * DIFFER between the in-order and reordered/repaired feeds. */
+    uint64_t first_ms[RXT_MAX_FRAMES];
     int n;
 } rxt_col;
 
@@ -600,6 +605,7 @@ static void rxt_frame_cb(const kn_rx_frame *f, void *ud)
     c->frames[c->n].known = f->frame_type_known;
     c->frames[c->n].first_spi = f->first_stream_packet_index;
     c->frames[c->n].ts = f->timestamp;
+    c->first_ms[c->n] = f->first_packet_ms;
     c->n++;
 }
 

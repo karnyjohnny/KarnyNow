@@ -1,3 +1,63 @@
+# INTEGRATION NOTES — Round XL delta, rev 30 (THE RUN-18→20 REGRESSION ROOT-CAUSED AND FIXED: Windows `SO_RCVTIMEO` rounds to the AFD timer granularity (~500 ms), so the round-XXXVIII R3-D WSS control drain — `kn_ws_recv_msg(ws, 1 ms)` from the media loop's 50 ms beat — blocked ~500 ms per tick and phase-locked the ENTIRE loop to the server's 2 Hz datagram cadence: run 21 QoS "20/s" actually flew at 597/300 s = 2/s, NATT 597, and `recv_timeouts=1` against a 10 ms poll was the paradox that named it (a live tick would show ~29 400). Run 18 is the control: QoS 16.4/s on XXXVII code. Fix: `select()`-based bounded recv in `kn_net_tls_stream_recv` (ms-accurate on winsock) with a `mbedtls_ssl_check_pending()` guard; `SO_RCVTIMEO` remains only as the partial-record safety net. Ships with the full D1–D7 reference-fidelity set (reliable-sid IDR + the 100 ms retry loop, real RFC 3550 RR jitter, frame-ack `first_packet_time_ms`, standalone pacing before ack, NACK mode split, RFI sid 0), C18 build stamp, C19 `loop_ticks` telemetry, F1 the 0x010a payload dumper, and +9 knrx goldens. `kn_sock.c` audited and CORRECT — untouched.)
+
+## Changed files (round XL)
+
+| file | change |
+|---|---|
+| `streamer/src/kn_net_mbedtls.c` | **THE FIX** — `kn_net_tls_stream_recv` (Win32 body): `select()` before `mbedtls_ssl_read`, `mbedtls_ssl_check_pending()` guard, `SO_RCVTIMEO` kept as safety net; return semantics unchanged (0 retryable / −2 EOF-close / −1 fatal) |
+| `streamer/src/knvstd_main.c` | D1/D2 IDR+RFI → sid 0; D3 `dec_kf_service` 100 ms armed retry (IDR sid 0 + PLI sid 14 when `rtcp_fb_open && have_bound_ssrc`; episode/attempt logging; failed pushes consume the interval) + `SESS_IDR_RETRY_INTERVAL_MS`; `rtcp_fb_open` initialized at session start (`!unified_mode && desc.rtcp_on_sctp`); D4 RR gate + 6-arg `rr_snapshot` call; D5 NACK mode split; D6 frame-ack `first_packet_ms` (clamped ≥ 0 vs `transport_origin_ms`); D7 standalone pacing push (sid 6, 55.556 ms, before ack); C18 build stamp (run modes only — utility modes keep their single-JSON-document stdout contract); C19 `loop_ticks` (media loop → `session_stats` jsonl + summary); F1 `sess_ctrl_dump_010a` self-contained TLV walker (≤ 16 lines/session, ≤ 800 hex chars) |
+| `streamer/src/kn_rx.c` | D4 RFC 3550 interarrival-jitter EWMA (relative arrival ×90, ZERO-EXTENDING u32 wrap on `ts − first_ts`, first packet latches only, `ts == last` skips, /16, clamp+truncate) feeding `rr_snapshot`'s new 6th out-param; D6 `cur_au_first_ms` at the frame boundary → `kn_rx_frame.first_packet_ms`; D3 `kn_rx_video_keyframe_request_pending` (non-clearing latch read) |
+| `streamer/include/kn/kn_rx.h` | `first_packet_ms` in `kn_rx_frame`; jitter timing fields; 6-arg `rr_snapshot`; pending-latch decl |
+| `streamer/src/kn_rx_kat_runner.h` | shared collector: `first_ms[]` kept OUTSIDE `rxt_frame` in a parallel array — P2/P3/P5 memcmp whole `rxt_frame` structs for content identity across feed orders, and arrival wall clocks legitimately DIFFER between feeds (this trap bit mid-round; the array is the fix) |
+| `streamer/tests/test_knrx.c` | `rr_snapshot` NULL-safety → 6 args; NEW section `test_round_xl_feedback`: jitter golden **369** (hand-derived 131.25 → 254.296875 → 369.60546875 → trunc), per-frame `first_packet_ms`, pre-bind snapshot 0, pending non-clearing + take-clears contract (203 checks total) |
+| `docs/RTSP.md` | §27 — the full round-XL record (evidence tables, forensics, root cause, fixes, run-22 plan) |
+| `START-HERE.md` | state → round XL closed; run-22 plan; new traps (§8.x): SO_RCVTIMEO granularity, rxt_frame memcmp, build-stamp vs single-document stdout |
+
+## Integration notes / traps for the next agent
+
+1. **`SO_RCVTIMEO` on Windows is ~500 ms-granular (AFD timer); `select()`
+   is ms-accurate.** Any "short bounded blocking recv" on winsock MUST go
+   through select/poll, never SO_RCVTIMEO. This single line cost runs
+   20+21 and two rounds of hypotheses.
+2. `kn_net_tls_stream_recv` has THREE bodies: the real Win32+mbedTLS one
+   (kn_net_mbedtls.c — the production path; cmake default and target
+   backend are mbedTLS, CMakeLists :91), the honest `!MBEDTLS` stub
+   (kn_net.c, returns −1) and the POSIX stub (kn_net_mbedtls.c tail).
+   A fix must land in the Win32 body; only the cross `-DKN_TLS_BACKEND_
+   MBEDTLS=1` legs compile it in the sandbox — no runtime test possible
+   off-target, `loop_ticks` in run 22 is the witness.
+3. `recv_timeouts=1` + iterations = datagrams+1 + every periodic counter
+   at datagram-rate or an integer divisor = **loop pinned to an external
+   cadence**. With C19 shipped, run 22 states it directly (`loop_ticks`
+   ≈ 100/s healthy).
+4. Shared test structs that property tests memcmp must not gain
+   feed-order-dependent fields — use parallel arrays in the collector
+   (rxt_frame/rxt_col precedent).
+5. The stdout build stamp must skip `--version/--list-selftests/
+   --selftest/--diagnostics`: the native gate `json.load`s those captures
+   as SINGLE documents; one extra leading line = "Extra data" + the
+   diag-bundle path check fails.
+6. The server drip has TWO independent depressants: our 2 Hz feedback
+   (fixed) and the idle/static game screen (`rtp_ms` 1182 vs 300 s wall —
+   an idle GFN encoder emits ~nothing regardless of the client). Run 22
+   is only interpretable with the user ACTIVE at handoff.
+
+## Gate results (sandbox, this round)
+
+| gate | result |
+|---|---|
+| `tools/build_native_tests.sh` | **18/18, 2261 checks** (knrx 194→**203**), incl. paranoid legs, jsonl+zip+json validators |
+| paranoid knvstd ×9 (c11/c17/gnu11 × pedantic / format-truncation=2 / unused-but-set+shadow) | clean, `-Werror` |
+| kn_bw/kn_rx ×3 | clean |
+| `tools/cross_check.sh` ×2 arches | PASS, zero warnings — incl. the `-DKN_TLS_BACKEND_MBEDTLS=1` legs (the fixed TLS body) and the real usrsctp link |
+| ctest, mbedTLS backend | **20/20 PASS** |
+| ctest, schannel backend | **20/20 PASS** |
+| ASan+UBSan knbw / knrx | 387 / 203 clean |
+| `sandbox_session_e2e` | **43/43 PASS** |
+| T10 POSIX dry | **ALL PASS 69** |
+| T13 | **ALL PASS 63** |
+| summary-printf validation | all 99 JSON printf blocks specs=args; session summary **71 = 71**; strict-JSON skeleton `json.loads` PASS |
+
 # INTEGRATION NOTES — Round XXXIX delta, rev 29 (TARGET PROOF + REPO CLEANUP: T10 **ALL PASS 79 on Win7** — test_knbw reported 387 checks on target = sandbox, so round XXXVIII is fully target-verified. R7 run 20 flew the whole new evidence set and PROVED the feedback plane healthy (bwe skip_* all zero, batch flushes 796 / failed 0 / retained 0, outbox dropped 0 on every sid, terminations 0, pacing never disabled, cping never dead) — yet the server drip-fed video from the FIRST SECOND: 40 AUs in 400 s (1.275 s of media time) in ~5 s bursts, then one gap → RECOVERY_REQUIRED until the end with 42 unanswered IDR/PLI. `frames_observed:40 < 100` ⇒ estimate 0 is the reference's own warm-up zero. STAGE 2 REMAINS OPEN; the decisive missing evidence is the 1 Hz `session_stats` series, which lives in the knlog `logs/` files, not on stdout. This round also reorganizes the repository into its final layout and fixes the `outbox_by_sid` JSON-braces bug run 20 caught.)
 
 > **Rev 29 supersedes rev 1-28.** Canonical state: **`START-HERE.md`** (repo root).

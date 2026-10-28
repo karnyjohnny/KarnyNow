@@ -669,6 +669,31 @@ int kn_net_tls_stream_recv(kn_net_tls_stream *s, uint8_t *buf, size_t cap,
     DWORD io_timeout;
     if (!s || !buf || cap == 0) return -1;
     io_timeout = timeout_ms ? (DWORD)timeout_ms : (DWORD)KN_NET_IO_TIMEOUT_MS;
+
+    /* ROUND XL — THE RUN-20/21 ROOT CAUSE. SO_RCVTIMEO on Windows is NOT
+     * millisecond-accurate: winsock rounds it to the AFD poll granularity
+     * (~500 ms on every Windows since NT). The R3-D control-ping drain
+     * calls this with timeout_ms=1 from the MEDIA LOOP's 50 ms service
+     * beat — and each call blocked ~500 ms instead, pinning the whole
+     * loop to a 2 Hz tick. Every sub-second cadence collapsed onto it
+     * (run 21: QoS 597 = datagrams+1, NATT 597, recv_timeouts 1; the
+     * reference sends QoS at 20/s). select() IS ms-accurate on winsock,
+     * so the wait happens here; SO_RCVTIMEO stays as the belt-and-
+     * suspenders bound for a partial TLS record already in flight.
+     * mbedtls_ssl_check_pending() keeps buffered plaintext (a second WS
+     * frame in one record) from waiting on the socket at all. */
+    if (!mbedtls_ssl_check_pending(&s->ssl)) {
+        fd_set rfds;
+        struct timeval tv;
+        int sel;
+        FD_ZERO(&rfds);
+        FD_SET(s->sock, &rfds);
+        tv.tv_sec  = (long)(io_timeout / 1000u);
+        tv.tv_usec = (long)((io_timeout % 1000u) * 1000u);
+        sel = select(0, &rfds, NULL, NULL, &tv);
+        if (sel == 0) return 0;              /* retryable timeout */
+        if (sel < 0) return -1;
+    }
     setsockopt(s->sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&io_timeout,
                sizeof io_timeout);
     ret = mbedtls_ssl_read(&s->ssl, buf, (int)(cap > INT_MAX ? INT_MAX : cap));

@@ -2244,3 +2244,229 @@ DONE.** The chicken-and-egg is now concrete: the estimate stays 0 until
   instead of `{{}}`. Trap recorded (START-HERE §8.5): eyeball +
   `json.loads` a REAL emitted summary once per round, not just the
   format skeleton.
+
+## 27. Round XL — R7 run 21: **THE RUN-18→20 REGRESSION IS FOUND: Windows `SO_RCVTIMEO` has ~500 ms granularity, and the round-XXXVIII WSS control drain (R3-D) called it with "1 ms" from the media loop — every tick blocked ~500 ms, pinning the whole loop to the server's 2 Hz datagram cadence** (QoS "20/s" actually flew at 2/s; `recv_timeouts=1` against a 10 ms poll was the paradox that named it). Fixed with a `select()`-based bounded recv; the D1–D7 reference-fidelity divergences (reliable IDR + 100 ms retry, real RR jitter, frame-ack `first_packet_time_ms`, standalone pacing, NACK mode split, RFI channel) ship with it, plus `loop_ticks` telemetry and a build stamp so run 22's log states its own tick rate and binary identity.
+
+### 27.1 Run 21 evidence (300 s, peer 185.136.70.137:5004; stdout + `logs/` — both provided this time)
+
+* Handoff: `unified_socket=0`, `rtcp_on_sctp=1`, ping_version 6 ⇒ **non-mjolnir**
+  (the RTCP video-feedback plane is open: RR/NACK/PLI on sid 14 apply).
+* Transport: **596/596 datagrams authenticated**, 37 AUs (1 keyframe),
+  `frames_decoded` 37, gaps 0, 1280×720. The session SURVIVED the full
+  300 s (run 20 died at its single lost one-shot IDR; here the first
+  keyframe completed at t≈7 s and no gap ever re-armed the latch).
+* The drip: **2.000 datagrams/s from the first second** (t=0.5 s:
+  datagrams=2), the first keyframe paced in at ~2 packets/s over ~7 s.
+  A 500 ms-quantized metronome = the server's idle-heartbeat timer, not
+  congestion. The user attached via the web client during the run; the
+  media clock says the game screen was STATIC: `rtp_ms` **1182** over
+  300 s wall (the encoder emitted 1.18 s of media), and
+  `min_server_time` 27882167 ticks ≈ 309.8 s of media clock at handoff
+  ⇒ the game had been idle ~11 s before our attach.
+* Estimator: samples 486, parity 110, estimate 0 — `frames_observed`
+  37 < the reference's 100-frame warm-up gate (nvst.rs — the zero is
+  the reference's own honest warm-up zero, not a port bug);
+  `queue_delay_us` 298015317 (≈ the whole session — arrivals spread
+  over 300 s against a 1.18 s media clock), jitter 65535 (clamped),
+  lossy 1.
+* Feedback actually pushed: rr 298 / ack 37 / pacing 37 / **qos 597** /
+  ka 100 / nack 0 / idr 37 / pli 37 / pushed 1069 / **dropped 0**;
+  batch flushes 597, records 671; outbox sid0[100,0] sid6[634,0]
+  sid14[335,0] — the sender machinery itself is healthy (round
+  XXXIX's proof, reconfirmed).
+* Control keepalive (R3-D WSS): cping **149 sent / 0 pongs / 148
+  expired** — the server answered NO WebSocket ping all session. We do
+  not enforce expiry (correctly: the endpoint evidently ignores WS
+  pings), but run 22 should watch whether pongs appear once the loop
+  can actually service the 2 s beat on time.
+* **`recv_timeouts = 1`.** One. In 300 s of a 10 ms-polled loop. This
+  single number is the loudest line in the whole log (see §27.2).
+
+### 27.2 The loop-tick forensics (run 21 ≡ run 20, and run 18 is the control)
+
+Every periodic counter in run 21 is phase-locked to the datagram rate:
+
+| counter (gate) | observed /300 s | 100 Hz tick predicts | 2 Hz tick predicts |
+|---|---|---|---|
+| QoS 0x0207 (50 ms) | **597** | ~6000 | ~600 ✓ |
+| NATT keepalive (100 ms) | **597** | ~3000 | ~600 ✓ |
+| RR (1 s) | 298 | ~300 | ~300 ✓ |
+| session_stats (1 s) | 298 | ~300 | ~300 ✓ |
+| cping beat (2 s) | 149 | ~150 | ~150 ✓ |
+| KA 3 s | 100 | ~100 | ~100 ✓ |
+| `recv_timeouts` | **1** | **~29 400** | ~0–2 ✓ |
+| loop iterations | **597 = datagrams+1** | ~30 000 | ~597 ✓ |
+
+One loop iteration per received datagram, plus one. Run 20 (400 s) shows
+the identical signature (qos 796 = datagrams 795 + 1, `recv_timeouts`
+1). Run 18 (round XXXVII code) is the control: QoS **4932/300 s ≈
+16.4/s** — the 10 ms tick demonstrably WORKED before round XXXVIII.
+The regression therefore entered in XXXVIII, and exactly one XXXVIII
+change touches the media loop: **R3-D** — `sess_ctrl_ping_service`
+drains the WSS control socket via `kn_ws_recv_msg(ws, 1 ms)` →
+`ws_fill` → `tls_recv` (knvstd_main.c) → `kn_net_tls_stream_recv` on
+every pass of the loop's 50 ms service beat.
+
+### 27.3 Root cause: `SO_RCVTIMEO` is NOT millisecond-accurate on Windows
+
+The production TLS recv body (Win32 + mbedTLS — `kn_net_mbedtls.c`;
+`kn_net.c` carries only the honest stub for `!KN_TLS_BACKEND_MBEDTLS`
+builds, and the cmake default/target backend is mbedTLS, CMakeLists
+:91) did:
+
+```c
+io_timeout = timeout_ms ? timeout_ms : KN_NET_IO_TIMEOUT_MS;
+setsockopt(s->sock, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, ...);
+ret = mbedtls_ssl_read(&s->ssl, buf, cap);   /* blocks in the BIO recv */
+```
+
+with the BIO registered as `mbedtls_ssl_set_bio(&s->ssl, &s->sock,
+kn_ssl_send, kn_ssl_recv, NULL)` — **no `f_recv_timeout` callback**, so
+`SO_RCVTIMEO` as seen through `kn_ssl_recv`'s error mapping was the
+ONLY bound on the blocking `recv()`. And on Windows, winsock rounds
+`SO_RCVTIMEO` to the AFD driver's poll granularity — **~500 ms on
+every Windows since NT** (a documented, notorious pitfall; `select()`
+is ms-accurate, `SO_RCVTIMEO` is not). The "1 ms" drain therefore
+blocked **~500 ms per call**.
+
+The closed loop then explains EVERY observed number:
+
+1. The drain blocks ~500 ms (SO_RCVTIMEO granularity).
+2. The server's next datagram (502 ms cadence) arrives during that
+   block and is already pending in the socket buffer.
+3. The loop's `kn_sock_udp_recv` `select(10 ms)` returns **readable
+   immediately** — hence `recv_timeouts = 1` (a single phase slip in
+   300 s; 502 vs 500 ms drifts slowly), NOT the ~29 400 a live 10 ms
+   tick would produce.
+4. The tick period = the datagram period ⇒ every sub-500 ms gate fires
+   exactly once per datagram (QoS 597, NATT 597), every ≥1 s gate
+   fires on its integer divisor (RR 298, cping 149).
+
+`kn_sock.c` was audited line-by-line this round and is CORRECT (QPC
+clock, proper `select` timeouts) — the UDP path was never the problem;
+do not touch it.
+
+**Consequence for the drip:** the server never saw a live client. The
+reference answers QoS at 20/s (50 ms); we flew at 2/s. Frame acks,
+pacing and RR cadences were 10× off. Whatever ramp policy GFN's rate
+control runs, its input signal said "barely-alive client" from the
+first second — and the floor-rate idle heartbeat is what it kept us
+on. (The static screen is a SECOND, independent depressant: an idle
+GFN encoder emits almost nothing regardless of feedback — `rtp_ms`
+1182 proves the content itself was frozen. Run 22 must remove BOTH
+confounds: fixed cadence AND an active game.)
+
+### 27.4 The fix (kn_net_mbedtls.c — `kn_net_tls_stream_recv`)
+
+* Wait with **`select()` on the raw TCP socket** (ms-accurate on
+  winsock) BEFORE calling `mbedtls_ssl_read`; `SO_RCVTIMEO` stays set
+  as the belt-and-suspenders bound for a partial TLS record already in
+  flight.
+* `mbedtls_ssl_check_pending()` guard: buffered plaintext (e.g. a
+  second WebSocket frame inside one TLS record) is read WITHOUT
+  touching the socket — no busy-wait, no spurious block.
+* Return semantics UNCHANGED: `>0` bytes, `0` retryable timeout /
+  WANT_READ, `-2` EOF / close_notify / conn-reset, `-1` fatal. Callers
+  (`tls_recv`, `sess_ws_recv_text`, the kn_ws fill path) needed no
+  changes.
+* Verified where verifiable in the sandbox: cross-compiled zero-warning
+  for BOTH arches under `-DKN_TLS_BACKEND_MBEDTLS=1` (the Win32 body
+  only compiles there); runtime proof is target-only by construction —
+  run 22's `loop_ticks` (~100/s expected) is the direct witness.
+
+### 27.5 The reference-fidelity divergences D1–D7 (audited after run 21; ALL fixed this round)
+
+* **D1 — IDR channel:** `0x0302` now rides **sid 0 (reliable ordered —
+  the reference's `send_control`, nvst.rs:3095-3114)**. Run 20 died
+  sending it ONE-SHOT on sid 6 (partial-reliable unordered, TTL
+  300 ms): one lost datagram = a keyframe request that never arrives.
+* **D2 — RFI channel:** frame-invalidation → sid 0 (same reference
+  path).
+* **D3 — the retry loop:** while kn_rx's keyframe latch is pending
+  (`kn_rx_video_keyframe_request_pending` — armed by any loss/stall
+  path, cleared ONLY by an assembled keyframe), re-fire every
+  **`SESS_IDR_RETRY_INTERVAL_MS` = 100 ms** (nvst.rs:104, :8092-8110):
+  IDR on sid 0 PLUS a PLI on sid 14 when `rtcp_fb_open &&
+  have_bound_ssrc` (`uses_rtcp_video_feedback`, :3116 +
+  `keyframe_request_routes` :1272-1286). Failed pushes consume the
+  interval too ("Bound failed sends as well as successful ones",
+  :8090). Episodes log: first attempt, then every 50th; `kf_cleared`
+  on latch release. `rtcp_fb_open = !unified_mode && desc.rtcp_on_sctp`
+  is now initialized at session start (it gated code paths that read
+  it uninitialized-on-paper — memset saved us, but the intent is now
+  explicit).
+* **D4 — RR jitter:** was hard-zero. kn_rx now ports the reference's
+  RFC 3550 interarrival EWMA exactly (arrival RELATIVE to first
+  packet ×90, `rtp_ticks = (u32)(ts - first_ts)` ZERO-EXTENDING wrap
+  — the `i64::from(wrapping_sub)` gotcha, first packet latches only,
+  `ts == last` skips, `/16` EWMA, clamp 0..u32::MAX, truncate) and
+  `rr_snapshot` grew a 6th out-param; the RR is gated on
+  `rtcp_fb_open`. Golden: the 4-frame/10 ms-step stream yields jitter
+  **369** (hand-derived: 131.25 → 254.296875 → 369.60546875 →
+  trunc).
+* **D5 — NACK mode split:** `uses_rtcp_video_feedback` ? RTCP NACK on
+  sid 14 : RTPFB NACK via the control plane — we dual-sent before
+  (nvst.rs:3050-3092).
+* **D6 — frame ack `first_packet_time_ms`:** kn_rx records the wall
+  clock of the AU's FIRST packet at the frame boundary
+  (`cur_au_first_ms`, the reference's `CompletedFrameFeedback`
+  `timing.first_at`, nvst.rs:447-462) and emits it in `kn_rx_frame`;
+  `dec_frame_in_cb` passes it (clamped ≥ 0 against
+  `transport_origin_ms`) into `kn_rx_ctrl_frame_ack` — was 0/NULL.
+* **D7 — pacing order & channel:** `0x0203` is pushed **standalone on
+  sid 6 BEFORE the frame ack** (reference order, nvst.rs:7922-7944),
+  55.556 ms gate, neutral error 0 — it was batched after the ack.
+
+### 27.6 New evidence channels for run 22
+
+* **C18 build stamp:** every RUN mode prints
+  `{"mode":"build","compiled":"<__DATE__ __TIME__>","round":"XL"}` as
+  its first stdout line (utility modes `--version/--list-selftests/
+  --selftest/--diagnostics` are EXCLUDED — their stdout is a
+  single-JSON-document contract the native gate validates). The
+  stale-exe hypothesis can never eat a round again.
+* **C19 `loop_ticks`:** raw media-loop iterations, emitted in the 1 Hz
+  `session_stats` jsonl AND the final summary. Healthy ≈ 100/s;
+  pathological = datagram-rate. This is the direct regression witness
+  for §27.3.
+* **F1 `sctl_010a` dump:** 0x010a was the most frequent Unknown in the
+  run-18/21 server-control inventory, but `kn_sctl_msg` deliberately
+  carries no payload pointer — so a self-contained TLV walker in
+  `sess_ctrl_ingest` now re-walks the raw record buffer (u16 LE code +
+  u16 LE len) and dumps every 0x010a payload as hex: ≤ 16 lines per
+  session, ≤ 800 hex chars (line < 900). Run 22 finally says what the
+  server puts in it.
+* knrx suite +9 checks (203): the jitter golden, `first_packet_ms`
+  per-frame wall-clock assertion, `rr_snapshot` pre-bind 0, and the
+  pending-latch non-clearing contract D3 polls.
+
+### 27.7 Sandbox gates (round XL, all green)
+
+native 18/18 **2261** checks (knrx 203, knbw 387, kninput 446) ·
+paranoid knvstd ×9 (c11/c17/gnu11 × pedantic / format-truncation=2 /
+unused-but-set+shadow) clean · kn_bw/kn_rx ×3 clean · cross ×2 arches
+zero warnings (incl. the `-DKN_TLS_BACKEND_MBEDTLS=1` legs that
+compile the fixed TLS body for Win7) · ctest **20/20 mbedTLS + 20/20
+schannel** · ASan+UBSan knbw 387 + knrx 203 clean ·
+`sandbox_session_e2e` **43/43** · T10 POSIX dry **ALL PASS 69** · T13
+**ALL PASS 63** · printf validation: all 99 JSON printf blocks
+specs=args (session summary **71 = 71**) + strict-JSON skeleton
+`json.loads` PASS.
+
+### 27.8 Run 22 plan (target)
+
+1. **CLEAN rebuild on Win7** (delete the build tree; full T10 — expect
+   ALL PASS; the suite count grows with the new knrx checks).
+2. `knvstd --session … --session-seconds=300`, untruncated stdout
+   **PLUS the whole `logs/` directory** (the 1 Hz `session_stats` with
+   `loop_ticks` lives only there).
+3. **The user keeps the game ACTIVE at and after handoff** (input,
+   motion — the run-21 media clock proved a static screen freezes the
+   encoder independently of any client fix).
+4. Pass criteria: build stamp `"round":"XL"` present; `loop_ticks`
+   ≈ 100/s (NOT datagram-rate); `recv_timeouts` ≈ ticks − datagrams
+   (tens of thousands); QoS ≈ 20/s; during motion, datagram rate ≫
+   2/s and `rtp_ms` tracks wall time; `kf_request` episodes end in
+   `kf_cleared`; `sctl_010a` lines decode the mystery payload; cping
+   beat on its 2 s cadence (watch for pongs now that the drain cannot
+   eat the timer).

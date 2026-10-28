@@ -1659,6 +1659,11 @@ static int64_t sess_bw_now_ns(void *ud)
 #define SESS_PACING_INTERVAL_US  55556ull
 #define SESS_KA_INTERVAL_MS      3000u
 #define SESS_FRAME_TIME_US       16666u
+/* Round XL: the reference's IDR_RETRY_INTERVAL (nvst.rs:104) — the armed
+ * keyframe latch re-fires every 100 ms until a keyframe is assembled
+ * (bundle-loop retry :8092-8110). Run 20 died on a ONE-SHOT idr on the
+ * lossy sid-6 channel; D1+D3 make it reliable AND repeating. */
+#define SESS_IDR_RETRY_INTERVAL_MS 100u
 
 /* ---- round XXXVIII: ControlReportBatch (nvst.rs:464-548) ----
  * The reference does NOT send one SCTP message per feedback record. It
@@ -1814,6 +1819,21 @@ typedef struct dec_ctx {
              qos_prior_received;
     unsigned long long fb_rr, fb_ack, fb_pacing, fb_qos, fb_ka,
                        fb_nack, fb_idr, fb_pli, fb_rfi;
+    /* Round XL: the reference's keyframe-request RETRY loop
+     * (nvst.rs:8092-8110 + keyframe_request_routes :1272-1286). The
+     * latch lives in kn_rx (armed by any loss/stall path, cleared ONLY
+     * by an assembled keyframe, :994); this is the sender side: every
+     * IDR_RETRY_INTERVAL (100 ms, :104) while pending, send IDR 0x0302
+     * on the RELIABLE control channel (sid 0 — send_control, NOT the
+     * lossy partial channel run 20 lost its one-shot on) plus, when the
+     * RTCP video-feedback plane is open (non-mjolnir && rtcp_on_sctp &&
+     * a stream snapshot exists, uses_rtcp_video_feedback :3116), a PLI
+     * on sid 14. `kf_armed` tracks the episode for logging; attempts
+     * are counted per episode AND in fb_idr/fb_pli. */
+    int      kf_armed;
+    unsigned long long kf_episode, kf_attempts;
+    uint64_t kf_last_attempt_ms;
+    int      rtcp_fb_open;       /* uses_rtcp_video_feedback(mjolnir,..) */
     /* round XXXVIII: the ControlReportBatch (nvst.rs:464-548) that the
      * frame-ack / pacing / QoS records ride in. */
     sess_ctrl_batch cbatch;
@@ -1906,47 +1926,57 @@ static void dec_frame_in_cb(const kn_rx_frame *f, void *ud)
     c->au_last_ts = f->timestamp;
 
     if (c->fb) {
-        uint8_t fb[4 + KN_RX_CTRL_FRAME_ACK_PAYLOAD_LEN];
-        int n = kn_rx_ctrl_frame_ack(f->frame_index, NULL,
-                                     (uint32_t)f->bytes_len, fb);
-        /* nvst.rs:7905-7944: the ack goes into the batch, and the batch
-         * is flushed when the NEXT record would not fit. The reference
-         * drains its pending-frame-ack deque in the same loop, so a full
-         * batch never delays an ack by more than one flush. */
-        if (n > 0) {
-            if (!sess_cb_fits(&c->cbatch, (size_t)n))
-                (void)sess_cb_flush(&c->cbatch, c->fb, "capacity");
-            if (sess_cb_append(&c->cbatch, fb, (size_t)n, c->now_ms)) {
-                c->cbatch.pending_acks++;
-                c->cbatch.last_ack_frame = f->frame_index;
-                c->cbatch.have_last_ack_frame = 1;
-                c->fb_ack++;
-            }
-        }
         /* frame_pacing_feedback && frame_pacing_enabled && the interval
          * gate (nvst.rs:7922-7936). The middle term is the SERVER's: a
          * 0x112 for stream 0 with mode != 1 switches our 0x0203 reports
          * OFF, and sending them anyway feeds a PID the rig has explicitly
          * disabled. The pacing error stays NEUTRAL (:7928-7933 — feeding
          * network jitter into the server PID made its encoder cadence
-         * oscillate). */
+         * oscillate). Round XL: the reference sends the pacing report as
+         * its OWN partial-control write (:7934-7936) BEFORE the ack is
+         * appended to the batch — runs 18-21 batched it with the acks. */
         if (c->pacing_enabled) {
             uint64_t now_us = kn_sock_now_us();
             if (now_us >= c->next_pacing_us) {
                 uint8_t pb[4 + KN_RX_CTRL_FRAME_PACING_PAYLOAD_LEN];
                 int pn = kn_rx_ctrl_frame_pacing(f->frame_index,
                                                  SESS_FRAME_TIME_US, 0, pb);
-                if (pn > 0) {
-                    if (!sess_cb_fits(&c->cbatch, (size_t)pn))
-                        (void)sess_cb_flush(&c->cbatch, c->fb, "capacity");
-                    if (sess_cb_append(&c->cbatch, pb, (size_t)pn,
-                                       c->now_ms))
-                        c->fb_pacing++;
-                }
+                if (pn > 0 &&
+                    sess_fb_push(c->fb, 6, pb, (size_t)pn) == 0)
+                    c->fb_pacing++;
                 c->next_pacing_us = now_us + SESS_PACING_INTERVAL_US;
             }
         } else {
             c->fb_pacing_disabled++;
+        }
+        /* Round XL: first_packet_time_ms is the reference's
+         * (timing.first_at - transport_origin) as f64 milliseconds
+         * (nvst.rs:447-462) — kn_rx now stamps f->first_packet_ms with
+         * the arrival of the AU's first packet. Runs 18-21 sent NULL
+         * (payload zeros); the reference sends the real stage timing. */
+        {
+            double fpt_ms = (f->first_packet_ms > c->transport_origin_ms)
+                ? (double)(f->first_packet_ms - c->transport_origin_ms)
+                : 0.0;
+            uint8_t fb[4 + KN_RX_CTRL_FRAME_ACK_PAYLOAD_LEN];
+            int n = kn_rx_ctrl_frame_ack(f->frame_index, &fpt_ms,
+                                         (uint32_t)f->bytes_len, fb);
+            /* nvst.rs:7905-7944: the ack goes into the batch, and the
+             * batch is flushed when the NEXT record would not fit. The
+             * reference drains its pending-frame-ack deque in the same
+             * loop, so a full batch never delays an ack by more than one
+             * flush. */
+            if (n > 0) {
+                if (!sess_cb_fits(&c->cbatch, (size_t)n))
+                    (void)sess_cb_flush(&c->cbatch, c->fb, "capacity");
+                if (sess_cb_append(&c->cbatch, fb, (size_t)n,
+                                   c->now_ms)) {
+                    c->cbatch.pending_acks++;
+                    c->cbatch.last_ack_frame = f->frame_index;
+                    c->cbatch.have_last_ack_frame = 1;
+                    c->fb_ack++;
+                }
+            }
         }
     }
 }
@@ -2010,41 +2040,67 @@ static void dec_drain_events(dec_ctx *c)
     }
 }
 
-static void dec_take_kf(dec_ctx *c)
+/* Round XL: the keyframe-request service, replacing run 16-21's
+ * one-shot take-and-clear. kn_rx OWNS the latch (armed by the stall /
+ * loss / RFI-backstop paths, cleared only by an assembled keyframe —
+ * nvst.rs:994); this side mirrors the reference's bundle-loop retry
+ * (:8092-8110): while the latch is pending, every IDR_RETRY_INTERVAL
+ * (100 ms, :104) send IDR 0x0302 via the RELIABLE control channel
+ * (sid 0 — the reference's send_control) and, when the RTCP video
+ * feedback plane is open (non-mjolnir with an rtcp channel AND a bound
+ * stream snapshot — uses_rtcp_video_feedback :3116 +
+ * keyframe_request_routes :1272-1286), a PLI on sid 14. Sending is not
+ * evidence of delivery, so failed pushes still consume the interval
+ * ("Bound failed sends as well as successful ones", :8090). Run 20 died
+ * exactly here: ONE idr on the lossy unordered sid-6 channel (TTL
+ * 300 ms), never retried — "pending a keyframe that never comes". */
+static void dec_kf_service(dec_ctx *c, uint64_t now_ms)
 {
-    if (kn_rx_video_take_keyframe_request(c->v)) {
-        int sent = 0;
-        c->kf_request_lines++;
-        /* round XXXVI: the request now FLIES — IDR (0x0302) on the
-         * partial-reliable control channel (sid 6, the nvst_control
-         * command space) + a plain RTCP PLI on the rtcp1 channel
-         * (sid 14, nvst.rs:8101 build_rtcp_pli via send_rtcp). The
-         * stage-2 "unsent" note was the honest placeholder; run 16's
-         * stall (progress_stall -> kf_request sent:false) is exactly
-         * the gap this closes. */
-        if (c->fb) {
-            uint8_t idr[6];
-            int n = kn_rx_ctrl_idr_request(idr);
-            if (n > 0 && sess_fb_push(c->fb, 6, idr, (size_t)n) == 0) {
-                c->fb_idr++;
-                sent = 1;
-            }
-            if (c->v->have_bound_ssrc) {
-                uint8_t pli[12];
-                kn_rx_rtcp_pli(SESS_RTCP_SENDER_SSRC, c->v->bound_ssrc,
-                               pli);
-                if (sess_fb_push(c->fb, 14, pli, sizeof pli) == 0) {
-                    c->fb_pli++;
-                    sent = 1;
-                }
-            }
-        }
-        if (c->kf_request_lines <= 20) {
-            printf("{\"mode\":\"decode\",\"event\":\"kf_request\","
-                   "\"sent\":%d,\"n\":%llu}\n", sent,
-                   (unsigned long long)(c->kf_request_lines % 1000000ull));
+    int pending = kn_rx_video_keyframe_request_pending(c->v);
+    if (pending && !c->kf_armed) {
+        c->kf_armed = 1;
+        c->kf_episode++;
+        c->kf_attempts = 0;
+        c->kf_last_attempt_ms = 0;      /* first attempt: this pass */
+    }
+    if (!pending) {
+        if (c->kf_armed) {
+            printf("{\"mode\":\"decode\",\"event\":\"kf_cleared\","
+                   "\"episode\":%llu,\"attempts\":%llu}\n",
+                   c->kf_episode, c->kf_attempts);
             fflush(stdout);
+            c->kf_armed = 0;
         }
+        return;
+    }
+    if (!c->fb) return;
+    if (now_ms - c->kf_last_attempt_ms < SESS_IDR_RETRY_INTERVAL_MS &&
+        c->kf_last_attempt_ms != 0)
+        return;
+    c->kf_last_attempt_ms = now_ms;
+    c->kf_attempts++;
+    c->kf_request_lines++;
+    {
+        uint8_t idr[6];
+        int n = kn_rx_ctrl_idr_request(idr);
+        if (n > 0 && sess_fb_push(c->fb, 0, idr, (size_t)n) == 0)
+            c->fb_idr++;
+    }
+    if (c->rtcp_fb_open && c->v->have_bound_ssrc) {
+        uint8_t pli[12];
+        kn_rx_rtcp_pli(SESS_RTCP_SENDER_SSRC, c->v->bound_ssrc, pli);
+        if (sess_fb_push(c->fb, 14, pli, sizeof pli) == 0)
+            c->fb_pli++;
+    }
+    /* bounded stdout: the episode's first attempt, then every 50th
+     * (a 5-s stall at 100 ms cadence is 50 attempts; the reference logs
+     * its first attempt and then every 10 s, :8110-8122) */
+    if (c->kf_attempts == 1ull || c->kf_attempts % 50ull == 0ull) {
+        printf("{\"mode\":\"decode\",\"event\":\"kf_request\","
+               "\"episode\":%llu,\"attempt\":%llu,\"idr_sid\":0,"
+               "\"pli\":%d}\n", c->kf_episode, c->kf_attempts,
+               (c->rtcp_fb_open && c->v->have_bound_ssrc) ? 1 : 0);
+        fflush(stdout);
     }
 }
 
@@ -2357,7 +2413,7 @@ static int run_decode(uint16_t port, const char *bind_ip, long seconds,
             (void)kn_rx_video_process_datagram(&v, pkt, plen, c.now_ms,
                                                dec_frame_in_cb, &c);
             dec_drain_events(&c);
-            dec_take_kf(&c);
+            dec_kf_service(&c, c.now_ms);
             dec_drain_queue(&c);
         } else if (rc < 0) {
             consecutive_errors++;
@@ -2376,7 +2432,7 @@ static int run_decode(uint16_t port, const char *bind_ip, long seconds,
             c.now_ms = now_ms;
             (void)kn_rx_video_poll(&v, now_ms, dec_frame_in_cb, &c);
             dec_drain_events(&c);
-            dec_take_kf(&c);
+            dec_kf_service(&c, c.now_ms);
             dec_drain_queue(&c);
             next_poll_ms = now_ms + KN_SOCK_POLL_INTERVAL_MS;
         }
@@ -2840,6 +2896,7 @@ typedef struct {
     uint64_t next_ctrl_log_ms;
     unsigned ctrl_raw_n;
     sess_ctrl_raw ctrl_raw[SESS_CTRL_RAW_MAX];
+    unsigned tlv010a_lines;        /* round XL (F1): 0x010a dump cap */
     volatile int snap_req, snap_done;
     sess_ice_stats snap;
     volatile int stop;
@@ -3076,6 +3133,49 @@ static int sess_sctl_ingest(sess_pump *p, uint16_t sid, const uint8_t *data,
  * records, count them, and react — INPUT_VERSION latches the negotiated
  * version (nvst_input.rs:339-351), a cursor notification drives the
  * handoff machine (nvst.rs:8322-8326). */
+/* Round XL (F1): 0x010a was the most frequent Unknown in the run-18/21
+ * server-control inventory, but kn_sctl_msg deliberately carries no
+ * payload pointer (kn_bw.h:199-218), so all the decoded plane could say
+ * was "the code exists". This is a self-contained TLV walker over the
+ * raw record buffer (same framing the reference uses: u16 LE code +
+ * u16 LE length + payload) that dumps every 0x010a payload as hex —
+ * JSON-safe by construction. Bounded: at most 16 lines per session and
+ * each payload_hex capped so the whole line stays under 900 chars. */
+static void sess_ctrl_dump_010a(sess_pump *p, uint16_t sid,
+                                const uint8_t *data, size_t len)
+{
+    static const char hx[] = "0123456789abcdef";
+    char hexbuf[801];
+    size_t o = 0, ho = 0;
+    unsigned hits = 0;
+
+    if (p->tlv010a_lines >= 16u) return;
+    while (o + 4u <= len) {
+        uint16_t code = (uint16_t)((uint16_t)data[o] |
+                                   (uint16_t)((uint16_t)data[o + 1] << 8));
+        uint16_t vlen = (uint16_t)((uint16_t)data[o + 2] |
+                                   (uint16_t)((uint16_t)data[o + 3] << 8));
+        if (o + 4u + (size_t)vlen > len) break;
+        if (code == 0x010au) {
+            size_t i;
+            hits++;
+            if (ho && ho + 1u < sizeof hexbuf) hexbuf[ho++] = ',';
+            for (i = 0; i < (size_t)vlen && ho + 2u < sizeof hexbuf; ++i) {
+                hexbuf[ho++] = hx[data[o + 4u + i] >> 4];
+                hexbuf[ho++] = hx[data[o + 4u + i] & 0xFu];
+            }
+        }
+        o += 4u + (size_t)vlen;
+    }
+    if (!hits) return;
+    hexbuf[ho] = '\0';
+    p->tlv010a_lines++;
+    printf("{\"mode\":\"session\",\"event\":\"sctl_010a\",\"n\":%u,"
+           "\"sid\":%u,\"hits\":%u,\"len\":%u,\"payload_hex\":\"%.800s\"}\n",
+           p->tlv010a_lines, (unsigned)sid, hits, (unsigned)len, hexbuf);
+    fflush(stdout);
+}
+
 static void sess_ctrl_ingest(sess_pump *p, uint16_t sid, uint32_t ppi,
                              const uint8_t *data, size_t len)
 {
@@ -3099,6 +3199,7 @@ static void sess_ctrl_ingest(sess_pump *p, uint16_t sid, uint32_t ppi,
      * which is exactly what the reference's own decoder makes of it. */
     if (sess_sctl_ingest(p, sid, data, len))
         p->st.server_termination = 1u;
+    sess_ctrl_dump_010a(p, sid, data, len);
 
     nc.buf = names; nc.cap = sizeof names; nc.used = 0; names[0] = '\0';
     (void)kn_input_scan(data, len, sess_ctrl_names_cb, &nc);
@@ -4276,6 +4377,13 @@ static int run_session(const char *token, const char *device_id,
     uint64_t t_start, next_poll_ms, now_ms, t_last_stats;
     uint64_t ctrl_ping_next_ms = 0;    /* R3-D service beat */
     unsigned long long datagrams = 0;
+    /* Round XL (C19): raw media-loop iterations. The loop-tick forensics
+     * of runs 20/21 had to INFER the tick rate (iterations = datagrams+1)
+     * because nothing counted it directly; recv_timeouts=1 against a 10 ms
+     * poll was the paradox that exposed the SO_RCVTIMEO 500 ms stall. With
+     * loop_ticks emitted every second, run 22's log states the tick rate
+     * outright: healthy = ~100/s, pathological = datagram-rate. */
+    unsigned long long loop_ticks = 0;
     unsigned consecutive_errors = 0;
     const char *stop_reason = "time";
     kn_log_config lcfg;
@@ -5421,6 +5529,12 @@ static int run_session(const char *token, const char *device_id,
          * (:6197) — pump.origin_us is our same instant (set above, and
          * the activation chain already timestamps against it). */
         c.transport_origin_ms = pump.origin_us / 1000u;
+        /* Round XL: uses_rtcp_video_feedback = !mjolnir && rtcp channel
+         * (nvst.rs:3116). unified_mode is our mjolnir-equivalent (no
+         * SCTP control plane at all); rtcp_on_sctp is the descriptor's
+         * RTCP channel flag. Gates the PLI half of the keyframe retry
+         * and the RR/NACK emission decisions. */
+        c.rtcp_fb_open = !unified_mode && desc.rtcp_on_sctp;
         c.have_qos_prior = 0;
         c.completed_frame_bytes = 0;
         c.last_sender_frame = 0;
@@ -5485,6 +5599,7 @@ static int run_session(const char *token, const char *device_id,
         stop_reason = "time";
         while (!g_knv_stop) {
             size_t plen = 0;
+            loop_ticks++;
             now_ms = kn_sock_now_ms();
             if (seconds > 0 &&
                 now_ms - t_start >= (uint64_t)seconds * 1000u) {
@@ -5510,7 +5625,7 @@ static int run_session(const char *token, const char *device_id,
                 (void)kn_rx_video_process_datagram(&v, pkt, plen, c.now_ms,
                                                    dec_frame_in_cb, &c);
                 dec_drain_events(&c);
-                dec_take_kf(&c);
+                dec_kf_service(&c, c.now_ms);
                 dec_drain_queue(&c);
             } else if (rc < 0) {
                 consecutive_errors++;
@@ -5561,7 +5676,7 @@ static int run_session(const char *token, const char *device_id,
                 c.now_ms = now_ms;
                 (void)kn_rx_video_poll(&v, now_ms, dec_frame_in_cb, &c);
                 dec_drain_events(&c);
-                dec_take_kf(&c);
+                dec_kf_service(&c, c.now_ms);
                 dec_drain_queue(&c);
                 next_poll_ms = now_ms + KN_SOCK_POLL_INTERVAL_MS;
             }
@@ -5576,11 +5691,19 @@ static int run_session(const char *token, const char *device_id,
              * Encoding happens HERE (main = the kn_rx single owner);
              * the pump thread ships it (D21 untouched). */
             if (c.fb) {
-                uint32_t f_ssrc = 0, f_base = 0, f_high = 0;
+                uint32_t f_ssrc = 0, f_base = 0, f_high = 0, f_jit = 0;
                 uint64_t f_recv = 0;
                 int have_rr = kn_rx_video_rr_snapshot(&v, &f_ssrc, &f_base,
-                                                      &f_high, &f_recv);
-                if (have_rr && now_ms >= c.next_rr_ms) {
+                                                      &f_high, &f_recv,
+                                                      &f_jit);
+                /* Round XL: the RR rides the RTCP video-feedback plane,
+                 * which the reference opens ONLY for non-mjolnir sessions
+                 * with an rtcp channel (uses_rtcp_video_feedback,
+                 * nvst.rs:3116 + :8041-8043). Unified/mjolnir runs send
+                 * no RTCP at all. The jitter field is the RFC 3550
+                 * interarrival jitter in 90 kHz ticks (report_snapshot
+                 * :1251-1261) — runs 18-21 sent a hardcoded 0. */
+                if (have_rr && c.rtcp_fb_open && now_ms >= c.next_rr_ms) {
                     uint32_t expected = f_high - f_base + 1u;
                     uint32_t rec32 = (uint32_t)(f_recv & 0xFFFFFFFFull);
                     uint32_t de = expected - c.rr_prior_expected;
@@ -5595,7 +5718,7 @@ static int run_session(const char *token, const char *device_id,
                     kn_rx_rtcp_rr(SESS_RTCP_SENDER_SSRC, f_ssrc, frac,
                                   (int32_t)((int64_t)expected -
                                             (int64_t)rec32),
-                                  f_high, 0u, rr);
+                                  f_high, f_jit, rr);
                     if (sess_fb_push(c.fb, 14, rr, sizeof rr) == 0)
                         c.fb_rr++;
                     c.rr_prior_expected = expected;
@@ -5704,7 +5827,7 @@ static int run_session(const char *token, const char *device_id,
                         c.fb_ka++;
                     c.next_ka_ms = now_ms + SESS_KA_INTERVAL_MS;
                 }
-                if (have_rr) {
+                if (have_rr && (c.rtcp_fb_open || unified_mode)) {
                     uint64_t nf = 0, nl = 0;
                     int guard = 0;
                     while (guard++ < 8 &&
@@ -5718,14 +5841,26 @@ static int run_session(const char *token, const char *device_id,
                         size_t rl;
                         for (i2 = nf; i2 <= nl && cnt < 64u; ++i2)
                             miss[cnt++] = (uint16_t)(i2 & 0xFFFFull);
-                        n2 = kn_rx_ctrl_nack_v2(0, miss, cnt, nb, sizeof nb);
-                        if (n2 > 0 &&
-                            sess_fb_push(c.fb, 6, nb, (size_t)n2) == 0)
-                            c.fb_nack++;
-                        rl = kn_rx_rtcp_nack(SESS_RTCP_SENDER_SSRC, f_ssrc,
-                                           nf, nl, rn, sizeof rn);
-                        if (rl && sess_fb_push(c.fb, 14, rn, rl) == 0)
-                            c.fb_nack++;
+                        /* Round XL — send_pending_nack's mode split
+                         * (nvst.rs:3050-3092): mjolnir (unified) sends
+                         * ONLY the private NACK-v2 on the partial
+                         * control channel; non-mjolnir sends ONLY the
+                         * RTCP generic NACK on the rtcp channel. Runs
+                         * 18-21 sent BOTH on every loss. */
+                        if (unified_mode) {
+                            n2 = kn_rx_ctrl_nack_v2(0, miss, cnt, nb,
+                                                    sizeof nb);
+                            if (n2 > 0 &&
+                                sess_fb_push(c.fb, 6, nb, (size_t)n2) == 0)
+                                c.fb_nack++;
+                        } else {
+                            rl = kn_rx_rtcp_nack(SESS_RTCP_SENDER_SSRC,
+                                                 f_ssrc, nf, nl, rn,
+                                                 sizeof rn);
+                            if (rl &&
+                                sess_fb_push(c.fb, 14, rn, rl) == 0)
+                                c.fb_nack++;
+                        }
                     }
                 }
                 {
@@ -5738,7 +5873,11 @@ static int run_session(const char *token, const char *device_id,
                                      (uint16_t)v.last_stream_packet_index,
                                      ob);
                         if (n3 > 0) {
-                            if (sess_fb_push(c.fb, 6, ob, (size_t)n3) == 0)
+                            /* Round XL: send_pending_frame_invalidation
+                             * (nvst.rs:3095-3114) uses send_control —
+                             * the RELIABLE channel (sid 0), not the
+                             * lossy partial one run 18-21 used. */
+                            if (sess_fb_push(c.fb, 0, ob, (size_t)n3) == 0)
                                 c.fb_rfi++;
                             else
                                 kn_rx_inval_restore_rfi(&v.inval, rf,
@@ -5779,6 +5918,8 @@ static int run_session(const char *token, const char *device_id,
                 kn_lctx_init(&p, KN_CH_TRANSPORT, KN_INFO, "session_stats");
                 kn_lctx_i64(&p, "datagrams",
                             (long long)(datagrams % 10000000000ll));
+                kn_lctx_i64(&p, "loop_ticks",
+                            (long long)(loop_ticks % 10000000000ll));
                 kn_lctx_i64(&p, "aus", (long long)(c.aus % 1000000000ll));
                 kn_lctx_i64(&p, "frames_out",
                             (long long)(c.frames_out % 1000000000ll));
@@ -5941,7 +6082,8 @@ static int run_session(const char *token, const char *device_id,
                    "\"q_overflows\":%llu,\"fec_repaired\":%llu,"
                    "\"stale\":%llu,\"gaps\":%llu,\"withheld\":%llu,"
                    "\"kf_requests\":%llu,\"recv_timeouts\":%llu,"
-                   "\"recv_errors\":%llu,\"event_lines_capped\":%llu,"
+                   "\"recv_errors\":%llu,\"loop_ticks\":%llu,"
+                   "\"event_lines_capped\":%llu,"
                    "\"au_write_errors\":%llu,\"srtp_profile\":\"%.24s\","
                    "\"rx_state\":%d,\"decoder\":\"%.64s\",\"video\":\"%dx%d\","
                    "\"wall_ms\":%llu,\"drops\":{%s},"
@@ -5985,7 +6127,9 @@ static int run_session(const char *token, const char *device_id,
                                         1000000000ull),
                    (unsigned long long)(ms->recv_timeouts %
                                         10000000000ull),
-                   (unsigned long long)(ms->recv_errors % 1000000000ull),
+                   (unsigned long long)(ms->recv_errors %
+                                        1000000000ull),
+                   loop_ticks % 10000000000ull,
                    c.event_lines_capped % 1000000000ull,
                    c.au_write_errors % 1000000000ull,
                    profile_name, v.state,
@@ -6240,6 +6384,21 @@ int main(int argc, char **argv)
             dec_seconds < 0 || dec_seconds > 86400 ||
             dec_vps < 0 || dec_vps > 65519 ||
             dec_expect < 0 || dec_expect > 100000000) { usage(); return 2; }
+    }
+
+    /* Round XL (C18): self-identify the binary on every RUN, before mode
+     * dispatch. Part of round XL was spent eliminating the stale-exe
+     * hypothesis because run logs carried nothing that proved which build
+     * produced them; __DATE__/__TIME__ are unique per compilation, and the
+     * round tag is bumped by hand each round. The utility modes are
+     * EXCLUDED: --list-selftests/--version/--selftest/--diagnostics capture
+     * stdout as a SINGLE JSON document and an extra leading line breaks
+     * that contract (the native gate's json.load validators). --version
+     * already prints the full build.json for the deep identity. */
+    if (!list && !version && !(selftest && selftest[0]) && !diagnostics) {
+        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XL\"}\n",
+               __DATE__, __TIME__);
+        fflush(stdout);
     }
 
     if (list) return print_registry();

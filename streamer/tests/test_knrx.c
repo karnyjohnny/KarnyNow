@@ -892,7 +892,7 @@ static void test_error_paths(void)
                       0xFFFFFFFFu, rr);
         CHECK(memcmp(rr, g3, 32) == 0,
               "RR clamps to -0x800000 and keeps max highest/jitter");
-        CHECK(kn_rx_video_rr_snapshot(NULL, NULL, NULL, NULL, NULL) == 0,
+        CHECK(kn_rx_video_rr_snapshot(NULL, NULL, NULL, NULL, NULL, NULL) == 0,
               "rr_snapshot is NULL-safe (and 0 before the stream binds)");
     }
 
@@ -919,6 +919,79 @@ static void test_error_paths(void)
     }
 }
 
+/* --------------------------- 5. round XL: feedback-plane semantics */
+
+/* D4/D6 goldens. The stream: prop_build with 4 frames x 1 packet, so the
+ * per-frame RTP timestamp advances 3000 ticks (prop_build: ts = 1000 +
+ * fi*3000 → 4000, 7000, 10000, 13000) and every packet completes its
+ * frame. Fed with now_ms = 1000 + 10*i (arrival advances 10 ms/packet =
+ * 900 ticks). The jitter machine (kn_rx.c, RFC 3550 port of the
+ * reference's timing EWMA) computes, with transit RELATIVE to the first
+ * packet (first packet latches only; last_transit starts at 0):
+ *   pkt1: arrival=(1010-1000)*90=900   rtp=7000-4000=3000
+ *         transit=-2100  diff=-2100  delta=2100  J=0+(2100-0)/16=131.25
+ *   pkt2: arrival=1800   rtp=6000  transit=-4200  diff=-2100  delta=2100
+ *         J=131.25+(2100-131.25)/16=254.296875
+ *   pkt3: arrival=2700   rtp=9000  transit=-6300  diff=-2100  delta=2100
+ *         J=254.296875+(2100-254.296875)/16=369.60546875
+ * rr_snapshot truncates to u32 → 369. A steady-rate stream would keep
+ * delta=0 after the first step, so this golden pins the EWMA divisor,
+ * the relative-transit baseline AND the truncation in one number.
+ * first_packet_ms must equal the wall clock of each frame's first (here:
+ * only) packet — the reference's CompletedFrameFeedback timing.first_at
+ * that frame_ack serializes as first_packet_time_ms (nvst.rs:447-462). */
+static void test_round_xl_feedback(void)
+{
+    prop_stream ps;
+    prop_h h;
+    int i, fpm_ok = 1;
+    uint32_t ssrc = 0, base = 0, high = 0, jit = 0;
+    uint64_t recv = 0;
+    memset(&ps, 0, sizeof ps);
+    memset(&h, 0, sizeof h);
+    if (!prop_build(&ps, 0xD0D0D0D1u, 4, 1, 0, 0, NULL, NULL, NULL, NULL)) {
+        CHECK(0, "XL build");
+        return;
+    }
+    if (!prop_h_init(&h, 64, KN_RX_DEFAULT_VIDEO_PACKET_SIZE, 4, 16)) {
+        CHECK(0, "XL init");
+        prop_free(&ps);
+        return;
+    }
+    CHECK(kn_rx_video_rr_snapshot(&h.v, &ssrc, &base, &high, &recv,
+                                  &jit) == 0,
+          "rr_snapshot is 0 before the stream binds");
+    for (i = 0; i < ps.n; ++i)
+        kn_rx_video_process_packet(&h.v, ps.idx[i], ps.pkts[i], ps.lens[i],
+                                   (uint64_t)(1000 + 10 * i),
+                                   rxt_frame_cb, &h.col);
+    CHECK(h.col.n == 4, "XL: all four frames emitted");
+    CHECK(kn_rx_video_rr_snapshot(&h.v, &ssrc, &base, &high, &recv,
+                                  &jit) == 1,
+          "rr_snapshot reports once the ssrc binds");
+    CHECK(ssrc == 0x11223344u && recv == 4, "XL: ssrc/received snapshot");
+    CHECK(jit == 369u, "XL jitter golden: 369 (EWMA/16 of delta 2100)");
+    for (i = 0; i < h.col.n; ++i)
+        if (h.col.first_ms[i] != (uint64_t)(1000 + 10 * i))
+            fpm_ok = 0;
+    CHECK(fpm_ok, "XL: first_packet_ms = wall clock of the frame's first "
+                  "packet (frame_ack first_packet_time_ms source)");
+    /* D3's latch read: pending must be a NON-clearing view, and the
+     * take clears — dec_kf_service polls pending every 100 ms and must
+     * see the request until an assembled keyframe clears it. */
+    CHECK(kn_rx_video_keyframe_request_pending(&h.v) == 0,
+          "XL: no keyframe request pending on a clean stream");
+    kn_rx_video_request_keyframe(&h.v);
+    CHECK(kn_rx_video_keyframe_request_pending(&h.v) == 1 &&
+          kn_rx_video_keyframe_request_pending(&h.v) == 1,
+          "XL: pending is non-clearing (the retry loop re-reads it)");
+    CHECK(kn_rx_video_take_keyframe_request(&h.v) == 1 &&
+          kn_rx_video_keyframe_request_pending(&h.v) == 0,
+          "XL: take clears the latch");
+    prop_h_free(&h);
+    prop_free(&ps);
+}
+
 /* --------------------------------------------------------------- main */
 
 int main(void)
@@ -932,5 +1005,7 @@ int main(void)
     test_properties();
     printf("-- error paths --\n");
     test_error_paths();
+    printf("-- round XL feedback plane --\n");
+    test_round_xl_feedback();
     return kn_test_summary("test_knrx");
 }

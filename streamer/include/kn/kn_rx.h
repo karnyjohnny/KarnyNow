@@ -205,6 +205,12 @@ typedef struct kn_rx_frame {
     int       contiguous;        /* FINAL value after RFI admit() logic */
     const uint8_t *bytes;
     size_t    bytes_len;
+    /* Round XL: the wall-clock ms (kn_rx's now_ms domain) at which the
+     * FIRST packet of this AU was processed — the reference's
+     * CompletedFrameFeedback timing.first_at, which frame_ack turns into
+     * first_packet_time_ms = (first_at - transport_origin) as f64 ms
+     * (nvst.rs:447-462). 0 before any packet was seen. */
+    uint64_t  first_packet_ms;
 } kn_rx_frame;
 
 typedef void (*kn_rx_frame_fn)(const kn_rx_frame *frame, void *userdata);
@@ -674,6 +680,30 @@ typedef struct kn_rx_video {
     uint32_t qos_base_sequence;  int have_qos_base;
     uint32_t qos_highest_sequence;
     uint32_t qos_received_packets; int have_qos_snapshot;
+
+    /* ---- round XL: the reception-timing jitter block ----
+     * publish_stream_packet's timing fields (nvst.rs:917-940), SEPARATE
+     * from the bandwidth estimator's ms-domain jitter on purpose: this
+     * is the RFC 3550 interarrival jitter in 90 kHz TICKS that the RTCP
+     * Receiver Report carries (report_snapshot, :1251-1261). The first
+     * authenticated packet anchors first_arrival/first_rtp and returns
+     * without a jitter step; a packet whose RTP timestamp equals the
+     * previous one is skipped; otherwise
+     *   transit  = (now - first_arrival)*90000 - (u32)(ts - first_ts)
+     *   delta    = |transit - last_transit|
+     *   jitter  += (delta - jitter) / 16
+     * exactly as the reference (u32 wrap, NOT sign extension, on the
+     * timestamp difference). */
+    uint64_t timing_first_ms;    int have_timing_first;
+    uint32_t timing_first_rtp;
+    uint32_t timing_last_rtp;
+    int64_t  timing_last_transit;
+    double   timing_jitter;
+
+    /* Round XL: the wall-clock ms of the first packet of the AU the
+     * assembler is currently accumulating (frame_ack's first_packet_time
+     * input; recorded at the assembler's frame-start boundary). */
+    uint64_t cur_au_first_ms;
 } kn_rx_video;
 
 /* Initialise the pipeline. Validates every bound (window 1..2048, AU cap
@@ -726,16 +756,26 @@ const kn_rx_event *kn_rx_video_events(const kn_rx_video *v, uint32_t *n);
  * when it emits IDR 0x0302 / RTCP PLI). */
 int kn_rx_video_take_keyframe_request(kn_rx_video *v);
 
-/* The reference's report_snapshot inputs (nvst.rs:1223-1250): returns
+/* Round XL: the NON-clearing peek the reference's retry loop actually has
+ * — keyframe_request_pending (nvst.rs:1266-1268). The latch stays armed
+ * until an assembled KEYFRAME clears it (:994) and the bundle loop retries
+ * IDR+PLI every IDR_RETRY_INTERVAL (100 ms, :104/:1279-1281) while it is
+ * set. A one-shot take-and-clear on a lossy channel is how run 20 ended up
+ * "pending a keyframe that never comes". NULL-safe. */
+int kn_rx_video_keyframe_request_pending(const kn_rx_video *v);
+
+/* The reference's report_snapshot inputs (nvst.rs:1223-1261): returns
  * 1 when the stream is bound (all fields filled: the media SSRC, the
- * FIRST extended sequence seen, the highest extended sequence, and the
- * authenticated packet count), 0 before the first packet. The caller
- * derives expected = highest - base + 1, cumulative = expected -
- * received, and the 256-scaled fraction over its own prior snapshot
- * (the reference's update_interval arithmetic). NULL-safe. */
+ * FIRST extended sequence seen, the highest extended sequence, the
+ * authenticated packet count, and the RFC 3550 interarrival jitter in
+ * 90 kHz ticks, clamped to 0..UINT32_MAX exactly like the reference's
+ * `jitter.clamp(0.0, f64::from(u32::MAX)) as u32`), 0 before the first
+ * packet. The caller derives expected = highest - base + 1, cumulative =
+ * expected - received, and the 256-scaled fraction over its own prior
+ * snapshot (the reference's update_interval arithmetic). NULL-safe. */
 int kn_rx_video_rr_snapshot(const kn_rx_video *v, uint32_t *ssrc,
                             uint32_t *base, uint32_t *highest,
-                            uint64_t *received);
+                            uint64_t *received, uint32_t *jitter);
 
 /* ---- round XXXVIII (D-t10): the bandwidth-estimator plane ---- */
 
