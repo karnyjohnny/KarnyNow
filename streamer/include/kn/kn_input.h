@@ -122,6 +122,17 @@ int kn_input_state_change(uint16_t code, uint32_t state, uint32_t frame,
 int kn_input_haptics(uint64_t timestamp_us, int enabled,
                      uint8_t *out, size_t out_len);
 
+/* 0x0206 remote-input carrying INPUT_MOUSE_RELATIVE(7) — round XLI.1,
+ * the first discrete-input message (docs/INPUT.md §9). Body is dx BE
+ * i16, dy BE i16, two zero bytes (nvst_input.rs:727-741); 7 is not
+ * KEY_DOWN/KEY_UP/MOUSE_ABSOLUTE so timestamp_count = 1 (:956-987).
+ * 44 bytes total; Rust golden at nvst_input.rs:1888-1911. Route:
+ * ControlPartial (nvst_input.rs:969) = sid 6 — UNORDERED, PR-SCTP
+ * TTL 300 ms (NVST_CHANNEL_PROFILE[3]); the caller must NOT send it
+ * on the reliable sid-0 control channel. */
+int kn_input_mouse_relative(int16_t dx, int16_t dy, uint64_t timestamp_us,
+                            uint8_t *out, size_t out_len);
+
 /* The whole chain, in send order (nvst_input.rs:1318-1329). Fills
  * lens[0..7]; returns the number of messages built (8) or -1. Every
  * message is <= KN_INPUT_CMD_MAX bytes. */

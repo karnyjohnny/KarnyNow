@@ -1863,6 +1863,12 @@ static int st_input_vectors(kn_st_result *r)
         else if (strcmp(k->what, "descriptor") == 0)
             n = kn_input_device_descriptor(KN_INPUT_KAT_TS_US, 0u, buf,
                                            sizeof buf);
+        else if (strcmp(k->what, "mouse_rel") == 0)
+            n = kn_input_mouse_relative(24, 24, KN_INPUT_KAT_TS_US,
+                                        buf, sizeof buf);
+        else if (strcmp(k->what, "mouse_rel_neg") == 0)
+            n = kn_input_mouse_relative(-5, 3, KN_INPUT_KAT_TS_US,
+                                        buf, sizeof buf);
         STV(t, n > 0 && (size_t)n == k->len &&
                memcmp(buf, k->bytes, k->len) == 0, "single golden");
     }

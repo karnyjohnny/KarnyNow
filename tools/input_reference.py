@@ -151,6 +151,20 @@ def remote_input_message(inner: bytes, timestamp_us: int) -> bytes:
                            remote_input_packet(0x0E, bytes(body)))
 
 
+def mouse_relative(dx: int, dy: int, timestamp_us: int) -> bytes:
+    """nvst_input.rs:727-741 — INPUT_MOUSE_RELATIVE(7): the body is
+    native[4..8] (dx BE i16, dy BE i16) plus two zero bytes; the
+    timestamp is read BE u64 from native[14..22] and appended LE u64 by
+    remote_input_message (7 is not KEY_DOWN/KEY_UP/MOUSE_ABSOLUTE, so
+    timestamp_count = 1). Total 44 bytes. Route: ControlPartial
+    (nvst_input.rs:969) = sid 6, unordered, PR-SCTP TTL 300 ms
+    (NVST_CHANNEL_PROFILE[3]). Rust golden: nvst_input.rs:1888-1911
+    (keyboard_and_mouse_translate_to_byte_exact_control_commands)."""
+    inner = remote_input_packet(INPUT_MOUSE_RELATIVE,
+                                struct.pack(">hh", dx, dy) + b"\x00\x00")
+    return remote_input_message(inner, timestamp_us)
+
+
 def haptics_state(enabled: bool, timestamp_us: int) -> bytes:
     """nvst_input.rs:1339-1344."""
     inner = remote_input_packet(INPUT_HAPTICS_ENABLED,
@@ -274,6 +288,23 @@ def self_prove() -> None:
     d1 = device_descriptor(GOLDEN_TS_US, 0x1234)
     assert d1[4 + 1 + 8 + 9: 4 + 1 + 8 + 11] == bytes([0x34, 0x12]), "bitmap"
 
+    # round XLI.1 — the reference's OWN byte-exact relative-mouse golden,
+    # from keyboard_and_mouse_translate_to_byte_exact_control_commands
+    # (nvst_input.rs:1888-1911): dx=24, dy=24, ts=0x01861330 us.
+    rust_mouse = mouse_relative(24, 24, 0x01861330)
+    assert rust_mouse.hex() == (
+        "06022800000000240e0000000000000a0700000000180018"
+        "0000000000000000000000003013860100000000"
+    ), "rust relative-mouse golden"
+    assert len(rust_mouse) == 44, "relative mouse total length"  # 4 + 40
+    # wire offsets the C port must match: dx BE i16 at [20..22], dy at
+    # [22..24], timestamp LE u64 at [36..44]
+    neg = mouse_relative(-1, -2, 0x0102030405060708)
+    assert neg[20:24] == b"\xff\xff\xff\xfe", "negative deltas BE i16"
+    assert neg[36:44] == struct.pack("<Q", 0x0102030405060708), "ts LE u64"
+    ext = mouse_relative(-32768, 32767, 1)
+    assert ext[20:24] == b"\x80\x00\x7f\xff", "i16 extremes"
+
     for hexed, want in VERSION_VECTORS:
         got = input_protocol_version(bytes.fromhex(hexed))
         assert got == want, f"version({hexed}) = {got}, want {want}"
@@ -294,8 +325,9 @@ def self_prove() -> None:
 
     names = sorted(set(COMMAND_NAMES.values()))
     assert len(names) == len(COMMAND_NAMES), "duplicate command name"
-    print(f"self-proof OK: 8/8 activation goldens byte-exact at ts="
-          f"{GOLDEN_TS_US}, {len(VERSION_VECTORS)} parser vectors, "
+    print(f"self-proof OK: 8/8 activation goldens + 1/1 relative-mouse "
+          f"golden byte-exact at ts={GOLDEN_TS_US}, "
+          f"{len(VERSION_VECTORS)} parser vectors, "
           f"{len(CURSOR_VECTORS)} cursor vectors, "
           f"{len(COMMAND_NAMES)} named commands")
 
@@ -378,6 +410,8 @@ def emit(path: str) -> None:
         "enable_on": enable_input(1, True),
         "haptics": haptics_state(True, GOLDEN_TS_US),
         "descriptor": device_descriptor(GOLDEN_TS_US, 0),
+        "mouse_rel": mouse_relative(24, 24, GOLDEN_TS_US),
+        "mouse_rel_neg": mouse_relative(-5, 3, GOLDEN_TS_US),
     }
     for key, msg in singles.items():
         out.append(_c_bytes(f"kat_{key}", msg))

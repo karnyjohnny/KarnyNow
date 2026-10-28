@@ -172,11 +172,17 @@ static void t_singles(void)
         else if (strcmp(k->what, "descriptor") == 0)
             n = kn_input_device_descriptor(KN_INPUT_KAT_TS_US, 0u, buf,
                                            sizeof buf);
+        else if (strcmp(k->what, "mouse_rel") == 0)
+            n = kn_input_mouse_relative(24, 24, KN_INPUT_KAT_TS_US,
+                                        buf, sizeof buf);
+        else if (strcmp(k->what, "mouse_rel_neg") == 0)
+            n = kn_input_mouse_relative(-5, 3, KN_INPUT_KAT_TS_US,
+                                        buf, sizeof buf);
         CHECK(n > 0, name);
         if (n > 0)
             CHECK(t_hexeq(buf, (size_t)n, k->bytes, k->len), name);
     }
-    CHECK(kn_input_kat_singles_n == 11u, "eleven single goldens");
+    CHECK(kn_input_kat_singles_n == 13u, "thirteen single goldens");
 }
 
 static void t_builder_edges(void)
@@ -747,12 +753,54 @@ static void t_constants(void)
     CHECK(KN_INPUT_CMD_SYSTEM_STATE == 0x0321, "code 0x0321");
 }
 
+/* Round XLI.1 — the relative-mouse golden straight from the reference's
+ * OWN Rust test keyboard_and_mouse_translate_to_byte_exact_control_commands
+ * (nvst_input.rs:1888-1911): native motion packet type=7, dx=24 BE i16,
+ * dy=24 BE i16, ts=0x01861330 us BE u64 at native[14..22] -> the 44-byte
+ * control command below. tools/input_reference.py self-proves the same
+ * bytes (two implementations). */
+static void t_mouse_relative_golden(void)
+{
+    static const uint8_t golden[44] = {
+        0x06, 0x02, 0x28, 0x00, 0x00, 0x00, 0x00, 0x24,
+        0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a,
+        0x07, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x18,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x30, 0x13, 0x86, 0x01,
+        0x00, 0x00, 0x00, 0x00
+    };
+    uint8_t buf[KN_INPUT_CMD_MAX];
+    int n = kn_input_mouse_relative(24, 24, 0x01861330ull, buf, sizeof buf);
+    CHECK(n == 44, "rust relative-mouse golden builds 44 bytes");
+    CHECK(t_hexeq(buf, 44u, golden, sizeof golden),
+          "rust relative-mouse golden byte-exact");
+    /* wire offsets: dx BE i16 at [20..22], dy at [22..24], the single
+     * LE u64 timestamp at [36..44] (7 is not KEY/ABSOLUTE -> count 1) */
+    n = kn_input_mouse_relative(-1, -2, 0x0102030405060708ull,
+                                buf, sizeof buf);
+    CHECK(n == 44 && buf[20] == 0xff && buf[21] == 0xff &&
+          buf[22] == 0xff && buf[23] == 0xfe, "negative deltas BE i16");
+    CHECK(buf[36] == 0x08 && buf[37] == 0x07 && buf[42] == 0x02 &&
+          buf[43] == 0x01, "timestamp lands LE u64 in the tail");
+    n = kn_input_mouse_relative(-32768, 32767, 1ull, buf, sizeof buf);
+    CHECK(n == 44 && buf[20] == 0x80 && buf[21] == 0x00 &&
+          buf[22] == 0x7f && buf[23] == 0xff, "i16 extremes encode");
+    /* buffer contracts, same shape as every other builder */
+    CHECK(kn_input_mouse_relative(1, 1, 1ull, buf, 43) == -2,
+          "relative mouse needs 44");
+    CHECK(kn_input_mouse_relative(1, 1, 1ull, buf, 44) == 44,
+          "relative mouse exact fit");
+    CHECK(kn_input_mouse_relative(1, 1, 1ull, NULL, 44) == -1,
+          "relative mouse NULL out refused");
+}
+
 int main(void)
 {
     printf("== test_kninput: the NVST control/input plane ==\n");
     t_constants();
     t_activation_chain();
     t_singles();
+    t_mouse_relative_golden();
     t_builder_edges();
     t_versions();
     t_scan();

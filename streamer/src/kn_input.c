@@ -35,6 +35,12 @@ static void kn_in_put_le64(uint8_t *p, uint64_t v)
         p[i] = (uint8_t)((v >> (8 * i)) & 0xffull);
 }
 
+static void kn_in_put_be16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)((v >> 8) & 0xffu);
+    p[1] = (uint8_t)(v & 0xffu);
+}
+
 static void kn_in_put_be32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)((v >> 24) & 0xffu);
@@ -175,6 +181,51 @@ int kn_input_haptics(uint64_t timestamp_us, int enabled,
     haptics_body[0] = enabled ? 1u : 0u;
     haptics_body[1] = 0u;
     inner_len = kn_in_remote_packet(13u, haptics_body, sizeof haptics_body,
+                                    inner, sizeof inner);
+    if (!inner_len || inner_len > 24u) return -1;
+    memset(body, 0, sizeof body);
+    memcpy(body, inner, inner_len);           /* pad-to-24 with zeros */
+    body_len = 24u;
+    kn_in_put_le64(body + body_len, timestamp_us);   /* LE here (not BE) */
+    body_len += 8u;
+    payload_len = kn_in_remote_packet(0x0eu, body, body_len, payload,
+                                      sizeof payload);
+    if (!payload_len) return -1;
+    return kn_input_command(KN_INPUT_CMD_REMOTE_INPUT, payload, payload_len,
+                            out, out_len);
+}
+
+int kn_input_mouse_relative(int16_t dx, int16_t dy, uint64_t timestamp_us,
+                            uint8_t *out, size_t out_len)
+{
+    /* Round XLI.1 — nvst_input.rs:727-741 (the RELATIVE encode arm) fed
+     * through remote_input_message (:956-987) with INPUT_MOUSE_RELATIVE
+     * (7):
+     *   body    = dx BE i16 | dy BE i16 | 00 00                      ->  6 B
+     *   inner   = remote_input_packet(7, body)                       -> 14 B
+     *   padded  = max(24, ceil(14/8)*8 = 16) = 24                    -> 24 B
+     *   timestamps: 7 is not KEY_DOWN/KEY_UP/MOUSE_ABSOLUTE, so
+     *               timestamp_count = 0 + 1 = 1 -> append ts LE u64
+     *   payload = remote_input_packet(0x0e, 24 + 8)                  -> 40 B
+     *   command = TLV(0x0206, payload)                               -> 44 B
+     * Route: ControlPartial (nvst_input.rs:969) = sid 6, unordered,
+     * PR-SCTP TTL 300 ms (NVST_CHANNEL_PROFILE[3]) — the reference's
+     * own comment: ordered PR-SCTP would let one lost report block
+     * every newer one for 300 ms ("delayed motion followed by
+     * catch-up"). Rust golden: nvst_input.rs:1888-1911, dx=dy=24 at
+     * ts=0x01861330 — pinned in test_kninput AND tools/input_reference.py
+     * (two implementations). */
+    uint8_t motion_body[6];
+    uint8_t inner[8 + sizeof motion_body];
+    uint8_t body[32];
+    uint8_t payload[8 + sizeof body];
+    size_t inner_len, body_len, payload_len;
+
+    kn_in_put_be16(motion_body + 0, (uint16_t)dx);
+    kn_in_put_be16(motion_body + 2, (uint16_t)dy);
+    motion_body[4] = 0u;
+    motion_body[5] = 0u;
+    inner_len = kn_in_remote_packet(7u, motion_body, sizeof motion_body,
                                     inner, sizeof inner);
     if (!inner_len || inner_len > 24u) return -1;
     memset(body, 0, sizeof body);

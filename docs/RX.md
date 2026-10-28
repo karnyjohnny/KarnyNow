@@ -245,6 +245,44 @@ write errors (→ `kn_log_on_failure("session.replay", …)` → §7.7
 amplification + auto-bundle; relevance mapping learned
 `replay|capture|mjolnir`); 2 = usage; 3 = internal (init/alloc).
 
+## The lifecycle/recovery contract (round XLI — run 22's dead end)
+
+`kn_rx_video` owns a four-state lifecycle (`RUNNING / PAUSED /
+RECOVERY_REQUIRED / STOPPED`, kn_rx.h:161-166). The non-RUNNING states
+are DROP-ALL guards (`process_datagram`/`process_packet` refuse every
+packet with `KN_RX_DROP_*` — nvst.rs:4633-4634/:4927-4928), and the
+reference is explicit that the way back is a DELIBERATE caller action:
+"Returns a typed timeout only once. The caller must deliberately call
+`recover` before more media is accepted, preventing a stale stream from
+silently resuming" (nvst.rs:4525-4527). `kn_rx_video_recover()` ports
+`receiver.recover()` (nvst.rs:4503-4515): media reset, timeout origin
+re-anchored, `initial_timeout_pending` cleared, state → RUNNING,
+Lifecycle event — and it does NOT touch the keyframe latch (the reset
+spares it; the reference's caller re-arms it explicitly anyway).
+
+The CALLER contract (round XLI, **D8**) lives in knvstd_main.c
+(`dec_recovery_attempt`): the reference's `attempt_nvst_recovery`
+(opennow-streamer-core lib.rs:2448-2477) with
+`NVST_RECOVERY_ATTEMPT_LIMIT = 1` (:127) — first
+`RECOVERY_TIMEOUT`/`PROGRESS_RECOVERY` ⇒ `request_keyframe` +
+`recover()`; second ⇒ terminal (`stop_reason:"recovery_exhausted"`,
+the reference's `"nvst-recovery-exhausted"` — its engine breaks and
+the app layer restarts the pipeline). `PacketGap` recoveries are NOT
+attempt triggers ("The receiver owns gap recovery", lib.rs:2269-2273).
+Session mode only; `--decode`/`--replay-capture` keep the historical
+no-recovery behaviour. Runs 20 (137 drops reason 3 until the budget)
+and 22 (2535 unanswered reliable IDRs from inside the dead end) are
+the evidence; test_knrx pins the kn_rx half (218 checks).
+
+**D-t13 (deferred)**: the reference ALSO watches the DECODE side —
+`decode_progress.rs` (`DecodeProgressWatchdog`: stall / keyframe_grace
+/ recovery_grace = 5 s each) fires `DecodeProgressEvent::RecoveryNeeded`
+into the SAME attempt path and arms a terminal deadline
+(lib.rs:2079-2117). knvstd ships the packet-side contract only; no
+live run has ever shown decode-output starvation with healthy packet
+flow. Revisit if a run ever shows `frames_out` stalling while
+datagrams flow.
+
 ## Stage-2 remainders growing from here
 
 - **Sockets — DONE (round XVII, docs/SOCK.md)**: `kn_sock` (real UDP,

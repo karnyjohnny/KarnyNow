@@ -2470,3 +2470,485 @@ specs=args (session summary **71 = 71**) + strict-JSON skeleton
    `kf_cleared`; `sctl_010a` lines decode the mystery payload; cping
    beat on its 2 s cadence (watch for pongs now that the drain cannot
    eat the timer).
+
+## 28. Round XLI — R7 run 22: **THE LOOP FIX IS PROVEN AND THE FIRST SUSTAINED REAL-RATE GFN VIDEO FLOWED** (42 882 loop ticks = 143/s, `recv_timeouts` 27 095 = ticks − datagrams − 1 — the run-20/21 paradox INVERTED into the proof; QoS 19.5/s; 15 786/15 786 datagrams authenticated; 1139 AUs, 1013 of them a continuous 29.98 fps @ ~3.7 Mbps stream with ZERO media gaps; BWE left warm-up for the first time: estimate 25 398 kbps) — **then the server froze EVERY plane at ~t+30–45 s** (video, the ~1 Hz 0x0101 heartbeat, WSS pongs; no termination, no idle warning; the WSS itself only errored at ~t+216 s = TCP retransmit exhaustion) and never answered 2535 reliable IDR+PLI retries. The 0x010a mystery is DECODED (JSON `NvExtendedCommandMessage` app notifications). Run 22 also exposed our own dead end: `RECOVERY_REQUIRED` has no way back in knvstd — the reference's bounded recovery contract (`attempt_nvst_recovery`, limit 1, terminal `nvst-recovery-exhausted`) ships this round as **D8**.
+
+### 28.1 Run 22 evidence (300 s, peer 80.250.98.39:5004, stdout only — the `logs/` dir was NOT provided this time)
+
+* Handoff: `unified_socket=0`, `rtcp_on_sctp=1`, ping_version 6 ⇒ non-mjolnir
+  (RTCP plane open — PLI/RR on sid 14 apply). SRTP `AEAD_AES_256_GCM_8`,
+  key_id 2280930115, local key. DTLS 85 ms (fastest yet), sctp_up 17 ms,
+  8/8 channels, nomination 15 sent. RTSP 5×200 incl. PLAY attempt 1.
+  Activation 8/0/1 ready:1, input version 3, cursor local (3 enables,
+  1 handoff). Queue 73→33→16→seat over 26 control relearns.
+* Transport: **15 786/15 786 datagrams authenticated**, 1139 AUs =
+  1139 frames = 1139 decoded, 9 keyframes, **0 decode errors, 0 gaps,
+  0 stale, 0 withheld, drops {}**, fec_repaired 3, 1280×720,
+  libavcodec 63.2.100.
+* The loop (C19): **`loop_ticks` 42 882 = 143/s**, `recv_timeouts`
+  **27 095 = 42 882 − 15 786 − 1** — the §27.2 pathology table inverted
+  exactly as predicted. 27 095 × 10 ms ≈ 271 s of idle poll + ~29 s of
+  datagram work = 300 s: the loop free-runs at the 10 ms floor and
+  wakes immediately per datagram (~52.6 datagrams/s session-average;
+  ~350/s during the streaming window).
+* Feedback (all reference cadences, all delivered): rr **300** (1/s —
+  run 21: 298 phase-locked), ack **1139** (per frame), pacing **539**
+  (55.556 ms gate ≈ the 30 s streaming window), **qos 5861 = 19.54/s**
+  (run 21: 597 = 2/s), ka 100 (3 s), NATT 2951 (~9.8/s, 100 ms gate),
+  idr **2535** + pli **2535** (the D3 retry loop), pushed 11 870,
+  **dropped 0**, pacing_disabled_skips 0. Batch: flushes 5861, records
+  7000 (= acks 1139 + qos 5861), failed 0, retained 0, by_cause
+  {qos:5861}. Outbox: sid0 [2635,0] (= idr 2535 + ka 100), sid6
+  [6400,0] (= qos 5861 + pacing 539), sid14 [2835,0] (= pli 2535 +
+  rr 300) — every channel accounted to the unit, zero drops.
+* **BWE left warm-up for the first time in project history**:
+  frames_observed **1136** ≥ 100 ⇒ `estimate_kbps` **25 398** (run 20:
+  40 frames ⇒ honest zero; run 21: 37), utilization_pct 6,
+  queue_delay_us 5270, jitter_us 2470, lossy_frames 2, samples 12 617,
+  parity 3162, skip_reordered 7, skip_retransmitted/no_video 0.
+* au_clock: **drift_ms −2** (min −7, max 393), ts_backwards 0, wall
+  299 970 ms vs **rtp 37 922 ms** — during the streaming window the
+  media clock tracked wall exactly (median inter-AU Δts 33.3 ms =
+  29.98 fps, min 13.6, max 47.1, ZERO gaps > 1 s of media time); the
+  session-wide 12.6 % ratio is entirely the post-freeze silence.
+* Server control: 43 msgs / 43 records — 020e×1 (input version, via
+  kn_input), 0111×2, **010a×9**, 0106×2, 010f×1, 010e×1, **0101×27**;
+  every code is in the reference's Unhandled set
+  (nvst_server_control.rs:196-198: `0x101..=0x103 | 0x106 |
+  0x10a..=0x111 | 0x113 | 0x206 | 0x325 | 0x408`) — the no-op is
+  reference-faithful. sctl_stats: terminations 0, timers 0,
+  idle_warning 0, pacing_msgs 0 (pacing_enabled 1 throughout),
+  malformed 0, unknown 1 (0x020e — expected, it belongs to kn_input).
+* ctrl_ping_stop: pings **108**, pongs 0, expired 107, drained 0,
+  **dead 1** — the 2 s beat held (108 × 2 s = 216 s ⇒ the WSS died at
+  ~t+216 s; run 21: 149 pings over the full 300 s, dead 0). The rig
+  still answers no WS ping. `drained:0` = not one text/binary frame
+  arrived post-PLAY.
+
+### 28.2 The 0x010a mystery is DECODED (F1 dumper, 9 payloads)
+
+Every 0x010a payload is ASCII **JSON**: an `NvExtendedCommandMessage`
+(dataType application/json) addressed to `Serenity` — the VM-side
+AppInfo notification feed (`rtsp://Serenity/AppInfo/v.1.0/Notification`):
+
+| n | event | content |
+|---|---|---|
+| 1 | foregroundWindow | processType 4, pid 5428, **fullscreen:true** |
+| 2 | process action:2 | **Launcher.exe** pid 4128 JustLaunched (parent nvcontainer.exe 8276) |
+| 3 | process action:2 | **Games.exe** pid 3932 JustLaunched, processType 1, shortName `107057…` (parent Launcher.exe) |
+| 4 | process action:3 | Launcher.exe **exited, code 0** |
+| 5 | process action:1 | processType 6, info "" |
+| 6 | process action:2 | **QtWebEngineProcess.exe** pid 6860 (child of Games.exe) |
+| 7 | foregroundWindow | processType 0, pid 0, fullscreen:**false** |
+| 8 | foregroundWindow | processType 1 (Games.exe) fullscreen:**false** |
+| 9 | SESSION_LENGTH_TIMER | → GFN_CLIENT_UI, OTel trace headers (session telemetry) |
+
+So 0x010a = the server's app-lifecycle/foreground telemetry (the game
+launch sequence on the VM, arriving pre-PLAY — 8 of the 9 within the
+first 24 control messages). It is Unhandled in the reference and stays
+Unhandled here; F1's job was to prove it carries no gating command, and
+it did. Nothing in the feed asks the client for a response.
+
+### 28.3 The media timeline (from AU `ts` — stdout had no wall stamps, the knlog `logs/` would have them)
+
+* AU 1 (keyframe, 18 445 B) at media ts 10.53 s — the encoder clock
+  started ~10.5 s BEFORE our media loop (the VM was already running
+  the app; `min_server_time` 27 945 604/90 000 = 310.5 s vs the 300 s
+  budget shows the same ~10.5 s pre-PLAY offset — run 21: 309.8 s).
+* fi 2..1013: **continuous 29.98 fps**, sizes flat at ~15.2–15.7 KB
+  median (~3.7 Mbps of real motion content — the game was ACTIVE),
+  zero media-time gaps > 1 s. This is the first sustained real-rate
+  GFN stream in 22 runs (run 18: 562 AUs decaying from the start;
+  runs 20/21: 40/37 AUs drip-fed).
+* fi 901..1013: size decay 15.5→7.3 KB median (content settling or
+  the rate controller easing — indistinguishable client-side).
+* fi 1014..1139 (media 44.29→48.45 s): the tail burst — 126 frames,
+  **8 keyframes at exactly 16-frame (0.533 s media) spacing**, sizes
+  2.9–7.8 KB: near-static content with a periodic refresh pattern.
+  No client request caused it (all 2535 IDRs postdate AU 1139 — the
+  log order is same-thread and decisive). Then: nothing, ever.
+* The stall cascade: `progress_stall` idle 5006 ms (latch armed,
+  kf episode 1 attempt 1) → `recovery_timeout` idle 5009 ms →
+  RECOVERY_REQUIRED (final rx_state 2) → 51 logged attempts
+  (1, 50, …, 2500; 2535 total = 253.5 s of 100 ms retries to session
+  end, all sid 0 reliable + sid 14 PLI, zero outbox drops). The server
+  never sent another datagram on ANY plane.
+
+### 28.4 The server-side freeze — what the log proves and what it cannot
+
+Everything the server owned stopped inside ~t+30..45 s: video (last
+datagram ≈ t+41.5, from 2535 × 100 ms ending at t+300), the ~1 Hz
+0x0101 heartbeat family (all 27 within the first two 30 s ctrl_in
+snapshots; msgs frozen at 43 for snapshots 3–10 = t+60..300), and
+eventually the WSS (dead at ~t+216 — consistent with TCP retransmit
+exhaustion ~175 s after the peer went silent; SCTP never formally
+went down within budget — usrsctp was still retransmitting, outbox
+drops 0). NO protocol-level notice: terminations 0, idle_warning 0,
+timers 0, no sctp_down, no RTSP teardown. The client side was
+provably healthy throughout (§28.1 cadences).
+
+Candidates the client log CANNOT separate (run 22 was stdout-only):
+1. **VM/rig freeze or reclaim** on the beta fleet (everything stopped
+   at once, silently — the strongest fit).
+2. **Takeover/preference flip** if an official client (web) attached
+   to the same session mid-run (run 21 precedent) — the server may
+   move the media plane to the attaching client.
+3. A server policy against clients that never send real input — but a
+   polite idle kick would send the warning/timer/termination family
+   first; none came, and 45 s is far below GFN's idle-kick horizon.
+
+The knlog `logs/` directory (1 Hz `session_stats`: per-second
+datagram/tick rates, the estimator ramp, cping beats) would pin the
+freeze instant to the second and show whether the QoS estimate ramp
+correlates with the size decay — **run 23 must include it** (the
+stdout-only capture is the second time this bites: run 20 §26).
+
+### 28.5 The dead end run 22 exposed: RECOVERY_REQUIRED has no way back (→ D8)
+
+`kn_rx_video_process_datagram`/`process_packet` drop EVERY packet
+while state != RUNNING (kn_rx.c:2569-2575/:2602-2608 — the reference's
+own guards, nvst.rs:4633-4634/:4927-4928), and `kn_rx_video_recover()`
+— ported and sitting in kn_rx.c:2769-2780 — was **never called by
+anyone**. Once run 22 entered RECOVERY_REQUIRED at t+46.5 s, even a
+keyframe answering our 2535 IDRs would have been dropped (run 20's
+terminal shape: 137 drops reason 3 until the budget ran out).
+
+The reference contract (opennow-streamer-core `lib.rs`):
+`forward_nvst_event` maps `RecoveryNeeded(Timeout)` (:2287-2294) and
+`Lifecycle(RecoveryRequired)` (:2296-2305) — but NOT `PacketGap`
+("The receiver owns gap recovery", :2269-2273) — onto
+`attempt_nvst_recovery` (:2448-2477): if `recovery_attempts >=
+NVST_RECOVERY_ATTEMPT_LIMIT` (**1**, :127) → terminal
+`"nvst-recovery-exhausted"` (the engine breaks; the app restarts the
+whole pipeline); else attempts++, `cut_recording(Interrupted)`,
+**`request_keyframe()`**, **`recover()`** (nvst.rs:4503-4515:
+"Returns a typed timeout only once. The caller must deliberately call
+`recover` before more media is accepted, preventing a stale stream
+from silently resuming" — reset media, timeout origin = now, state →
+Running, Lifecycle event). The decode-side watchdog
+(`decode_progress.rs`, stall/keyframe_grace/recovery_grace = 5 s each)
+feeds the SAME attempt path (:2079-2097) and arms a terminal deadline.
+
+Run 22 under the reference contract: stall t+46.5 → timeout t+46.5 →
+attempt 1 (recover → RUNNING, latch re-armed) → still silent →
+timeout t+51.5 → **terminal at ~t+52** with a clean verdict, instead
+of 248 s of dead air. That is what D8 ships.
+
+### 28.6 Round XLI changes (D8 + the evidence set)
+
+* **D8 — the bounded recovery contract** (`dec_recovery_attempt` in
+  knvstd_main.c, wired into `dec_drain_events` — session mode only,
+  `c->fb` gate; --decode/--replay-capture behaviour is untouched, so
+  T13 is unaffected): first `RECOVERY_TIMEOUT`/`PROGRESS_RECOVERY` →
+  `rx_recovery` line (`action:"recover"`) + `kn_rx_video_request_keyframe`
+  + `kn_rx_video_recover`; second → `rx_recovery` (`action:"terminal"`)
+  + the media loop breaks with **`stop_reason:"recovery_exhausted"`**
+  (exit-code policy unchanged: the run still produced video, like
+  `server_termination`). The action runs AFTER the print loop —
+  `recover()` does `ev_reset` + `lifecycle_push`, which would rewrite
+  the event array mid-iteration otherwise. `cut_recording` has no
+  counterpart (--session does not record). A full session RESTART
+  (the reference app's reconnect after terminal) is NOT part of knvstd
+  — deferred, see §28.8.
+* **`ctrl_ping_dead`** JSONL at both dead transitions (send_failed |
+  recv+rc): run 22's WSS death moment was only inferable from the
+  ping count; run 23 dates it directly.
+* **Summary `recovery` block** `{"attempts":%u,"exhausted":%d}`
+  appended after `au_clock` (71→73 specs=args, skeleton `json.loads`
+  PASS — trap #5 ritual run in full).
+* **Build stamp → `"round":"XLI"`** (C18 discipline: run 23's log
+  states its own binary identity).
+* **test_knrx 203 → 218**: the recovery state machine — the 250 ms
+  timeout transition (249 ms: silent), RECOVERY_REQUIRED's drop guard
+  (reason 3, decoder never sees the packet), `recover()` (→1, RUNNING,
+  Lifecycle event, timeout origin re-anchored: 249 ms after recover is
+  silent, 250 ms re-fires), the no-op contract from RUNNING, **the
+  keyframe latch SURVIVING the reset** (the D3 retry loop's lifeline),
+  and kn_rx-level recover being unlimited (the LIMIT lives in the
+  session layer). `prop_h_init` grew a `_to` variant (timeout param).
+* `tools/sandbox_session_e2e.c` header recipe fixed (+`kn_bw.c` — the
+  round-XXXVIII link dep was missing from the comment).
+* **D-t13 (new deviation, deferred)**: the reference's DECODE-side
+  progress watchdog (`decode_progress.rs` — decoder-output stall with
+  packets flowing → RecoveryNeeded → the same attempt path + the
+  recovery_grace terminal deadline, lib.rs:2079-2117) is not ported;
+  knvstd ships the packet-side contract only. No live run has ever
+  shown decode-output starvation with healthy packet flow (every
+  failure so far was packet-side), so the deferral is evidence-based.
+
+### 28.7 Sandbox gates (round XLI, all green)
+
+native 18/18 **2276** checks (knrx **218**, knbw 387, kninput 446) ·
+cross ×2 arches zero warnings (incl. the `-DKN_TLS_BACKEND_MBEDTLS=1`
+legs) · ctest **20/20 mbedTLS + 20/20 schannel** · paranoid knvstd ×9
+(c11/c17/gnu11 × pedantic / format-truncation=2 / unused-but-set+shadow)
+clean + kn_bw/kn_rx ×3 clean · ASan+UBSan knrx 218 + knbw 387 clean ·
+`sandbox_session_e2e` **43/43** · T10 POSIX dry **ALL PASS 69** · T13
+**ALL PASS 63** · summary-printf validation: all 107 JSON printf blocks
+specs=args (session summary **73 = 73**) + strict-JSON skeleton
+`json.loads` PASS · the four new stdout line shapes `json.loads` 4/4.
+
+### 28.8 Run 23 plan (target) + the open questions
+
+1. **User syncs the round-XLI files** (§INTEGRATION rev 31) and does a
+   **CLEAN rebuild on Win7**: delete the build tree, run T10 in full.
+   Expected verdict: **ALL PASS 79** with `test_knrx` reporting **218**
+   checks (203 + 15).
+2. Run 23 — `knvstd --session … --session-seconds=300`, untruncated
+   stdout (`> run23.log`) **PLUS the whole `logs/` directory** (non-
+   negotiable this round: the 1 Hz `session_stats` is the only record
+   of the per-second freeze shape and the estimator ramp).
+3. **The run-22 procedure questions must be answered before run 23**
+   (they decide which §28.4 hypothesis run 23 tests): was the official
+   WEB CLIENT attached to the run-22 session (and at what moment)?
+   Which app/game was launched (the 0x010a feed shows
+   Launcher.exe → Games.exe, shortName `107057…`)? How was "keep the
+   game active" performed — through what input path?
+4. Pass criteria (run 23): build stamp `"round":"XLI"`; if the server
+   holds: sustained video, `rtp_ms` ≈ wall, kf episodes end in
+   `kf_cleared`, `recovery.attempts` 0. If the server freezes again:
+   `rx_recovery` attempt 1 (`action:"recover"`) ~5 s after the stall,
+   `action:"terminal"` ~+5 s later, `stop_reason:"recovery_exhausted"`
+   ~10–15 s after the freeze — a fast, clean, self-labelling verdict;
+   `ctrl_ping_dead` dates the WSS death. A freeze surviving a RESTART
+   of knvstd (fresh session, fresh seat) would separate rig-flake from
+   session-specific policy; if the web client was attached in run 22,
+   run 23 WITHOUT it separates takeover from freeze.
+5. Deferred, on evidence: the session restart loop after terminal
+   (the reference app's reconnect); synthetic input (mouse jiggle) —
+   only if run 23 + the answers implicate idle policy; the D-t13
+   decode-side watchdog.
+
+## 29. Round XLI.1 — the operator's answers KILL the takeover theory and revive the idle/no-input policy as the prime freeze suspect: the web client was NEVER attached during run 22 (ours was the sole receiver) and ZERO input ever reached the session → survival is monotone in client fidelity (16/17 ~10-11 s → 18 ~30.5 s → 22 ~45 s) with exactly one missing item, so the deferred synthetic-input slice ships NOW: `INPUT_MOUSE_RELATIVE` byte-exact against the reference's own Rust golden, routed to control_partial (sid 6), as a gated 10 Hz ±1 px zero-drift jiggle (docs/INPUT.md §9)
+
+1. **The three answers (operator, after round XLI).** (a) The web
+   client is opened only AFTER knvstd finishes — never during a run;
+   run 22's sole receiver was ours, so §28's "takeover" branch is dead
+   and run 23 does not need to test it. (b) The session app is
+   `--session-app=107057914`, matching the 0x010a `shortName` decoded
+   in §28 — the rig was running the game we asked for. (c) No input
+   was ever sent into the session by anyone; the operator's local
+   mouse/keyboard activity is invisible to the VM. The rig therefore
+   saw a client that received video, fed QoS/RR/keepalives… and never
+   touched the mouse.
+2. **Why idle/no-input is now the prime suspect.** Every freeze theory
+   that survives run 22's forensics must explain the monotone survival
+   ladder: ~10-11 s without feedback (16/17), ~30.5 s with the
+   activation chain (18), ~45 s with the full reference cadence +
+   warm BWE (22). Each round bought exactly the lifetime its fidelity
+   item was worth. The only remaining fidelity gap against the
+   official client is real input — and START-HERE §4.4's condition for
+   reconsidering the deferred jiggle ("cannot separate idle-policy
+   from rig flake without shipped input") is met: a run-23 freeze with
+   zero input shipped would be undecidable.
+3. **What ships (the first G3 slice).** `kn_input_mouse_relative`
+   (kn_input.{h,c}) builds the 44-byte `0x0206`/type-7 message —
+   dx/dy BE i16 at wire [20..24], ONE LE u64 timestamp tail, inner
+   `remote_input_packet(0x0e, …)` framing — byte-exact against the
+   reference's OWN golden from
+   `keyboard_and_mouse_translate_to_byte_exact_control_commands`
+   (nvst_input.rs:1888-1911): `06022800000000240e0000000000000a
+   07000000001800180000…3013860100000000`. Two implementations as
+   always: `tools/input_reference.py` asserts the golden in
+   `self_prove()` and emits two new KAT singles (`mouse_rel`,
+   `mouse_rel_neg`); `test_kninput` pins the Rust bytes + BE-i16
+   negatives/extremes + buffer contracts (446 → **548** checks); the
+   shipped binary re-proves them via `input.vectors` (48 → **50**).
+4. **Routing and cadence.** nvst_input.rs:969 sends MOUSE_RELATIVE to
+   ControlPartial = **sid 6** (unordered, PR-SCTP TTL 300 ms —
+   NVST_CHANNEL_PROFILE[3]; ordered PR-SCTP would let one lost report
+   stall every newer one for 300 ms). The media loop pushes one
+   message every 100 ms (10 Hz) through the EXISTING
+   `sess_fb_push(fb, 6, …)` outbox path (the QoS batch's channel;
+   sender params already pinned by `sess_fb_sid_params` case 6). The
+   dx sign alternates every message (±1 px, zero net drift across the
+   run); the timestamp rides `pump.origin_us`, the activation chain's
+   epoch. Gate: a new `volatile unsigned input_active` mirror of the
+   pump's activation latch (single writer `sess_ctrl_try_activate`,
+   single-word reads — the `sctl_*` precedent), so nothing flies
+   before `enable-input(true)`. Volume 440 B/s — run 22 carried the
+   50 ms QoS cadence on the same channel with `dropped:0`.
+5. **Evidence added.** One `input_jiggle`/`first_send` stdout line
+   (`{sid:6, interval_ms:100, ts_us}`, json.loads-verified); summary
+   `feedback.jiggle` (73 → **74** specs; printf validator 108 blocks,
+   0 mismatches); `outbox_by_sid["6"]` now includes the jiggle pushes
+   (~+10/s over run 22's 5861). Build stamp **XLI.1**.
+6. **Sandbox gates (all green this round).** native 18/18, **2378**
+   checks (2276 + 102); cross ×2 zero warnings `-Werror`; ctest
+   20/20 mbedTLS + 20/20 schannel; paranoid knvstd ×9 +
+   kn_rx/kn_bw/kn_input ×3 clean; ASan+UBSan knrx **218** / kninput
+   **548** / knbw **387** clean (third_party objects unsanitized —
+   the established recipe; crypto-algorithms' sha1.c trips
+   `-fsanitize=undefined`'s shift check by design of THAT library);
+   e2e **43/43**; T10 POSIX dry **ALL PASS 69**; T13 **ALL PASS 63**.
+7. **Run 23 decision matrix (target gates unchanged: T10 ALL PASS
+   79, test_knrx 218, test_kninput 548, `input.vectors` 50).**
+   * Video survives PAST ~45 s with `feedback.jiggle` climbing →
+     idle/no-input policy CONFIRMED as the freeze cause; the G3
+     remainder (keyboard/wheel/text) becomes the fidelity roadmap.
+   * Freeze at ~the same wall WITH the jiggle demonstrably flying
+     (`first_send` line + counter) → input is eliminated too; the
+     freeze is rig-side (encoder/publisher) and no client byte fixes
+     it — the D8 recovery contract's `recovery_exhausted` verdict
+     (shipped round XLI, still unexercised live) dates it precisely.
+   * The round-XLI recovery block is expected to fire in BOTH freeze
+     outcomes: attempt 1 `action:"recover"` ~5 s after the stall,
+     terminal ~+5 s, `stop_reason:"recovery_exhausted"` ~10-15 s
+     after the freeze (run 23 should therefore END EARLY on a freeze
+     instead of burning the remaining 255 s — a free bonus verdict).
+   * Still mandatory: stdout capture PLUS the whole `logs/` directory
+     (run 22 lacked it), including `transport.jsonl` — and the
+     run-22 files the operator listed (`transport.jsonl`,
+     `T10_skrot/wynik.txt`, `diag.log`, `app.log`, `http.log`) are
+     requested for cross-checking before/with run 23.
+
+## 30. Round XLII — R7 run 23: **THE JIGGLE FLEW AND THE FREEZE CAME ANYWAY — INPUT IS ELIMINATED AS A SURVIVAL FACTOR, AND WITH IT THE FIDELITY LADDER** (198 relative-mouse reports on sid 6 — opened 8/8 acked, outbox 0 drops — from t+1.3 s; media STILL died instantly at 10.58 s: 319 AUs @ 30.15 fps continuous, zero gaps/errors, BWE warm at 34.8 Mbps peak, then 0 datagrams / 0 control / 0 WSS pongs in the same second). **D8's recovery contract made its live debut exactly to spec**: stall +5 s → `rx_recovery` recover + 50 IDR/PLI retries → +5 s → terminal → `stop_reason:"recovery_exhausted"`, clean exit at 20.6 s wall instead of 340 s of dead air. The 0x010a app-lifecycle sequence is IDENTICAL to run 22's (Arknights: Endfield never got past its own Qt launcher — `QtWebEngineProcess.exe` + foreground lost to pid 0) yet the freeze moved 41 s → 10.6 s ⇒ media survival across runs 16–23 (10.2, 11.0, 30.5, ~1.3, ~1.2, ~41, 10.6 s) is a **rig-side lottery uncorrelated with client fidelity**. Ships: **F2** the 0x010a hex cap 800→2400 (the 566-byte `SESSION_LENGTH_TIMER` was truncated by OUR OWN cap in BOTH runs — its body has never been read) and **F3** `rel_ms` session-relative timestamps on `ctrl_msg`/`sctl_010a`/`ctrl_in` (run 23 could not order the notifications against the freeze). Stamp **XLII**.
+
+1. **Target deployment verified (T10 on Win7, 2026-10-28 17:13 build).**
+   `ALL PASS 79`. Suite deltas vs the XL rebuild match the sandbox
+   EXACTLY: `test_knrx` 228 → **243** (+15 = D8's recovery section),
+   `test_kninput` 446 → **548** (+102), gated `input.vectors` **50**
+   (was 48), `test_knselftest` 116 (stable). **Docs correction**: the
+   XL/XLI-era "expect knrx 218 on target" quoted the RAW-GCC recipe
+   count — the cmake/ninja build (T10, both platforms) links the full
+   `kncore` and reports **243** (sandbox T10 dry agrees: 243). The +25
+   is a BUILD-RECIPE delta, not Windows; the T10 verdict was never
+   affected. Canonical expectations from now: target/cmake knrx 243,
+   raw-script knrx 218, kninput 548 everywhere (pure wire code).
+2. **Startup (all clean, all fast).** Process start 16:21:09Z; queue
+   position **118** (evening load — the operator's 360 s budget was
+   well spent: ~150 s queue+signalling), 33 poll lines to `ready`;
+   RTSP OPTIONS/DESCRIBE/SETUP/ANNOUNCE/PLAY all 200 (PLAY attempt 1);
+   peer 80.84.172.148:5004; DTLS ready in 174 ms (DTLSv1.2,
+   ECDHE-ECDSA-AES128-GCM-SHA256, srtp_prof 1); SCTP up in 52 ms;
+   **channels opened 8, acked 8, rig_opened 0**; `input_version` 3;
+   activation `sent:8 failed:0` at ts_us 333 606 (t+0.33 s);
+   `cursor_handoff reason:"cursor-notification"` (the rig sent 0x010f
+   ×2 — the handoff machine ran its notification path for the first
+   time live); **`input_jiggle first_send` at ts_us 1 279 732
+   (t+1.28 s), sid 6, interval 100 ms** — the XLI.1 gate
+   (`input_active`) opened exactly when designed.
+3. **The media window: 10.58 s of pristine video.** Per-second
+   `transport.jsonl` (first live capture of the knlog 1 Hz plane —
+   run 22 never delivered it): 365→588→330→215→328→199→217→184→144→
+   168→74 datagrams/s; AUs 23/s → continuous 30.15 fps (319 AUs,
+   RTP span 10 584 ms = `rtp_ms` exactly); BWE left warm-up at t+3
+   (9 358 kbps) and peaked **34 799 kbps**; utilization 2–28 %;
+   jitter 583–3 855 µs; `gaps/withheld/stale/fec_repaired/drops` ALL
+   ZERO; q_depth 0; decode_errors 0; frames_decoded 319/319
+   (libavcodec 63.2.100, 1280×720); keyframes 9. `loop_ticks` 4 205
+   ≈ 204/s with `recv_timeouts` 1 393 = ticks − datagrams − 1 ✓ (the
+   round-XL loop fix holding at an even higher tick rate than run 22).
+4. **The freeze: instantaneous and total, at 16:23:50.4Z (~t+10.4 of
+   the media loop).** 74 datagrams in second 10 → **0 in second 11**
+   and every second after (2 812 total, all authenticated — the count
+   never moves again). The control plane fell silent in the same
+   instant (16 inbound records total: 020e×1, 010a×9, 0111×2, 010f×2,
+   0106×1, 010e×1 — and **NO 0x0101 heartbeats at all**, vs run 22
+   where they ran ~1 Hz for the first 30–60 s; the rig's heartbeat
+   apparently starts later than t+10 s). **WSS: `pongs:0` from the
+   FIRST ping (t+1 s) — the WSS control channel has never ponged in
+   ANY run** (run 22: 108 pings, 0 pongs; it only errored at t+216 s
+   via TCP retransmit exhaustion). SCTP stayed associated (no
+   `sctp_down`, no SHUTDOWN/ABORT from the rig) while we kept sending
+   everything: QoS batches 384 (≈19/s), frame acks 319, pacing 146,
+   keepalives 7, NAT-T 198, IDR×50 + PLI×50 (episode 1, attempts 1
+   and 50 logged), **jiggle 198** — outbox `pushed:856 dropped:0`,
+   per-sid 0:[57,0] 6:[728,0] 14:[71,0]. The server answered nothing,
+   ever again.
+5. **D8's live debut — the round-XLI contract, to the second.**
+   `progress_stall` (idle 5 006 ms) at 16:23:54 → `rx_recovery
+   attempts:1 action:"recover"` + keyframe re-request (the 100 ms
+   retry loop fired 50 IDR/PLI over the next 5 s) →
+   `recovery_timeout` (idle 5 009 ms) → `rx_recovery attempts:1
+   action:"terminal"` (16:23:59) → media loop break →
+   `stop_reason:"recovery_exhausted"`, `recovery:{attempts:1,
+   exhausted:1}`, exit clean at wall 20.56 s. Run 22 burned 248 s of
+   dead air after its freeze; run 23 spent 10 s diagnosing itself and
+   terminated with a self-labelled verdict. The transport.jsonl
+   `rx_event`/`rx_recovery` lines timestamp each step — the knlog
+   plane and stdout agree to the second.
+6. **The app state was IDENTICAL to run 22 — the game never launched.**
+   All nine 0x010a notifications match run 22's sequence and nearly
+   their lengths: foregroundWindow (fullscreen, pid 10 664) →
+   `Launcher.exe` JustLaunched → `Games.exe` JustLaunched (shortName
+   `107057…` = Arknights: Endfield, the operator confirmed launching
+   it) → Launcher exits 0 → process action 1 → **`QtWebEngineProcess.exe`
+   JustLaunched (child of Games.exe)** → **foregroundWindow pid 0
+   (foreground LOST)** → foregroundWindow Games.exe NOT fullscreen →
+   `SESSION_LENGTH_TIMER` (566 B). Reading: the session sat in the
+   game's own launcher/login web portal — gameplay was never reached
+   in run 22 OR run 23 (and plausibly not in runs 20/21 either — the
+   drip-feed and the static screen smell like the same launcher
+   state). Yet with the SAME app state the freeze landed at 41 s once
+   and 10.6 s once → app state does not TIME the freeze; it may still
+   CAUSE the class (an instance parked on a login portal may be
+   encoder- or reaper-hostile), which is only testable by changing
+   the app. The `SESSION_LENGTH_TIMER` body — potentially the rig
+   telling the client something about session limits — was cut at
+   400 payload bytes by our OWN F1 cap (`%.800s` hex) in both runs.
+   **F2 raises the cap to 2400 hex chars** (1 200 B; every 0x010a so
+   far ≤ 566 B) so run 24 finally reads it. **F3 adds `rel_ms`**
+   (transport-origin-relative, the activation epoch) to `ctrl_msg`,
+   `sctl_010a` and `ctrl_in` — run 23 could not say whether the
+   launcher notifications landed before or after the media freeze;
+   run 24 will, to the millisecond.
+7. **Verdict per the §29.7 decision matrix: branch 2 — INPUT
+   ELIMINATED.** The jiggle demonstrably flew (first_send line, 198
+   pushes, sid 6 open+acked, 0 drops) for 9.2 s BEFORE the freeze and
+   continued through it; the freeze came anyway — and EARLIER than
+   run 22's zero-input 41 s. Neither direction of causality survives:
+   input neither keeps the session alive nor kills it. The
+   run-16→22 "monotone fidelity ladder" (10→11→30.5→41 s) was a
+   pattern built on four points; runs 20 (~1.3 s of media!) and 21
+   (~1.2 s) already contradicted it, and run 23 at maximum fidelity
+   lands back at the runs-16/17 floor. **Media survival is a rig-side
+   lottery (1.2–41 s across seven runs), uncorrelated with anything
+   the client sends.** The idle/no-input hypothesis is closed; the
+   server-policy family is closed with it (no termination, no idle
+   warning, no pacing change, no SCTP teardown — just silence). What
+   remains is rig/instance-side: the encoder pipeline or the instance
+   supervisor killing a session parked on a game-launcher screen, or
+   plain bad-instance luck (evening, queue 118).
+8. **Round XLII ships** (evidence-only; no wire-format change): F2
+   the 0x010a cap 800→2400 hex chars; F3 `rel_ms` on the three
+   control-evidence lines (printf validator: 108 blocks, specs=args,
+   summary unchanged 74=74, the 3 new line shapes `json.loads`-clean);
+   build stamp **XLII**. **The jiggle stays ON** for run 24: input is
+   now a controlled constant (and the idle policy is not formally
+   dead — only 9.2 s of input preceded this freeze; a policy window
+   longer than that stays untested), it costs 440 B/s, and it keeps
+   our client the highest-fidelity non-official receiver on the wire.
+   Deferred on evidence: the auto-restart loop after terminal (the
+   reference app restarts its pipeline; our `--session-token` reuse
+   semantics for a SECOND CM flow are unproven — that needs its own
+   probe round), D-t13.
+9. **Sandbox gates (all green):** native 18/18 **2378** checks
+   (raw-gcc recipe: knrx 218, kninput 548, knbw 387) · `cross_check`
+   ×2 zero warnings `-Werror` · ctest **20/20 mbedTLS + 20/20
+   schannel** · paranoid knvstd ×9 + kn_rx/kn_bw/kn_input ×3 clean ·
+   ASan+UBSan knrx 218 / kninput 548 / knbw 387 clean ·
+   `sandbox_session_e2e` **43/43** · T10 POSIX dry **ALL PASS 69**
+   (its cmake recipe reports knrx **243**, matching the target — the
+   recipe delta of §30.1) · T13 **ALL PASS 63** · summary-printf
+   validation **108** blocks specs=args, summary **74=74**, skeleton
+   `json.loads` PASS.
+10. **Run 24 plan — change the ONE variable left: the app.** Pick a
+    GFN title that reaches GAMEPLAY with no login/launcher interaction
+    (Arknights: Endfield is banned until its portal behaviour is
+    understood; a first-party-friendly free title that auto-starts is
+    ideal). Keep everything else constant (evening or not, the same
+    command, `--session-seconds=360` for queue slack). Optionally
+    sample the lottery: after a `recovery_exhausted` exit, immediately
+    re-run (a fresh CM flow = a fresh rig draw) for 2–3 draws in one
+    evening — the freeze instant's spread across draws IS the
+    measurement. Per attempt: untruncated stdout + the whole `logs/`.
+    Expected: stamp `"round":"XLII"`; `input_jiggle first_send` ~1 s
+    after activation; `sctl_010a` lines with `rel_ms` and FULL
+    `SESSION_LENGTH_TIMER` bodies; T10 target **ALL PASS 79** with
+    knrx **243** (cmake), kninput **548**, `input.vectors` **50**.
+    Read: gameplay-reaching app surviving past ~41 s ⇒ the
+    launcher-parked-instance theory is confirmed and stage 2 can
+    close against a real gameplay stream; same early freeze with
+    gameplay on screen ⇒ bad-instance lottery, and the auto-restart
+    loop becomes the practical stage-2 exit (ship it next round).

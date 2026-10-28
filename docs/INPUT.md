@@ -228,7 +228,7 @@ malformed JSONL — the round-XVIII discipline.
 | **D-t12** | the activation chain is retried at most **8 times** on partial send failure; the reference retries the whole chain indefinitely (nvst.rs:6569-6574). A dead association is already reported via `sctp_fail`, so an unbounded spin adds nothing. | accepted, bounded on purpose |
 | G1 | `INPUT_HANDSHAKE_TIMEOUT` (5 s) is defined but not enforced — we never give up waiting for `0x020e`. | open; only matters if a rig withholds the version |
 | G2 | `device_descriptor` is sent with bitmap 0 (no gamepad attached) — faithful for a device-less session, but a real pad needs `set_rich_slot_mask` + the sony/generic HID paths (nvst.rs:7767-7800). | stage 3 |
-| G3 | discrete input (keyboard/mouse/wheel/text), the `0x0206` remote-input envelope for real events, and the `input_partial`/`control_partial` routing split (nvst_input.rs:241-247) are **not** implemented. | stage 3 |
+| G3 | discrete input (keyboard/mouse/wheel/text), the `0x0206` remote-input envelope for real events, and the `input_partial`/`control_partial` routing split (nvst_input.rs:241-247). **Round XLI.1 first slice**: `INPUT_MOUSE_RELATIVE(7)` is implemented (`kn_input_mouse_relative`, byte-exact against the reference's OWN Rust golden, nvst_input.rs:1888-1911) and routed to `control_partial` (sid 6, unordered PR-SCTP TTL 300 ms) per nvst_input.rs:969; the media loop sends a synthetic 10 Hz ±1 px jiggle (§9). Keyboard/wheel/text and the `input_partial` (gamepad) arm remain open. | partial (stage 3) |
 | G4 | server cursor payloads are detected (for `notify`) but not decoded into shapes/positions (`server_cursor_messages`, nvst_input.rs:461-529). No local cursor rendering yet. | stage 3+ (presentation) |
 | G5 | ~~the QoS estimator fields remain honest zeros (**D-t10**)~~ — **CLOSED round XXXVIII**: run 18 promoted it back to prime suspect (the stall moved 11→30.5 s once activation flew, and the AU frame-size decay under zero loss named the server rate control reading our zero BWE fields). `kn_bw.{h,c}` is the line-for-line `nvst_bandwidth.rs` port (two-implementation pinned, test_knbw 387); the feed rides `process_authenticated` (datagram=1/plaintext=0); `qos_report_at` fills all seven fields with the reference semantics. | closed; run 19 verifies live |
 
@@ -240,9 +240,9 @@ malformed JSONL — the round-XVIII discipline.
 | `streamer/src/kn_input.c` | builders, TLV walker, version parser, histogram, cursor machine |
 | `streamer/src/kn_input_kat_vectors.h` | **generated** — do not edit |
 | `tools/input_reference.py` | the independent Python model; self-proves, then emits the header |
-| `streamer/tests/test_kninput.c` | 446 checks: goldens, parser vectors, the 5 cursor tests, truncation sweep |
-| `streamer/src/knvstd_main.c` | `sess_ctrl_*` (pump-thread service) + the evidence lines |
-| `streamer/src/kn_selftest.c` | the **`input.vectors`** self-test (48 checks, phase A, gated) — the shipped binary re-proves the same goldens; registry 14 → 15 |
+| `streamer/tests/test_kninput.c` | 548 checks: goldens (incl. the round-XLI.1 relative-mouse Rust golden), parser vectors, the 5 cursor tests, truncation sweep |
+| `streamer/src/knvstd_main.c` | `sess_ctrl_*` (pump-thread service) + the evidence lines + the round-XLI.1 jiggle cadence (§9) |
+| `streamer/src/kn_selftest.c` | the **`input.vectors`** self-test (50 checks, phase A, gated) — the shipped binary re-proves the same goldens; registry 14 → 15 |
 | `streamer/tests/test_knselftest.c` | 117 checks — registry/run-all counts and the portable-must-be-OK set updated for `input.vectors` |
 
 Regenerate the vectors with `python3 tools/input_reference.py`; the output
@@ -251,11 +251,129 @@ must be byte-identical.
 Two ways to prove the builders on any machine:
 
 ```sh
-./build/test_kninput                          # 446 checks (the full battery)
-./build/knvstd --selftest=input.vectors       #  48 checks from the SHIPPED binary
+./build/test_kninput                          # 548 checks (the full battery)
+./build/knvstd --selftest=input.vectors       #  50 checks from the SHIPPED binary
 ```
 
 The second is the one that matters on the target: `kn_input.c` has no
 backend split, so `input.vectors` executes identically on Win7 and in the
 sandbox — a failure there means the binary the user will actually run
 disagrees with the reference's goldens.
+
+## 9. Round XLI.1 — the relative mouse and the synthetic jiggle
+
+### Why this exists (the run-22 turning point)
+
+Run 22 (round XLI's live run) froze on EVERY plane ~30-45 s in with no
+termination and no idle warning, and the operator's answers afterwards
+removed the last alternative: the web client was never attached during the
+run (ours was the SOLE receiver) and **zero input messages ever reached
+the session** — the VM saw a client that watched but never touched. What
+remains, and what now fits ALL the data, is a server-side idle /
+no-input policy: survival has grown monotonically with client fidelity —
+runs 16/17 (no/incomplete feedback, no input) died at ~10-11 s, run 18
+(+activation chain) at ~30.5 s, run 22 (+BWE + the reference's control
+cadence) at ~45 s. The one fidelity item still missing against the
+official client is real input. START-HERE §4.4's reconsideration
+condition ("ship input when the evidence cannot separate idle-policy from
+rig flake") is met: without shipped input, run 23 could not decide
+between the two.
+
+### The wire format (two implementations, one Rust golden)
+
+`INPUT_MOUSE_RELATIVE` (native type 7) through the `0x0206` envelope —
+nvst_input.rs:727-741 (the encode arm), :956-987 (`remote_input_message`),
+:989-995 (`remote_input_packet`):
+
+| bytes | field |
+|---|---|
+| `[0..2]` | command `0x0206` LE u16 |
+| `[2..4]` | payload length LE u16 (40) |
+| `[4..8]` | `remote_input_packet` length BE u32 (4 + 36) |
+| `[8..12]` | packet type LE u32 (`0x0e`) |
+| `[12..16]` | inner length BE u32 (4 + 10) |
+| `[16..20]` | native type LE u32 (7 = MOUSE_RELATIVE) |
+| `[20..22]` | **dx BE i16** |
+| `[22..24]` | **dy BE i16** |
+| `[24..26]` | two zero bytes (native[8..10]) |
+| `[26..36]` | zero padding to the 24-byte floor |
+| `[36..44]` | timestamp LE u64 (ONE copy — 7 is not KEY_DOWN/KEY_UP/MOUSE_ABSOLUTE) |
+
+The reference publishes its own byte-exact golden for exactly this
+message in `keyboard_and_mouse_translate_to_byte_exact_control_commands`
+(nvst_input.rs:1888-1911; dx=24, dy=24, ts=0x01861330 µs):
+
+```
+06022800000000240e0000000000000a0700000000180018
+0000000000000000000000003013860100000000
+```
+
+`tools/input_reference.py` asserts this golden in `self_prove()` before
+emitting the KAT header; `test_kninput.c` pins the same 44 bytes against
+the C builder (`t_mouse_relative_golden`) plus BE-i16 negative/extreme
+encodings; `kn_selftest.c`'s `input.vectors` re-proves both new singles
+(`mouse_rel`, `mouse_rel_neg`) from the SHIPPED binary (48 → 50 checks;
+test_kninput 446 → 548).
+
+### Routing: control_partial = sid 6, NOT sid 0
+
+nvst_input.rs:969 routes `MOUSE_RELATIVE` (and `MOUSE_ABSOLUTE`) to
+`NvstInputRoute::ControlPartial`, and `NVST_CHANNEL_PROFILE[3]` gives
+that channel **sid 6: unordered, PR-SCTP lifetime 300 ms** — with the
+reference's own comment on why unordered: with ordered PR-SCTP one lost
+report blocks every newer one for the full lifetime ("delayed motion
+followed by catch-up"). The jiggle therefore rides the SAME channel and
+outbox path (`sess_fb_push(fb, 6, …)` → `sess_fb_sid_params` case 6) as
+the QoS batch and the unified-mode NACK-v2 — no new send path, no new
+channel, sender-side reliability already pinned by the round-XXXVIII
+outbox.
+
+### The jiggle cadence (knvstd_main.c, media loop)
+
+* **Gate**: `pump_persist && pump.input_active` — a new volatile mirror
+  of the pump's `activation_sent` latch (single writer:
+  `sess_ctrl_try_activate`, single-word reads: the `sctl_*` precedent).
+  No input flies before the activation chain's `enable-input(true)`.
+* **Pattern**: every `SESS_JIGGLE_INTERVAL_MS` (100 ms → 10 Hz) one
+  `kn_input_mouse_relative(±1, 0, now_us − pump.origin_us)`; the sign
+  alternates every message, so the cursor nets ZERO drift across the
+  run while the server sees continuous motion. Timestamp epoch is the
+  activation chain's own (`pump.origin_us`).
+* **Volume**: 44 B × 10/s = 440 B/s on sid 6 — an order of magnitude
+  under the QoS batch's 50 ms cadence that run 22 already carried with
+  `dropped:0`.
+* **Evidence**: one `input_jiggle` `first_send` line
+  (`{sid:6, interval_ms:100, ts_us}`), the summary's new
+  `feedback.jiggle` counter (pushes accepted by the outbox; 73 → 74
+  summary specs), and `outbox_by_sid["6"]` — which now mixes QoS/NACK
+  and jiggle pushes (~10/s more than run 22's 5861).
+
+### What run 23 decides
+
+* Video survives PAST ~45 s with `feedback.jiggle` climbing → the
+  idle/no-input policy was the freeze cause; G3's remaining slices
+  (keyboard, wheel, text) become the fidelity roadmap.
+* Video still freezes at ~the same wall while the jiggle demonstrably
+  flew → input is eliminated too, and the freeze is rig-side
+  (encoder/publisher), which no client byte can fix.
+
+### The live verdict (run 23, round XLII) — input eliminated, jiggle stays
+
+Run 23 flew the jiggle exactly as designed: `first_send` at t+1.28 s
+(0.95 s after the activation latch opened), 198 reports on sid 6
+(opened 8/8, acked, outbox `dropped:0`) through the freeze and beyond.
+The server froze every plane anyway — at 10.58 s of pristine video,
+EARLIER than run 22's zero-input 41 s. Per the §9 decision matrix that
+is branch 2: **real input neither extends nor shortens session
+survival; the idle/no-input hypothesis is closed**, and the run-16→22
+"fidelity ladder" was a four-point coincidence (runs 20/21 at ~1.2 s of
+media already contradicted it). Media survival is a rig-side lottery
+(RTSP §30.7). The jiggle nevertheless **stays ON**: input is now a
+controlled constant across runs, the cost is 440 B/s, the idle policy
+is not formally dead (only 9.2 s of input preceded this freeze — a
+longer policy window stays untested), and it keeps this client the
+highest-fidelity non-official receiver on the wire. The G3 remainder
+(keyboard/wheel/text) is deprioritized behind the rig-side
+investigation — run 24 changes the app (one that reaches gameplay
+without a login portal; runs 20–23 all parked on Arknights: Endfield's
+Qt launcher) rather than adding input types.

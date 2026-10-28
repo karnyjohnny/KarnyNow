@@ -336,8 +336,9 @@ typedef struct {
     rxt_col col;
 } prop_h;
 
-static int prop_h_init(prop_h *h, uint32_t window, uint32_t vps,
-                       uint32_t fec_blocks, uint32_t fec_shards)
+static int prop_h_init_to(prop_h *h, uint32_t window, uint32_t vps,
+                          uint32_t fec_blocks, uint32_t fec_shards,
+                          uint32_t timeout_ms)
 {
     kn_rx_video_config cfg;
     uint32_t shard_len = vps + KN_RX_FEC_HEADER_ALLOWANCE;
@@ -387,8 +388,15 @@ static int prop_h_init(prop_h *h, uint32_t window, uint32_t vps,
     cfg.reorder_window_packets = window;
     cfg.max_access_unit_bytes = 65536u;
     cfg.video_packet_size = vps;
-    cfg.timeout_ms = KN_RX_MAX_TIMEOUT_MS;
+    cfg.timeout_ms = timeout_ms;
     return kn_rx_video_init(&h->v, &cfg, &h->mem, 0) == KN_RX_OK;
+}
+
+static int prop_h_init(prop_h *h, uint32_t window, uint32_t vps,
+                       uint32_t fec_blocks, uint32_t fec_shards)
+{
+    return prop_h_init_to(h, window, vps, fec_blocks, fec_shards,
+                          KN_RX_MAX_TIMEOUT_MS);
 }
 
 static void prop_h_free(prop_h *h)
@@ -992,6 +1000,118 @@ static void test_round_xl_feedback(void)
     prop_free(&ps);
 }
 
+/* ---------------- 6. round XLI: the recovery state machine (D8) ---------------- */
+
+/* The kn_rx half of the bounded recovery contract that knvstd's
+ * dec_recovery_attempt drives (attempt_nvst_recovery, opennow-streamer-
+ * core lib.rs:2448-2477). Pinned here: the poll_timeout transition
+ * (nvst.rs:4527-4552), the RECOVERY_REQUIRED drop guards (:4633-4634 /
+ * :4927-4928 — run 20's "drops reason 3"), and recover() (:4503-4515):
+ * media reset, timeout origin RE-ANCHORED, RUNNING, the Lifecycle
+ * event — and crucially the keyframe latch SURVIVING the reset
+ * (reset_media_state :4946-4961 does not touch it; the reference
+ * re-arms it inside attempt_nvst_recovery anyway, and knvstd mirrors
+ * that call order). The PROGRESS_RECOVERY branch (wp stage 2,
+ * :4595-4610) shares the same knvstd wiring as RECOVERY_TIMEOUT;
+ * driving it here would need a partial-frame trickle feed, so the
+ * timeout path pins the contract — run 22 is the live witness of the
+ * ordering (progress_stall at idle 5006 ms, recovery_timeout 3 ms
+ * later at 5009 ms). */
+static int rxt_ev_has(kn_rx_video *v, int type)
+{
+    uint32_t n = 0, i;
+    const kn_rx_event *ev = kn_rx_video_events(v, &n);
+    for (i = 0; i < n; ++i)
+        if (ev[i].type == type) return 1;
+    return 0;
+}
+
+static void test_round_xli_recovery(void)
+{
+    prop_stream ps;
+    prop_h h;
+    int i;
+    memset(&ps, 0, sizeof ps);
+    memset(&h, 0, sizeof h);
+    if (!prop_build(&ps, 0xE1E1E1E1u, 4, 1, 0, 0, NULL, NULL, NULL, NULL)) {
+        CHECK(0, "XLI build");
+        return;
+    }
+    /* the cfg floor for timeout_ms is 250 (kn_rx.h:570) — the smallest
+     * deterministic idle window the state machine accepts */
+    if (!prop_h_init_to(&h, 64, KN_RX_DEFAULT_VIDEO_PACKET_SIZE, 4, 16,
+                        250)) {
+        CHECK(0, "XLI init");
+        prop_free(&ps);
+        return;
+    }
+    for (i = 0; i < ps.n; ++i)
+        kn_rx_video_process_packet(&h.v, ps.idx[i], ps.pkts[i], ps.lens[i],
+                                   (uint64_t)(1000 + 10 * i),
+                                   rxt_frame_cb, &h.col);
+    CHECK(h.col.n == 4 && h.v.state == KN_RX_STATE_RUNNING,
+          "XLI: four frames fed, RUNNING");
+    (void)kn_rx_video_poll(&h.v, 1030 + 249, rxt_frame_cb, &h.col);
+    CHECK(h.v.state == KN_RX_STATE_RUNNING &&
+          !rxt_ev_has(&h.v, KN_RX_EV_RECOVERY_TIMEOUT),
+          "XLI: idle 249 ms < timeout 250 — RUNNING, no event");
+    (void)kn_rx_video_poll(&h.v, 1030 + 250, rxt_frame_cb, &h.col);
+    CHECK(rxt_ev_has(&h.v, KN_RX_EV_RECOVERY_TIMEOUT),
+          "XLI: idle 250 ms -> RECOVERY_TIMEOUT event (poll_timeout)");
+    CHECK(h.v.state == KN_RX_STATE_RECOVERY_REQUIRED,
+          "XLI: state -> RECOVERY_REQUIRED (run 20/22's dead end)");
+    kn_rx_video_process_packet(&h.v, ps.idx[0], ps.pkts[0], ps.lens[0],
+                               1300, rxt_frame_cb, &h.col);
+    CHECK(h.col.n == 4,
+          "XLI: packets in RECOVERY_REQUIRED never reach the decoder");
+    {
+        uint32_t n = 0, k;
+        int ok = 0;
+        const kn_rx_event *ev = kn_rx_video_events(&h.v, &n);
+        for (k = 0; k < n; ++k)
+            if (ev[k].type == KN_RX_EV_DROPPED &&
+                ev[k].drop_reason == KN_RX_DROP_RECOVERY_REQUIRED)
+                ok = 1;
+        CHECK(ok, "XLI: drop reason = RECOVERY_REQUIRED (run 20's drops "
+                  "reason 3)");
+    }
+    kn_rx_video_request_keyframe(&h.v);
+    CHECK(kn_rx_video_keyframe_request_pending(&h.v) == 1,
+          "XLI: latch armed (the reference's request_keyframe step)");
+    CHECK(kn_rx_video_recover(&h.v, 2000) == 1,
+          "XLI: recover() from RECOVERY_REQUIRED -> 1");
+    CHECK(h.v.state == KN_RX_STATE_RUNNING, "XLI: state -> RUNNING");
+    {
+        uint32_t n = 0, k;
+        int ok = 0;
+        const kn_rx_event *ev = kn_rx_video_events(&h.v, &n);
+        for (k = 0; k < n; ++k)
+            if (ev[k].type == KN_RX_EV_LIFECYCLE &&
+                ev[k].new_state == KN_RX_STATE_RUNNING)
+                ok = 1;
+        CHECK(ok, "XLI: recover() emits Lifecycle(RUNNING)");
+    }
+    CHECK(kn_rx_video_keyframe_request_pending(&h.v) == 1,
+          "XLI: the latch SURVIVES recover()'s media reset (the D3 retry "
+          "loop keeps firing until an assembled keyframe clears it)");
+    CHECK(kn_rx_video_recover(&h.v, 2001) == 0,
+          "XLI: recover() in RUNNING -> 0 (no-op contract)");
+    (void)kn_rx_video_poll(&h.v, 2000 + 249, rxt_frame_cb, &h.col);
+    CHECK(h.v.state == KN_RX_STATE_RUNNING,
+          "XLI: 249 ms after recover — no timeout (origin re-anchored)");
+    (void)kn_rx_video_poll(&h.v, 2000 + 250, rxt_frame_cb, &h.col);
+    CHECK(rxt_ev_has(&h.v, KN_RX_EV_RECOVERY_TIMEOUT) &&
+          h.v.state == KN_RX_STATE_RECOVERY_REQUIRED,
+          "XLI: 250 ms after recover -> RECOVERY_TIMEOUT again (knvstd's "
+          "second trigger = terminal recovery_exhausted)");
+    CHECK(kn_rx_video_recover(&h.v, 3000) == 1 &&
+          h.v.state == KN_RX_STATE_RUNNING,
+          "XLI: kn_rx recover() is NOT attempt-limited (the limit lives "
+          "in the session layer, lib.rs:127)");
+    prop_h_free(&h);
+    prop_free(&ps);
+}
+
 /* --------------------------------------------------------------- main */
 
 int main(void)
@@ -1007,5 +1127,7 @@ int main(void)
     test_error_paths();
     printf("-- round XL feedback plane --\n");
     test_round_xl_feedback();
+    printf("-- round XLI recovery state machine --\n");
+    test_round_xli_recovery();
     return kn_test_summary("test_knrx");
 }

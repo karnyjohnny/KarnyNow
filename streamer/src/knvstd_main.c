@@ -1658,12 +1658,22 @@ static int64_t sess_bw_now_ns(void *ud)
 #define SESS_QOS_INTERVAL_MS     50u
 #define SESS_PACING_INTERVAL_US  55556ull
 #define SESS_KA_INTERVAL_MS      3000u
+/* Round XLI.1 (G3, first slice): the synthetic mouse-jiggle cadence.
+ * 10 Hz keeps us inside the 300 ms PR-SCTP lifetime of sid 6 with room
+ * to spare and matches the reference's "one motion report per frame"
+ * feel at 30 fps without claiming a fidelity we cannot prove. */
+#define SESS_JIGGLE_INTERVAL_MS  100u
 #define SESS_FRAME_TIME_US       16666u
 /* Round XL: the reference's IDR_RETRY_INTERVAL (nvst.rs:104) — the armed
  * keyframe latch re-fires every 100 ms until a keyframe is assembled
  * (bundle-loop retry :8092-8110). Run 20 died on a ONE-SHOT idr on the
  * lossy sid-6 channel; D1+D3 make it reliable AND repeating. */
 #define SESS_IDR_RETRY_INTERVAL_MS 100u
+/* Round XLI (D8): NVST_RECOVERY_ATTEMPT_LIMIT (opennow-streamer-core
+ * lib.rs:127) — ONE bounded recovery attempt (request_keyframe +
+ * receiver.recover()); a second RecoveryNeeded is terminal
+ * ("nvst-recovery-exhausted", :2455-2462). */
+#define SESS_RECOVERY_ATTEMPT_LIMIT 1u
 
 /* ---- round XXXVIII: ControlReportBatch (nvst.rs:464-548) ----
  * The reference does NOT send one SCTP message per feedback record. It
@@ -1819,6 +1829,13 @@ typedef struct dec_ctx {
              qos_prior_received;
     unsigned long long fb_rr, fb_ack, fb_pacing, fb_qos, fb_ka,
                        fb_nack, fb_idr, fb_pli, fb_rfi;
+    /* Round XLI.1: the jiggle sender. `jiggle_dx` alternates +1/-1 so
+     * the cursor does not drift across the VM's desktop over a 300 s
+     * run; `jiggle_first_logged` latches the one evidence line. */
+    uint64_t next_jiggle_ms;
+    int      jiggle_dx;
+    unsigned jiggle_first_logged;
+    unsigned long long fb_jiggle, jiggle_build_fail;
     /* Round XL: the reference's keyframe-request RETRY loop
      * (nvst.rs:8092-8110 + keyframe_request_routes :1272-1286). The
      * latch lives in kn_rx (armed by any loss/stall path, cleared ONLY
@@ -1834,6 +1851,24 @@ typedef struct dec_ctx {
     unsigned long long kf_episode, kf_attempts;
     uint64_t kf_last_attempt_ms;
     int      rtcp_fb_open;       /* uses_rtcp_video_feedback(mjolnir,..) */
+    /* Round XLI (D8): the reference's BOUNDED recovery contract —
+     * attempt_nvst_recovery (opennow-streamer-core lib.rs:2448-2477)
+     * with NVST_RECOVERY_ATTEMPT_LIMIT = 1 (:127). The first
+     * RecoveryNeeded (packet timeout OR frame-progress recovery) does
+     * request_keyframe + receiver.recover() (media reset, back to
+     * RUNNING — "The caller must deliberately call `recover` before
+     * more media is accepted", nvst.rs:4525-4527); the SECOND ends the
+     * session terminally ("nvst-recovery-exhausted", lib.rs:2455-2462),
+     * which the media loop surfaces as stop_reason
+     * "recovery_exhausted". Runs 20+22 instead sat in
+     * RECOVERY_REQUIRED until the seconds budget ran out — kn_rx drops
+     * EVERY packet in that state (kn_rx.c process_datagram/process_
+     * packet state guards), so even a keyframe that finally arrived
+     * would have been dropped: a dead end the reference does not have.
+     * Session mode only (c->fb != NULL); --decode/--replay-capture keep
+     * their historical behaviour (T13 legs untouched). */
+    unsigned recovery_attempts;
+    int      recovery_exhausted; /* terminal: the media loop breaks */
     /* round XXXVIII: the ControlReportBatch (nvst.rs:464-548) that the
      * frame-ack / pacing / QoS records ride in. */
     sess_ctrl_batch cbatch;
@@ -2007,13 +2042,82 @@ static const char *dec_ev_name(int type)
     }
 }
 
+/* Round XLI (D8): attempt_nvst_recovery — the reference's bounded
+ * recovery contract (opennow-streamer-core lib.rs:2448-2477, limit
+ * NVST_RECOVERY_ATTEMPT_LIMIT=1 :127; callers forward_nvst_event
+ * :2287-2305 map RecoveryNeeded(Timeout) — poll_timeout, nvst.rs:4527-
+ * 4552 — and the frame-progress recovery — poll_frame_progress stage 2,
+ * :4595-4610 + :9145-9154 — onto it; PacketGap is deliberately NOT a
+ * trigger, "The receiver owns gap recovery", lib.rs:2269-2273).
+ * Attempt 1: request_keyframe() (re-arms the kn_rx latch the D3 retry
+ * loop polls — recover()'s reset_media does NOT touch the latch, and
+ * the reference re-arms it explicitly) + recover() (reset media,
+ * timeout origin = now, state -> RUNNING, Lifecycle event — nvst.rs:
+ * 4503-4515: "The caller must deliberately call `recover` before more
+ * media is accepted, preventing a stale stream from silently
+ * resuming"). Attempt 2: TERMINAL — recovery_exhausted latches and the
+ * media loop breaks with stop_reason "recovery_exhausted" (the
+ * reference emits "nvst-recovery-exhausted" and tears the session
+ * down; its app layer then restarts the whole pipeline — a session
+ * restart is NOT part of knvstd yet, see RTSP.md §28.6). The
+ * reference's cut_recording(Interrupted) has no counterpart here:
+ * --session does not record. Runs 20+22 are the evidence: both ended
+ * in RECOVERY_REQUIRED (run 22: 2535 unanswered reliable IDRs over
+ * 253 s — the latch worked, the state machine had no way back). */
+static void dec_recovery_attempt(dec_ctx *c, const char *reason,
+                                 unsigned long long idle_ms)
+{
+    kn_lctx b;
+    if (c->recovery_attempts >= SESS_RECOVERY_ATTEMPT_LIMIT) {
+        c->recovery_exhausted = 1;
+        printf("{\"mode\":\"session\",\"event\":\"rx_recovery\","
+               "\"attempts\":%u,\"action\":\"terminal\",\"reason\":\"%s\","
+               "\"idle_ms\":%llu}\n",
+               c->recovery_attempts, reason, idle_ms);
+        fflush(stdout);
+        kn_lctx_init(&b, KN_CH_TRANSPORT, KN_ERROR, "rx_recovery");
+        kn_lctx_str(&b, "action", "terminal");
+        kn_lctx_str(&b, "reason", reason);
+        kn_log_emit(&b);
+        return;
+    }
+    c->recovery_attempts++;
+    printf("{\"mode\":\"session\",\"event\":\"rx_recovery\","
+           "\"attempts\":%u,\"action\":\"recover\",\"reason\":\"%s\","
+           "\"idle_ms\":%llu}\n",
+           c->recovery_attempts, reason, idle_ms);
+    fflush(stdout);
+    kn_lctx_init(&b, KN_CH_TRANSPORT, KN_WARN, "rx_recovery");
+    kn_lctx_str(&b, "action", "recover");
+    kn_lctx_str(&b, "reason", reason);
+    kn_log_emit(&b);
+    kn_rx_video_request_keyframe(c->v);
+    (void)kn_rx_video_recover(c->v, c->now_ms);
+}
+
 static void dec_drain_events(dec_ctx *c)
 {
     uint32_t n = 0, i;
+    /* Round XLI (D8): recovery-triggering events are ACTED ON after the
+     * print loop, never inside it — kn_rx_video_recover() calls
+     * ev_reset() + lifecycle_push(), which would rewrite the very event
+     * array this loop is iterating. */
+    int need_recovery = 0;
+    const char *rec_reason = "timeout";
+    unsigned long long rec_idle = 0;
     const kn_rx_event *ev = kn_rx_video_events(c->v, &n);
     for (i = 0; i < n; ++i) {
         int significant = ev[i].type != KN_RX_EV_DROPPED &&
                           ev[i].type != KN_RX_EV_NONE;
+        if (ev[i].type == KN_RX_EV_RECOVERY_TIMEOUT) {
+            need_recovery = 1;
+            rec_reason = "timeout";
+            rec_idle = (unsigned long long)(ev[i].idle_ms % 1000000000ull);
+        } else if (ev[i].type == KN_RX_EV_PROGRESS_RECOVERY) {
+            need_recovery = 1;
+            rec_reason = "progress";
+            rec_idle = (unsigned long long)(ev[i].idle_ms % 1000000000ull);
+        }
         if (c->event_lines < DEC_EVENT_LINES) {
             c->event_lines++;
             printf("{\"mode\":\"decode\",\"event\":\"rx\",\"type\":\"%s\","
@@ -2038,6 +2142,11 @@ static void dec_drain_events(dec_ctx *c)
             kn_log_emit(&b);
         }
     }
+    /* Session mode only: --decode/--replay-capture leave fb NULL and
+     * keep their historical behaviour (a stall there ends the capture
+     * run, it is not a live session to recover or terminate). */
+    if (need_recovery && c->fb)
+        dec_recovery_attempt(c, rec_reason, rec_idle);
 }
 
 /* Round XL: the keyframe-request service, replacing run 16-21's
@@ -2892,6 +3001,10 @@ typedef struct {
     int      input_version;          /* -1 until the rig's 0x020e lands */
     unsigned activation_sent;        /* latch: the chain flies once */
     unsigned activation_attempts;
+    /* Round XLI.1: volatile mirror of `activation_sent` for the media
+     * loop's jiggle gate — same single-word, single-writer pattern as
+     * the sctl_* latches above (pump thread writes, main reads). */
+    volatile unsigned input_active;
     uint64_t origin_us;              /* transport origin (chain timestamps) */
     uint64_t next_ctrl_log_ms;
     unsigned ctrl_raw_n;
@@ -3140,12 +3253,20 @@ static int sess_sctl_ingest(sess_pump *p, uint16_t sid, const uint8_t *data,
  * raw record buffer (same framing the reference uses: u16 LE code +
  * u16 LE length + payload) that dumps every 0x010a payload as hex —
  * JSON-safe by construction. Bounded: at most 16 lines per session and
- * each payload_hex capped so the whole line stays under 900 chars. */
+ * each payload_hex capped so the whole line stays under ~2500 chars.
+ * Round XLII (F2): the cap was 800 hex chars (400 payload bytes) —
+ * runs 22 AND 23 both carried a 566-byte SESSION_LENGTH_TIMER and a
+ * 488-byte QtWebEngineProcess notification whose bodies were silently
+ * cut mid-JSON, so the timer's actual value has NEVER been read. 2400
+ * chars covers every 0x010a seen so far (max 566 B) with 2x headroom.
+ * Round XLII (F3): `rel_ms` dates the line against the transport origin
+ * (the activation chain's epoch) — run 23 could not say whether the
+ * app-lifecycle notifications landed before or after the media freeze. */
 static void sess_ctrl_dump_010a(sess_pump *p, uint16_t sid,
                                 const uint8_t *data, size_t len)
 {
     static const char hx[] = "0123456789abcdef";
-    char hexbuf[801];
+    char hexbuf[2401];
     size_t o = 0, ho = 0;
     unsigned hits = 0;
 
@@ -3171,8 +3292,11 @@ static void sess_ctrl_dump_010a(sess_pump *p, uint16_t sid,
     hexbuf[ho] = '\0';
     p->tlv010a_lines++;
     printf("{\"mode\":\"session\",\"event\":\"sctl_010a\",\"n\":%u,"
-           "\"sid\":%u,\"hits\":%u,\"len\":%u,\"payload_hex\":\"%.800s\"}\n",
-           p->tlv010a_lines, (unsigned)sid, hits, (unsigned)len, hexbuf);
+           "\"rel_ms\":%llu,\"sid\":%u,\"hits\":%u,\"len\":%u,"
+           "\"payload_hex\":\"%.2400s\"}\n",
+           p->tlv010a_lines,
+           (unsigned long long)((kn_sock_now_us() - p->origin_us) / 1000ull),
+           (unsigned)sid, hits, (unsigned)len, hexbuf);
     fflush(stdout);
 }
 
@@ -3221,9 +3345,13 @@ static void sess_ctrl_ingest(sess_pump *p, uint16_t sid, uint32_t ppi,
         hex[2 * c] = '\0';
         p->ctrl_raw_n++;
         printf("{\"mode\":\"session\",\"event\":\"ctrl_msg\",\"n\":%u,"
-               "\"sid\":%u,\"ppi\":%u,\"len\":%u,\"records\":%u,"
+               "\"rel_ms\":%llu,\"sid\":%u,\"ppi\":%u,\"len\":%u,"
+               "\"records\":%u,"
                "\"codes\":\"%.255s\",\"hex\":\"%.96s\"}\n",
-               slot + 1u, (unsigned)sid, (unsigned)ppi, (unsigned)len,
+               slot + 1u,
+               (unsigned long long)((kn_sock_now_us() - p->origin_us) /
+                                   1000ull),
+               (unsigned)sid, (unsigned)ppi, (unsigned)len,
                (unsigned)recs, names, hex);
         fflush(stdout);
     }
@@ -3290,6 +3418,7 @@ static void sess_ctrl_try_activate(sess_pump *p)
     if (fail == 0u) {
         p->activation_sent = 1u;
         p->st.input_ready = 1u;
+        p->input_active = 1u;    /* XLI.1: the jiggle gate opens */
         /* nvst.rs:7519-7522 — the cursor machine arms with the chain */
         kn_input_cursor_activate(&p->cursor, now_ms);
     }
@@ -3402,6 +3531,15 @@ static void sess_ctrl_ping_service(sess_ctrl_ping *k, uint64_t now_ms)
         } else {
             k->ping_send_failed++;
             k->dead = 1;                       /* the worker's break */
+            /* Round XLI: run 22 proved the death MOMENT is evidence —
+             * the WSS died ~170 s after the server froze (TCP retransmit
+             * exhaustion), and stdout could only imply it from the ping
+             * count. One line at the transition (dead latches; the
+             * service early-returns afterwards, so this prints once). */
+            printf("{\"mode\":\"session\",\"event\":\"ctrl_ping_dead\","
+                   "\"reason\":\"send_failed\",\"pings\":%llu}\n",
+                   k->pings_sent % 1000000000ull);
+            fflush(stdout);
         }
         k->next_ping_ms = now_ms;
     }
@@ -3416,6 +3554,13 @@ static void sess_ctrl_ping_service(sess_ctrl_ping *k, uint64_t now_ms)
         if (rc == KN_WS_ERR_TIMEOUT) break;    /* WouldBlock: keep going */
         if (rc != KN_WS_OK) {                  /* CLOSED / IO / BIG */
             k->dead = 1;
+            /* Round XLI: the death moment with its cause (run 22: the
+             * server froze ~t+45 s and the WSS only errored ~t+216 s —
+             * this line dates the TCP give-up directly). */
+            printf("{\"mode\":\"session\",\"event\":\"ctrl_ping_dead\","
+                   "\"reason\":\"recv\",\"rc\":%d,\"pings\":%llu}\n",
+                   rc, k->pings_sent % 1000000000ull);
+            fflush(stdout);
             break;
         }
         k->msgs_drained++;
@@ -3496,9 +3641,13 @@ static void sess_ctrl_service(sess_pump *p)
         p->next_ctrl_log_ms = now_ms + 30000u;
         sess_ctrl_refresh_hist(p);
         printf("{\"mode\":\"session\",\"event\":\"ctrl_in\",\"t_ms\":%llu,"
+               "\"rel_ms\":%llu,"
                "\"msgs\":%u,\"records\":%u,\"version\":%d,\"ready\":%u,"
                "\"activation\":%u,\"cursor\":\"%s\",\"codes\":%s}\n",
-               (unsigned long long)now_ms, p->st.ctrl_msgs,
+               (unsigned long long)now_ms,
+               (unsigned long long)((kn_sock_now_us() - p->origin_us) /
+                                   1000ull),
+               p->st.ctrl_msgs,
                p->st.ctrl_records, p->input_version, p->st.input_ready,
                p->st.activation_sent,
                kn_input_cursor_state_name(p->cursor.state), p->st.ctrl_hist);
@@ -5518,6 +5667,9 @@ static int run_session(const char *token, const char *device_id,
         c.next_rr_ms = 0;
         c.next_qos_ms = 0;
         c.next_ka_ms = 0;
+        c.next_jiggle_ms = 0;        /* XLI.1: fires on the first tick
+                                      * after the activation latch opens */
+        c.jiggle_dx = 1;
         c.next_pacing_us = 0;
         c.qos_prior_ms = 0;
         c.qos_prior_bytes = 0;
@@ -5676,6 +5828,16 @@ static int run_session(const char *token, const char *device_id,
                 c.now_ms = now_ms;
                 (void)kn_rx_video_poll(&v, now_ms, dec_frame_in_cb, &c);
                 dec_drain_events(&c);
+                /* Round XLI (D8): the poll path is the only source of
+                 * RECOVERY_TIMEOUT / PROGRESS_RECOVERY events, so this
+                 * is where the bounded recovery contract can terminate
+                 * the session (attempt_nvst_recovery, lib.rs:2448-2477
+                 * — the reference's engine breaks its media loop on
+                 * "nvst-recovery-exhausted" exactly like this). */
+                if (c.recovery_exhausted) {
+                    stop_reason = "recovery_exhausted";
+                    break;
+                }
                 dec_kf_service(&c, c.now_ms);
                 dec_drain_queue(&c);
                 next_poll_ms = now_ms + KN_SOCK_POLL_INTERVAL_MS;
@@ -5826,6 +5988,49 @@ static int run_session(const char *token, const char *device_id,
                     if (sess_fb_push(c.fb, 0, ka_msg, sizeof ka_msg) == 0)
                         c.fb_ka++;
                     c.next_ka_ms = now_ms + SESS_KA_INTERVAL_MS;
+                }
+                /* Round XLI.1 — the synthetic mouse jiggle (docs/INPUT.md
+                 * §9, docs/RTSP.md §29). Run 22's forensics plus the
+                 * operator's answers killed the takeover theory and left
+                 * a server-side idle / no-input policy as the prime
+                 * freeze suspect: survival grew monotonically with
+                 * client fidelity (runs 16/17 ~10 s -> run 18 ~30.5 s ->
+                 * run 22 ~45 s) while ZERO input messages ever flew.
+                 * The reference routes INPUT_MOUSE_RELATIVE to
+                 * ControlPartial (nvst_input.rs:969) = sid 6 — the QoS
+                 * batch's channel, unordered with a 300 ms PR-SCTP
+                 * lifetime. A +/-1 px square wave at 10 Hz nets zero
+                 * cursor drift over the run. Gate: the pump's volatile
+                 * activation latch — no input flies before the chain's
+                 * enable-input(true) (single-word read, pump is the only
+                 * writer; the sctl_* precedent). The timestamp rides
+                 * pump.origin_us, the activation chain's own epoch. */
+                if (pump_persist && pump.input_active &&
+                    now_ms >= c.next_jiggle_ms) {
+                    uint8_t jm[KN_INPUT_CMD_MAX];
+                    uint64_t jts = kn_sock_now_us() - pump.origin_us;
+                    int jn = kn_input_mouse_relative(c.jiggle_dx, 0, jts,
+                                                     jm, sizeof jm);
+                    if (jn > 0) {
+                        if (sess_fb_push(c.fb, 6, jm, (size_t)jn) == 0) {
+                            c.fb_jiggle++;
+                            if (!c.jiggle_first_logged) {
+                                c.jiggle_first_logged = 1u;
+                                printf("{\"mode\":\"session\","
+                                       "\"event\":\"input_jiggle\","
+                                       "\"action\":\"first_send\","
+                                       "\"sid\":6,\"interval_ms\":%u,"
+                                       "\"ts_us\":%llu}\n",
+                                       (unsigned)SESS_JIGGLE_INTERVAL_MS,
+                                       (unsigned long long)jts);
+                                fflush(stdout);
+                            }
+                        }
+                    } else {
+                        c.jiggle_build_fail++;
+                    }
+                    c.jiggle_dx = -c.jiggle_dx;
+                    c.next_jiggle_ms = now_ms + SESS_JIGGLE_INTERVAL_MS;
                 }
                 if (have_rr && (c.rtcp_fb_open || unified_mode)) {
                     uint64_t nf = 0, nl = 0;
@@ -6088,7 +6293,8 @@ static int run_session(const char *token, const char *device_id,
                    "\"rx_state\":%d,\"decoder\":\"%.64s\",\"video\":\"%dx%d\","
                    "\"wall_ms\":%llu,\"drops\":{%s},"
                    "\"feedback\":{\"rr\":%llu,\"ack\":%llu,\"pacing\":%llu,"
-                   "\"qos\":%llu,\"ka\":%llu,\"nack\":%llu,\"idr\":%llu,"
+                   "\"qos\":%llu,\"ka\":%llu,\"jiggle\":%llu,"
+                   "\"nack\":%llu,\"idr\":%llu,"
                    "\"pli\":%llu,\"rfi\":%llu,\"pushed\":%llu,"
                    "\"dropped\":%llu,"
                    "\"pacing_disabled_skips\":%llu},"
@@ -6107,7 +6313,8 @@ static int run_session(const char *token, const char *device_id,
                    "\"lossy_frames\":%u},"
                    "\"au_clock\":{\"drift_ms\":%lld,\"drift_min_ms\":%lld,"
                    "\"drift_max_ms\":%lld,\"ts_backwards\":%llu,"
-                   "\"wall_ms\":%llu,\"rtp_ms\":%llu}}}\n",
+                   "\"wall_ms\":%llu,\"rtp_ms\":%llu},"
+                   "\"recovery\":{\"attempts\":%u,\"exhausted\":%d}}}\n",
                    stop_reason, sess.session_id,
                    datagrams % 10000000000ull,
                    (unsigned long long)(v.authenticated_packets %
@@ -6140,7 +6347,8 @@ static int run_session(const char *token, const char *device_id,
                    drops,
                    c.fb_rr % 1000000ull, c.fb_ack % 1000000000ull,
                    c.fb_pacing % 1000000000ull, c.fb_qos % 1000000000ull,
-                   c.fb_ka % 1000000ull, c.fb_nack % 1000000ull,
+                   c.fb_ka % 1000000ull, c.fb_jiggle % 1000000ull,
+                   c.fb_nack % 1000000ull,
                    c.fb_idr % 1000000ull, c.fb_pli % 1000000ull,
                    c.fb_rfi % 1000000ull, fb.pushed % 1000000000ull,
                    fb.dropped % 1000000ull,
@@ -6173,7 +6381,8 @@ static int run_session(const char *token, const char *device_id,
                        ? (kn_sock_now_ms() - c.au_first_wall_ms) % 1000000000ull : 0ull),
                    (unsigned long long)(c.have_au_first
                        ? ((uint32_t)(c.au_last_ts - c.au_first_ts) / 90u)
-                         % 1000000000ull : 0ull));
+                         % 1000000000ull : 0ull),
+                   c.recovery_attempts, c.recovery_exhausted);
             fflush(stdout);
         }
         {
@@ -6396,7 +6605,7 @@ int main(int argc, char **argv)
      * that contract (the native gate's json.load validators). --version
      * already prints the full build.json for the deep identity. */
     if (!list && !version && !(selftest && selftest[0]) && !diagnostics) {
-        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XL\"}\n",
+        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLII\"}\n",
                __DATE__, __TIME__);
         fflush(stdout);
     }

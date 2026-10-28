@@ -18,7 +18,8 @@
  *   gcc -std=c11 -O1 -g -Wall -Wextra -Istreamer/include -Istreamer/src \
  *       -Ithird_party/{tiny-aes-c,crypto-algorithms-sha1} \
  *       tools/sandbox_session_e2e.c streamer/src/{kn_ws,kn_rtsp,kn_json, \
- *       kn_http,kn_cm,kn_sock,kn_sha1,knfec,knsrtp,kn_aes,kn_rx,kn_gs}.c \
+ *       kn_http,kn_cm,kn_sock,kn_sha1,knfec,knsrtp,kn_aes,kn_rx,kn_gs, \
+ *       kn_bw}.c \
  *       third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c \
  *       -pthread -o build/sandbox_session_e2e
  *   ./build/sandbox_session_e2e
