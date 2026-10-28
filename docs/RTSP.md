@@ -2952,3 +2952,181 @@ specs=args (session summary **73 = 73**) + strict-JSON skeleton
     close against a real gameplay stream; same early freeze with
     gameplay on screen ⇒ bad-instance lottery, and the auto-restart
     loop becomes the practical stage-2 exit (ship it next round).
+
+---
+
+## 31. Round XLIII — R7 run 24: **THE LOTTERY DREW THE SAME SLOT TWICE — a near-exact clone of run 23 (freeze at 10.43 s of media vs 10.58 s, recovery_exhausted at wall 20.54 s vs 20.56 s)** — and the two round-XLII instruments paid for themselves on the first flight: **F3** orders ALL control traffic inside the first 10 s (`ctrl_in rel_ms:10000`, 15 msgs) proving the freeze arrives with the control plane already silent, and **F2** reads the notification burst in full — all eight 0x010a land at **t+257–264 ms** (the launcher-portal startup burst, NOT the freeze trigger) and expose the rig's own classification: `"drsProfileName":"EA Desktop"` on an Arknights session, final foreground `Games.exe fullscreen:false`. This draw carried **no SESSION_LENGTH_TIMER** (run 23 had one — the server varies draw to draw; the full timer body is still unread). The user's field probe closed the restart-loop question: cm_create fired seconds after a recovery_exhausted exit returns a bare **HTTP 403** (twice; cloud_status 0, empty desc) while the SAME token queues fine after a pause ⇒ **403 = seat cooldown, token reusable**. Ships **F4** (cm_create 403 backoff, 20 s × 3, TLS rebuilt per retry) and **F5** (`--lottery=N`/`--lottery-gap=SEC`: one invocation re-draws the whole bring-up and reports every draw). Stamp **XLIII**. Run 25 = the first unattended lottery.
+
+### 31.1 Run 24 vs run 23 — the clone table
+
+Both draws: same app (107057914, Arknights: Endfield), same binary
+family (run 24 = XLII stamp, compiled Oct 28 2026 18:15:18), same
+command shape, same rig-side app state (Qt launcher portal; gameplay
+never reached).
+
+| metric | run 23 | run 24 | delta |
+|---|---|---|---|
+| queue depth at entry | 118 | 33 | rig-side |
+| activation | t+0.33 s | t+0.28 s (attempt 1, version 3) | same |
+| jiggle `first_send` | t+1.28 s | t+1.10 s (`ts_us 1095109`, sid 6) | same |
+| AUs / decoded | 319 / 319 | 314 / 314 | same |
+| fps (continuous) | 30.15 | ~30.1 | same |
+| media at freeze (`au_clock rtp_ms`) | 10 583 | **10 425** | **−158 ms** |
+| keyframes / gaps / decode_errors | 11 / 0 / 0 | 10 / 0 / 0 | same |
+| BWE peak | 34 799 kbps | 31 749 kbps | warm both |
+| datagrams authenticated | 2586/2586 | 2578/2578 | same |
+| stop_reason / wall | recovery_exhausted / 20.56 s | recovery_exhausted / **20.54 s** | **same** |
+| feedback: jiggle / idr / pli / rr | 198 / 50 / 50 / 21 | 200 / 50 / 50 / 21 | same |
+| outbox sid 6 pushed / dropped | 727 / 0 | 730 / 0 | same |
+| WSS pongs | 0 | 0 | same |
+| rx_recovery | stall 5006 → terminal 5007, 50 retries | idle 5008 → terminal 5015, 50 retries | same to the ms |
+
+The `au_clock` arithmetic is identical in shape: rtp 10 425 ms +
+~10.0 s of frozen-air wall = 20 462 ms measured (`drift_ms −56`).
+Two independent draws landing within 158 ms of media time on the same
+app state is the strongest evidence yet that **the ~10.5 s freeze is a
+modal rig-side behaviour of the launcher-parked instance**, not a
+random per-run coin.
+
+### 31.2 F3's first flight — the control plane is silent AT the freeze
+
+`ctrl_in` (the per-poll control digest) reported **`rel_ms:10000`**
+with **15 messages** — every byte of server control traffic in the
+whole session arrived inside the first 10 s, i.e. BEFORE the media
+clock reached 10.43 s. Code breakdown (vs run 23's 16):
+`020e`×1, `0111`×2, **`010a`×8** (run 23: 9), `010f`×2, `0106`×1,
+`010e`×1 — and **no `0x0101` heartbeat at all** (run 22 had one at
+4.37 s; runs 23/24 none). The freeze therefore arrives with:
+no termination (0x109), no idle warning, no heartbeat decay — nothing.
+Same signature as run 23, now with millisecond ordering proven.
+
+### 31.3 F2's first flight — the full 0x010a burst, and what was hidden
+
+All eight notifications are one startup burst at **rel_ms 257–264**:
+
+| # | rel_ms | len | event (full body now readable) |
+|---|---|---|---|
+| 1 | 257 | 298 | `foregroundWindow` pid 6108 processType 4 **fullscreen:true** |
+| 2 | 262 | 472 | `process` action 2 **Launcher.exe** pid 5384 parent nvcontainer.exe JustLaunched — `drsAppName:"launcher.exe"` `drsProfileName:"launcher"` |
+| 3 | 262 | 450 | `process` action 2 **Games.exe** pid 2364 parent Launcher.exe JustLaunched `shortName:"107057914"` `cmsId:107057914` |
+| 4 | 262 | 283 | `process` action 3 pid 5384 (Launcher.exe) `exitCode:"0"` |
+| 5 | 263 | 277 | `process` action 1 processType 6 info:"" |
+| 6 | 263 | 489 | `process` action 2 **QtWebEngineProcess.exe** pid 10920 parent Games.exe JustLaunched — `drsAppName:"qtwebengineprocess.exe"` **`drsProfileName:"EA Desktop"`** |
+| 7 | 264 | 296 | `foregroundWindow` processType 0 **pid 0** fullscreen:false |
+| 8 | 264 | 299 | `foregroundWindow` processType 1 pid 2364 (Games.exe) **fullscreen:false** |
+
+Three facts this buys:
+
+1. **F2 was load-bearing on day one**: rows 2 and 6 are 936 and 970
+   hex chars — BOTH were silently truncated at the old 800-char cap in
+   runs 22–23. The `drsAppName`/`drsProfileName` fields sit at the tail
+   of the payload; without F2 they would still be invisible.
+2. **The rig classified this Arknights session under the `EA Desktop`
+   DRS profile** (row 6). Whatever the rig's dynamic-resolution logic
+   does to this stream, it does it under a profile named for a
+   completely different publisher's launcher — the classification
+   follows the window/process the rig sees (QtWebEngineProcess), not
+   the cmsId we requested. This is rig-side behaviour we can only
+   observe, but it is the first direct glimpse of the rig's app-state
+   confusion on these parked sessions.
+3. **No SESSION_LENGTH_TIMER in this draw** (run 23 had one as its 9th
+   notification). The server's notification set varies per draw; the
+   full timer body — the one payload that might state the rig's own
+   session limit — remains unread. The lottery (F5) is the way to
+   catch a draw that carries it.
+
+The foreground sequence ends at row 8: Games.exe, NOT fullscreen — the
+portal window. Nothing in the burst correlates with the freeze at
+t+10.4 s; the app lifecycle settled 10 s earlier.
+
+### 31.4 The survival distribution, updated (runs 16–24)
+
+| run | 16 | 17 | 18 | 20 | 21 | 22 | 23 | 24 |
+|---|---|---|---|---|---|---|---|---|
+| media s | 10.2 | 11.0 | 30.5 | ~1.3 | ~1.2 | ~41 | 10.6 | **10.4** |
+
+The **~10.5 s mode is now the plurality (4 of 8 draws)**; two long
+draws (30.5, 41) and two drips (~1.2). Runs 16/17 had NO activation
+and NO jiggle; 23/24 had everything — the same modal lifetime across
+both extremes re-confirms the XLII verdict (client fidelity is not the
+dial) and sharpens it: the launcher-parked instance most often dies at
+~10.5 s of media regardless of what the client does.
+
+### 31.5 The 403 seat probe (run24v2) — restart-loop unblocked
+
+Verbatim from the user's double attempt seconds after run 24's
+recovery_exhausted exit:
+
+```
+{"mode":"session","error":"cm_create","rc":0,"http_status":403,"cloud_status":0,"desc":""}
+```
+
+— twice. After a longer pause, the SAME token entered the queue again
+(that queued session is the tail of run24v2.log). Conclusions: the
+session token is reusable across draws; a bare 403 from cm_create
+means "the rig still holds your previous seat" (cf. the known
+`cloud_status 11 = SESSION_LIMIT` sibling, which arrives with a JSON
+body — the 403 arrives with none). An auto-restart loop therefore
+needs a cooldown backoff, not a new token.
+
+### 31.6 Round XLIII shipped — F4 + F5
+
+**F4: cm_create 403 backoff.** The TLS-open → `kn_cm_create` →
+TLS-close sequence is now a loop: on `http_status == 403` (and only
+403 — every other failure aborts instantly as before) knvstd prints
+`{"event":"cm_create_403_backoff","attempt":k,"wait_ms":20000}`,
+sleeps 20 s, rebuilds the TLS stream and retries, up to
+`SESS_CM_403_RETRIES 3` (= 4 attempts, ≤ 60 s of backoff). This makes
+back-to-back draws — the lottery's — survive the seat cooldown
+automatically.
+
+**F5: the lottery driver.** `--lottery=N` (1–100, default **1** = the
+legacy single-draw path, byte-identical) + `--lottery-gap=SEC`
+(0–3600, default 20). For N > 1 main() loops `run_session()` up to N
+times: between draws a `lottery_gap` line + sleep; after each draw a
+`lottery_draw {draw,of,rc}` line; at the end
+`lottery_summary {draws,of,last_rc}`; the process exit code is the
+last draw's rc. **rc == 0 stops the lottery early** — a draw that
+satisfied `--session-expect-frames` (or ran its full
+`--session-seconds`) is a keeper worth keeping the rig for.
+
+Re-callability audit (the reason F5 is in-process, not a respawn
+driver): every stateful static inside `run_session()` is re-initialised
+at entry (`memset &c`, `memset &pump` + `sess_fb_init(&fb)`) and
+destroyed before return (`sess_pump_stop` joins the worker,
+`sess_fb_destroy`), the kn_log init/shutdown cycle is the same one the
+selftest battery already runs back-to-back in a single process, and
+the TLS/DTLS/socket objects are all function-scoped and closed on
+every exit path. The sandbox field test exercised the loop mechanics
+over three failing draws (gap timing exact, envelope lines
+`json.loads`-clean, exit code propagated); the full two-live-sessions-
+in-one-process path is Win7-only and is the one thing run 25 teaches.
+
+**Evidence lines added (4):** `cm_create_403_backoff`, `lottery_gap`,
+`lottery_draw`, `lottery_summary` — validator now covers **112** JSON
+printf blocks, session summary unchanged at **74 = 74** specs.
+
+### 31.7 Run 25 — the first unattended lottery
+
+One invocation, five draws, 30 s apart (the F4 backoff covers the
+seat cooldown inside each bring-up):
+
+```
+knvstd.exe --session --session-token=<tok> --session-app=107057914 ^
+  --session-seconds=360 --lottery=5 --lottery-gap=30 ^
+  --session-au-dir=logs\aus_r25 > logs\run25.log
+```
+
+Read matrix:
+
+| outcome | verdict |
+|---|---|
+| any draw survives > 60 s of media (esp. a full 360 s → rc 0, early stop) | the long-draw mode is reachable on demand ⇒ stage 2 can close against a real gameplay stream; keep drawing until it happens |
+| all 5 draws freeze ~10.5 s | the modal behaviour is now measured, not suspected ⇒ the practical stage-2 exit is the lottery itself (draw until a keeper); investigate the EA-Desktop-profile/parked-portal angle rig-side |
+| a draw carries SESSION_LENGTH_TIMER | F2 finally reads the full body — the rig's own session-limit statement |
+| `cm_create_403_backoff` lines appear and the draw proceeds | F4 proven live; the seat cooldown bound is measured (attempt count × 20 s) |
+
+The same app is deliberately allowed again: with the lottery
+instrumented, every draw is data — the app switch is only needed for a
+KEEPER draw (gameplay), and the operator has not yet supplied a
+gameplay-reaching app id.

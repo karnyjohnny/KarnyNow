@@ -1,3 +1,99 @@
+# INTEGRATION NOTES — Round XLIII delta, rev 34 (RUN 24 = LOTTERY DRAW #4 AND A NEAR-EXACT CLONE OF RUN 23: freeze at **10.43 s** of media vs 10.58 s, `recovery_exhausted` at wall 20.54 s vs 20.56 s, same app state (Arknights' Qt launcher portal), everything else matching to the counters. The round-XLII instruments paid off on first flight: **F3** proves ALL control traffic arrived inside the first 10 s (`ctrl_in rel_ms:10000`, 15 msgs, no 0x0101) — the freeze lands on an already-silent control plane; **F2** reads the eight-notification startup burst (t+257–264 ms) IN FULL — two payloads (936/970 hex chars) were truncated at the old 800 cap in runs 22–23 — exposing the rig's own classification: `QtWebEngineProcess.exe ... "drsProfileName":"EA Desktop"` on an Arknights session, final foreground `Games.exe fullscreen:false`. This draw carried NO `SESSION_LENGTH_TIMER` (run 23 had one — the notification set varies per draw; the full timer body is still unread). The ~10.5 s mode is now the plurality of the survival distribution (4 of 8 draws: 10.2/11.0/10.6/10.4 vs 30.5/41 and two ~1.2 s drips). The user's field probe closed the deferred restart-loop question: cm_create fired seconds after a recovery_exhausted exit returned a bare **HTTP 403** twice (cloud_status 0, empty desc) while the SAME token queued fine after a pause ⇒ **403 = seat cooldown, token reusable**. This round ships **F4** (cm_create 403 backoff: 20 s × 3 retries, TLS rebuilt per retry, `cm_create_403_backoff` event line) and **F5** (`--lottery=N` / `--lottery-gap=SEC`: one invocation re-draws the whole bring-up N times with `lottery_gap`/`lottery_draw`/`lottery_summary` envelope lines, early stop on rc==0; in-process after a full re-callability audit of `run_session()`). Stamp **XLIII**. Run 25 = the first unattended lottery, five draws in one command.)
+
+> **Rev 34 supersedes rev 1-33 as the current delta.** Canonical state:
+> **`START-HERE.md`** (repo root). Design record: **`docs/RTSP.md` §31**
+> (run 24 in full: the clone table, the F2/F3 first yields, the
+> EA-Desktop-profile discovery, the survival distribution, the 403 seat
+> probe, the F4/F5 design, the run-25 read matrix).
+
+## Changed files (round XLIII)
+
+| file | change |
+|---|---|
+| `streamer/src/knvstd_main.c` | **F4**: the TLS-open → `kn_cm_create` → TLS-close sequence became a retry loop — on `http_status == 403` only (every other failure aborts instantly as before) print `cm_create_403_backoff`, sleep `SESS_CM_403_BACKOFF_MS` (20 000), rebuild TLS, retry up to `SESS_CM_403_RETRIES` (3) ⇒ ≤ 4 attempts / ≤ 60 s of backoff. **F5**: `--lottery=N` (1–100, default 1 = byte-identical legacy single-draw path) and `--lottery-gap=SEC` (0–3600, default 20) parsed + bounds-checked; for N > 1 main() loops `run_session()` with `lottery_gap` sleeps, a `lottery_draw {draw,of,rc}` line per draw, a final `lottery_summary {draws,of,last_rc}`, exit code = last rc, and early stop on rc == 0. usage() documents both flags. Build stamp `XLII`→`XLIII`. 6646 → 6728 lines. **No wire-format, no state-machine changes.** |
+| `docs/RTSP.md` | §31 — the full round-XLIII record (run-24 clone table, the F2/F3 yields, the notification burst decoded, EA-Desktop profile, distribution update, 403 probe, F4/F5 design + audit, run-25 read matrix). |
+| `START-HERE.md` | state → XLIII; run-24 row; the XLIII-shipped block; sandbox-gates block refreshed; §4 = run 25 as a simple step-by-step procedure (operator request); history +XLIII. |
+
+## Integration notes / traps for the next agent
+
+1. **A bare cm_create 403 is a seat cooldown, not a dead token**
+   (run24v2 field probe: two instant 403s after exit, then the SAME
+   token queued after a pause). F4 automates the pause. If all four
+   attempts 403 (~60 s), the seat may be genuinely stuck server-side —
+   the legacy `error:"cm_create"` line prints as before. The JSON-body
+   sibling `cloud_status 11 = SESSION_LIMIT` is a different signal and
+   is NOT retried by F4.
+2. **Lottery draws share ONE process.** `run_session()` is re-callable
+   by construction — every stateful static is re-initialised at entry
+   (`memset &c`, `memset &pump` + `sess_fb_init(&fb)`) and destroyed
+   before return (`sess_pump_stop` joins the worker,
+   `sess_fb_destroy`); the kn_log init/shutdown cycle is the same one
+   the selftest battery runs back-to-back in one process. The sandbox
+   could only exercise the loop over FAILING draws (the POSIX build has
+   no TLS backend — `tls_stream_unavailable`); two live sessions in one
+   process is a run-25-first. If a second draw ever misbehaves at
+   bring-up, this audit is the first place to look.
+3. **The `logs/` knlog channels are overwritten by each draw** — with
+   `--lottery`, stdout is the per-draw record (each draw prints its
+   full summary + the envelope lines). Per-draw knlog channels would
+   need a `--log-dir` per invocation; deliberately not automated.
+4. **The rig's app classification is visible in the 0x010a tails**:
+   `drsAppName`/`drsProfileName` (run 24: the Arknights session ran
+   under the **EA Desktop** profile — the rig classifies by the window
+   it sees, `QtWebEngineProcess.exe`, not by our cmsId). These fields
+   were invisible before F2 (they sit past hex char 800).
+5. **Survival distribution after 8 draws** (runs 16–24): ~10.5 s mode
+   ×4 (10.2, 11.0, 10.6, 10.4), long ×2 (30.5, 41), drip ×2 (~1.2).
+   Client fidelity is not the dial (runs 16/17 had no activation and
+   no jiggle; 23/24 had everything — same modal lifetime). The lottery
+   is now the instrument; run 25 (N=5) measures the distribution in
+   one sitting.
+6. Everything from rev 33 stands (knrx counts are RECIPE-dependent
+   218 raw / 243 cmake+target; the fidelity ladder is dead; WSS is
+   send-only in practice — pongs have never arrived; work from
+   uploaded FILES, never pastes; the summary-printf ritual — now
+   **112** JSON printf blocks, session summary **74 = 74**).
+
+## Gate results (sandbox, this round)
+
+| gate | result |
+|---|---|
+| `tools/build_native_tests.sh` | **NATIVE TESTS PASS** — per-suite raw-recipe counts unchanged (knrx 218, kninput 548, knbw 387, knselftest 117, kat 126, scenarios 31/31), incl. the paranoid legs + jsonl/zip/json validators |
+| `tools/cross_check.sh` ×2 arches | **CROSS-CHECK PASS**, zero warnings under `-Wall -Wextra -Werror` |
+| ctest mbedTLS / schannel | **20/20 / 20/20** (knvstd relinked in both) |
+| cmake-native ctest | 20/20 (knrx 243 recipe) |
+| `sandbox_session_e2e` | **43/43 PASS** (rebuilt per the header recipe — the stale binary in `build/` pre-dated XLII) |
+| T10 POSIX dry | **69 checks, 0 failed** |
+| T13 | **ALL PASS 63** |
+| summary-printf validator | **112** JSON printf blocks, 0 mismatches (+4 new: `cm_create_403_backoff`, `lottery_gap`, `lottery_draw`, `lottery_summary`); session summary **74 = 74**; skeleton `json.loads` PASS |
+| lottery mechanics field test | `--lottery=3 --lottery-gap=2` against the TLS-less POSIX build: 3 draws, 2 gaps, wall 4.0 s (gap timing exact), envelope lines **json.loads 10/10**, exit code propagated (3); bounds `--lottery=0`, `--lottery=101`, `--lottery-gap=99999` → usage, exit 2; default single draw emits ZERO lottery lines |
+| `--selftest=all` battery | all runnable suites ok (fec 88, srtp 52, input 50, gs 78, rx 126, sock 9), single-JSON contract intact |
+
+ASan/UBSan legs were not re-run this round (no wire/decoder code
+touched — F4/F5 live entirely in `knvstd_main.c`'s session driver, and
+the XLI.1 sanitized run of knrx/kninput/knbw remains the reference).
+
+## Target expectations (Win7, run 25)
+
+- **T10**: ALL PASS **79**, knrx **243**, kninput **548**,
+  `input.vectors` **50** — unchanged; round XLIII touched no test file.
+- Every knvstd run's first stdout line: `"round":"XLIII"`.
+- **Run 25** (five draws, 30 s apart, one command):
+  `knvstd.exe --session --session-token=<tok> --session-app=107057914 --session-seconds=360 --lottery=5 --lottery-gap=30 --session-au-dir=logs\aus_r25 > logs\run25.log`
+- Expected stdout shape: build stamp once; per draw k the usual
+  queue/activation/jiggle/media/summary lines then
+  `lottery_draw {"draw":k,"of":5,"rc":R}`; between draws
+  `lottery_gap {"draw":k+1,"wait_ms":30000}`; on a seat collision
+  `cm_create_403_backoff {"attempt":1..3,"wait_ms":20000}`; at the end
+  `lottery_summary {"draws":K,"of":5,"last_rc":R}`. A draw that
+  survives its full `--session-seconds` (or meets
+  `--session-expect-frames`) returns rc 0 and STOPS the lottery.
+- Deliver: `run25.log` (the whole file — five summaries live in it) +
+  the `logs/` directory (last draw's channels) + the fresh
+  `T10_skrot/wynik` pair.
+
+---
+
 # INTEGRATION NOTES — Round XLII delta, rev 33 (RUN 23 = THE DECISION-MATRIX RUN: **the XLI.1 jiggle flew — 198 relative-mouse reports on sid 6 from t+1.3 s, 0 drops — and the server froze EVERY plane anyway at 10.58 s of pristine 30.15 fps video** (319/319 decoded, zero gaps, BWE warm at 34.8 Mbps peak). Per RTSP §29.7 that is branch 2: **input is eliminated as a survival factor and the run-16→22 fidelity ladder is dead** — media survival across runs 16–23 (10.2, 11.0, 30.5, ~1.3, ~1.2, ~41, 10.6 s) is a rig-side lottery. **D8's recovery contract made its live debut exactly to spec**: stall+5 s → recover + 50 IDR/PLI → +5 s → terminal → `stop_reason:"recovery_exhausted"`, clean exit at 20.6 s instead of run 22's 248 s of dead air. The 0x010a sequence is IDENTICAL to run 22's: Arknights: Endfield never got past its own Qt launcher portal (`QtWebEngineProcess.exe`, foreground lost to pid 0) in EITHER run — the session was parked on a login screen while the encoder died at a random time. This round ships the two instrumentation gaps that cost run 23: **F2** the 0x010a hex cap 800→2400 (the 566-byte `SESSION_LENGTH_TIMER` body was truncated by our OWN cap in both runs — never read) and **F3** `rel_ms` on `ctrl_msg`/`sctl_010a`/`ctrl_in` (notifications could not be ordered against the freeze). Stamp **XLII**. Run 24 changes the one variable left: an app that REACHES GAMEPLAY without login.)
 
 > **Rev 33 supersedes rev 1-32 as the current delta.** Canonical state:

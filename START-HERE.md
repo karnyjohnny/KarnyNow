@@ -1,4 +1,4 @@
-# START HERE — KarnyNow entry point and living handoff (created at the close of round XXXVIII, 2026-10-27; updated at round XLII close, 2026-10-28)
+# START HERE — KarnyNow entry point and living handoff (created at the close of round XXXVIII, 2026-10-27; updated at round XLIII close, 2026-10-28)
 
 > **You are an agent continuing this project.** This file replaces
 > `docs/archive/PROJECT-STATE.md` as the living handoff document.
@@ -49,11 +49,11 @@ stream **sustainability** (see §3).
 3. **`docs/BOOTSTRAP.md`** — the project map: mission, stage gates,
    logging spec (§7), decision register D1–D13, risk register, research
    provenance. Still authoritative for philosophy and stage definitions.
-4. **`docs/RTSP.md` §29–§30** — the two most recent rounds' records
-   (the operator's answers + the relative-mouse jiggle; run 23's
-   decision-matrix verdict + the lottery conclusion). §1–§28 are the
-   run-by-run history of the live protocol work.
-5. **`docs/INTEGRATION.md` rev 33 (the top block)** — the current delta:
+4. **`docs/RTSP.md` §30–§31** — the two most recent rounds' records
+   (run 23's decision-matrix verdict + the lottery conclusion; run 24's
+   clone draw, the F2/F3 yields, the 403 seat probe, the lottery
+   driver). §1–§29 are the run-by-run history of the live protocol work.
+5. **`docs/INTEGRATION.md` rev 34 (the top block)** — the current delta:
    new/changed files, integration traps, gate results. Older revs below
    it are superseded history.
 6. **The layer doc for whatever you touch**: `docs/RX.md` (receive
@@ -73,7 +73,7 @@ stream **sustainability** (see §3).
    recovery document; historical only. `docs/archive/analiza/` — the
    round 0–3 analyses (Polish), incl. the byte-level NVST spec (04).
 
-## 3. Current state (as of round XLII close, 2026-10-28)
+## 3. Current state (as of round XLIII close, 2026-10-28)
 
 **Live progress (R7 runs against the real production cloud):**
 
@@ -86,6 +86,7 @@ stream **sustainability** (see §3).
 | 21 | XL | **the regression is ROOT-CAUSED from the log alone**: identical loop-tick signature to run 20 (iterations = datagrams+1, `recv_timeouts=1` against a 10 ms poll, QoS 597 = 2/s not 20/s) ⇒ the media loop was pinned to the server's 500 ms datagram cadence by the R3-D WSS drain blocking in `SO_RCVTIMEO` (Windows rounds it to the ~500 ms AFD granularity — `select()` is the ms-accurate primitive). The session survived 300 s (user attached via web client); the media clock advanced only 1.18 s (`rtp_ms` 1182) = the game screen was STATIC — a second, independent depressant. Fixed + D1–D7 fidelity set shipped — full analysis `docs/RTSP.md` §27 |
 | 22 | XLI | **THE LOOP FIX IS PROVEN AND THE FIRST SUSTAINED REAL-RATE VIDEO FLOWED**: `loop_ticks` 42 882 = 143/s, `recv_timeouts` 27 095 = ticks − datagrams − 1 (the paradox inverted into the proof), QoS 19.5/s, 15 786/15 786 datagrams authenticated, 1139 AUs — 1013 of them a continuous 29.98 fps @ ~3.7 Mbps stream, zero gaps, zero decode errors; BWE left warm-up for the first time (estimate 25 398 kbps); 0x010a DECODED (JSON app-lifecycle notifications). **Then the server froze EVERY plane at ~t+30–45 s** (video, 1 Hz heartbeat, WSS; no termination/warning; WSS errored only at ~t+216 s) and never answered 2535 reliable IDR+PLI. Run 22 exposed our own dead end: nothing ever called `kn_rx_video_recover` → D8 the reference's bounded recovery contract ships — full analysis `docs/RTSP.md` §28 |
 | 23 | XLII | **THE DECISION-MATRIX RUN — INPUT ELIMINATED**: the XLI.1 jiggle flew exactly as designed (`first_send` t+1.28 s, **198** reports on sid 6 — opened 8/8 acked, `dropped:0`) and the server froze every plane ANYWAY at **10.58 s** of pristine video (319/319 AUs decoded @ 30.15 fps continuous, zero gaps, BWE warm at **34.8 Mbps** peak) — EARLIER than run 22's zero-input 41 s. **D8's live debut to the second**: stall+5 s → recover + 50 IDR/PLI → +5 s → terminal → `stop_reason:"recovery_exhausted"`, clean exit at 20.6 s (vs run 22's 248 s of dead air). The 0x010a sequence is IDENTICAL to run 22's: Arknights: Endfield never got past its own **Qt launcher portal** (`QtWebEngineProcess.exe`, foreground lost to pid 0) in either run. With the same app state freezing at 41 s once and 10.6 s once, the run-16→22 fidelity ladder is DEAD: media survival (10.2, 11.0, 30.5, ~1.3, ~1.2, ~41, 10.6 s over runs 16–23) is a **rig-side lottery**. WSS has NEVER ponged in any run. Ships F2 (0x010a cap 800→2400 hex — the 566 B `SESSION_LENGTH_TIMER` was truncated by our own cap in both runs) + F3 (`rel_ms` on the control-evidence lines) — full analysis `docs/RTSP.md` §30 |
+| 24 | XLIII | **LOTTERY DRAW #4 — A NEAR-EXACT CLONE OF RUN 23**: same app state (Arknights' Qt launcher portal), freeze at **10.43 s** of media (vs 10.58 s), `recovery_exhausted` at wall **20.54 s** (vs 20.56 s), 314/314 AUs decoded, zero gaps, BWE warm (31.7 Mbps peak), jiggle 200 reports / 0 drops. **F3's first flight**: ALL control traffic arrived inside the first 10 s (`ctrl_in rel_ms:10000`, 15 msgs, no 0x0101) — the freeze lands on an already-silent control plane. **F2's first flight**: the eight-notification startup burst decoded IN FULL (t+257–264 ms; two payloads at 936/970 hex chars were truncated by the old 800 cap in runs 22–23) — the rig ran this Arknights session under **`drsProfileName:"EA Desktop"`**, final foreground `Games.exe fullscreen:false`; NO `SESSION_LENGTH_TIMER` this draw (run 23 had one — the notification set varies per draw). The ~10.5 s mode is now the plurality (4 of 8 draws). The operator's post-run probe settled the deferred restart question: instant cm_create → bare **HTTP 403** twice, same token queued after a pause ⇒ **403 = seat cooldown, token reusable** — full analysis `docs/RTSP.md` §31 |
 
 **Round XXXVIII shipped** (target-verified in round XXXIX: **T10 ALL PASS
 79 on Win7**, `test_knbw` reported 387 checks on target = sandbox — the
@@ -294,24 +295,54 @@ exposed — evidence-only, no wire-format change):**
   = D8, exactly the sandbox delta), kninput 446→**548** (+102),
   `input.vectors` **50**, knselftest 116 stable.
 
-**Sandbox gates at XLII close (all green):** native suite **18/18,
-2378 checks** (raw recipe: knrx 218, kninput 548, knbw 387) ·
-`cross_check.sh` PASS ×2 arches, zero warnings (incl. the
-`-DKN_TLS_BACKEND_MBEDTLS=1` legs) · ctest **20/20 mbedTLS + 20/20
-schannel** · paranoid knvstd ×9
-(c11/c17/gnu11 × pedantic / format-truncation=2 /
-unused-but-set+shadow) clean · kn_rx/kn_bw/kn_input ×3 clean ·
-ASan+UBSan knrx 218 + kninput 548 + knbw 387 clean (third_party
-objects built UNSANITIZED and linked — crypto-algorithms' sha1.c
-trips UBSan's shift check by that library's own design; rev 32 trap
-4) · `sandbox_session_e2e` **43/43** · T10 POSIX dry **ALL PASS 69**
-(its cmake recipe reports knrx **243**, matching the target) · T13
-**ALL PASS 63** · summary-printf validation: all **108** JSON printf
-blocks specs=args (session summary **74 = 74**) + strict-JSON skeleton
-`json.loads` PASS + the 3 new `rel_ms` line shapes `json.loads`-clean.
+**Round XLIII shipped (run-24 analysis + the restart-loop unblock —
+driver-side only, no wire-format change):**
+
+- **Run 24's verdict** (RTSP §31): the lottery drew the same slot
+  twice — a near-exact clone of run 23 (10.43 s vs 10.58 s of media,
+  recovery_exhausted at 20.54 s vs 20.56 s, every counter matching).
+  F3 ordered the control plane: everything arrived inside the first
+  10 s; the freeze lands on silence. F2 read the full 0x010a burst:
+  eight notifications at t+257–264 ms (the launcher-portal startup,
+  NOT the freeze trigger), and the rig's own classification —
+  `"drsProfileName":"EA Desktop"` on an Arknights session (it follows
+  the window it sees, `QtWebEngineProcess.exe`, not our cmsId). No
+  SESSION_LENGTH_TIMER this draw; the full timer body is still
+  unread — only a draw that carries it can deliver it.
+- **F4**: cm_create **403 backoff** — a bare 403 means "the rig still
+  holds your previous seat" (run24v2 field probe: two instant 403s,
+  same token queued after a pause). knvstd now waits 20 s, rebuilds
+  the TLS stream and retries, ≤ 3 times, printing
+  `cm_create_403_backoff` per wait. Every other failure aborts
+  instantly, exactly as before.
+- **F5**: the **lottery driver** — `--lottery=N` (default 1 =
+  byte-identical legacy path) + `--lottery-gap=SEC` (default 20)
+  re-draw the WHOLE bring-up N times in one invocation:
+  `lottery_gap` / `lottery_draw {draw,of,rc}` / `lottery_summary`
+  envelope lines, exit code = last rc, **rc == 0 (a surviving draw)
+  stops the lottery early**. In-process by design — `run_session()`
+  passed a full re-callability audit (every stateful static
+  re-initialised at entry, destroyed before return; the kn_log cycle
+  is the selftest battery's own pattern).
+- **Evidence**: 4 new JSONL line shapes; the validator now covers
+  **112** JSON printf blocks (summary unchanged **74 = 74**).
+  **Build stamp → `"XLIII"`.**
+
+**Sandbox gates at XLIII close (all green):** `build_native_tests.sh`
+**NATIVE TESTS PASS** (per-suite raw-recipe counts unchanged: knrx
+218, kninput 548, knbw 387, knselftest 117; paranoid legs incl.) ·
+`cross_check.sh` PASS ×2 arches, zero warnings · ctest **20/20 mbedTLS
++ 20/20 schannel** · `sandbox_session_e2e` **43/43** (rebuilt per the
+header recipe) · T10 POSIX dry **69 checks, 0 failed** · T13 **ALL
+PASS 63** · summary-printf validation **112** blocks, 0 mismatches ·
+lottery mechanics field test: 3 draws / 2 gaps / wall 4.0 s exact,
+envelope `json.loads` **10/10**, exit code propagated, bounds
+(`--lottery=0/101`, `--lottery-gap=99999`) → usage exit 2, single-draw
+default emits ZERO lottery lines. ASan/UBSan not re-run (no wire or
+decoder code touched; the XLI.1 sanitized run stands).
 
 **Codebase shape:** 28 `streamer/src/*.c` + 26 `streamer/include/kn/*.h`;
-the production binary is `knvstd` (`knvstd_main.c`, 6646 lines: modes
+the production binary is `knvstd` (`knvstd_main.c`, 6728 lines: modes
 `--capture`, `--decode`, `--replay-capture`, `--session`, `--selftest`,
 `--list-selftests`); 15 registered production self-tests; 18 native test
 suites. Third-party (vendored, gitignored, re-stage if cleaned):
@@ -319,48 +350,64 @@ tiny-AES-c, crypto-algorithms-sha1, usrsctp, mbedTLS 3.6.0 (+framework).
 
 ## 4. What to do next (in order)
 
-1. **User syncs the round-XLII files** (list in `docs/INTEGRATION.md`
-   rev 33 — on top of the already-synced XLI/XLI.1 set this is
-   `streamer/src/knvstd_main.c` + the four docs) and does a **CLEAN
-   rebuild on Win7**: delete the build tree, run T10 in full.
-   Expected verdict: **ALL PASS 79** with `test_knrx` **243** (the
-   cmake-recipe count — NOT 218, that is the raw-gcc script's; the
-   +25 is recipe, not platform), `test_kninput` **548**, the gated
-   `input.vectors` **50**. Run 24's first stdout line must read
-   `"round":"XLII"`.
-2. **Run 24 — change the ONE variable left: the app.** Pick a GFN
-   title that reaches GAMEPLAY with NO login/launcher interaction —
-   runs 20–23 all parked on Arknights: Endfield's Qt launcher portal
-   (`QtWebEngineProcess.exe` + foreground lost to pid 0 in the 0x010a
-   feed; gameplay was never reached in any of them). Arknights is
-   banned until that is understood. Same command shape:
-   `knvstd.exe --session --session-token=<tok> --session-app=<NEW_APP_ID>
-   --session-seconds=360 --session-au-dir=logs\aus_r24 > logs\run24.log`
-   (360 s for evening queue slack). **Optionally sample the lottery**:
-   after a `recovery_exhausted` exit, immediately re-run for 2–3
-   draws in one evening (fresh CM flow = fresh rig draw; if token
-   reuse fails it fails loudly in the `cm_control` lines — that
-   itself is the deferred restart-loop probe). Per attempt:
-   untruncated stdout **PLUS the whole `logs/` directory**.
-3. **Read run 24 against the §30.10 matrix**: a gameplay-reaching app
-   surviving PAST ~41 s ⇒ the launcher-parked-instance theory is
-   confirmed and stage 2 closes against a real gameplay stream; the
-   same early freeze WITH gameplay on screen ⇒ bad-instance lottery
-   ⇒ the auto-restart loop becomes the practical stage-2 exit (ship
-   it next round). Either way, for the first time: the FULL
-   `SESSION_LENGTH_TIMER` body (F2 — read it; it may carry the rig's
-   own session-limit statement) and the 0x010a notifications ordered
-   against the media timeline to the millisecond (F3 `rel_ms`).
-   The `input_jiggle` `first_send` line must appear ~1 s after
-   `input_activation` (the jiggle stays ON as a controlled constant).
-4. **Then stage 3 per `docs/BOOTSTRAP.md` §12** — the discrete-input
-   remainder (G2/G3: keyboard/wheel/text) is DEPRIORITIZED behind the
-   rig-side investigation (run 23 eliminated input as a survival
-   factor); bundle audio (DTLS-SRTP keying already negotiated,
-   `srtp_prof:1`; extraction is the first step) and the open fidelity
-   items stay: the input handshake timeout (G1), server cursor
-   payload decoding (G4), D-t13 (the decode-side watchdog), the
-   auto-restart loop after terminal.
+> The operator asked for **very simple, step-by-step** instructions —
+> this section is written to be followed literally, one step at a time.
+
+**Step 1 — sync these 4 files** (round XLIII delta, on top of the
+already-synced XLII set):
+
+- `streamer/src/knvstd_main.c`
+- `docs/RTSP.md`
+- `docs/INTEGRATION.md`
+- `START-HERE.md`
+
+**Step 2 — clean rebuild + T10 on Win7** (the usual procedure):
+delete the build tree, build, run T10 in full.
+Expected verdict: **ALL PASS 79**, `test_knrx` **243**,
+`test_kninput` **548**, `input.vectors` **50** — XLIII changed no
+test file, so these are IDENTICAL to run 24's fresh T10.
+
+**Step 3 — run 25, the lottery.** ONE command (replace `<TOKEN>`):
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 --session-seconds=360 --lottery=5 --lottery-gap=30 --session-au-dir=logs\aus_r25 > logs\run25.log
+```
+
+What happens: knvstd attempts the FULL session up to **5 times** in
+one invocation. Each attempt = queue → activation → media → (if the
+rig freezes) `recovery_exhausted` after ~20 s → a 30 s pause → the
+next attempt. If the server answers "seat busy" (HTTP 403), knvstd
+now waits 20 s and retries ON ITS OWN (`cm_create_403_backoff`
+lines). If any attempt survives the full 360 s, the lottery stops
+early — that draw is a keeper. Ctrl+C ends everything. Expect
+~15–40 minutes total (queues vary).
+
+**Step 4 — check the first line** of `logs\run25.log`:
+`{"mode":"build","compiled":"...","round":"XLIII"}` — if it says
+`XLII`, the rebuild did not take; redo Step 2.
+
+**Step 5 — send back:**
+
+1. `logs\run25.log` — the WHOLE file (all five summaries live in it);
+2. the entire `logs\` directory (the last draw's knlog channels);
+3. the fresh `T10_skrot.txt` + `T10_wynik.txt` pair.
+
+**Read matrix for run 25 (agent side, RTSP §31.7):** any draw
+surviving > 60 s of media ⇒ the long-draw mode is reachable on
+demand and stage 2 can close against a real gameplay stream; all
+five draws ~10.5 s ⇒ the modal behaviour is measured, not suspected,
+and the lottery itself is the practical stage-2 exit; a draw carrying
+`SESSION_LENGTH_TIMER` ⇒ F2 finally reads the rig's own session-limit
+statement; `cm_create_403_backoff` lines followed by a queued draw ⇒
+F4 proven live and the seat-cooldown bound measured. If the operator
+can supply a gameplay-reaching app id, swapping `--session-app=`
+stays the single most valuable variable — the Arknights portal draws
+are now well-characterised.
+
+**Still deferred (unchanged):** D-t13 (decode-side watchdog), G3
+keyboard/wheel/text (deprioritised — input is eliminated as a
+survival factor), bundle audio extraction, G1 (input handshake
+timeout), G4 (server cursor payloads).
 
 ## 5. Binding working agreements (carried through every round)
 
@@ -442,7 +489,7 @@ knvstd --session:  CloudMatch create/poll (kn_cm)  →  session context
    → evidence: one JSONL line per event; summary JSON at exit.
 ```
 
-## 8. Traps that will bite you (curated; full list in docs/INTEGRATION.md rev 33 §traps)
+## 8. Traps that will bite you (curated; full list in docs/INTEGRATION.md rev 34 §traps)
 
 1. **Clock exactness is load-bearing**: all estimator math runs on
    **integer nanoseconds** (int64) exactly like the reference's
@@ -517,6 +564,12 @@ knvstd --session:  CloudMatch create/poll (kn_cm)  →  session context
     and the POSIX stub (tail of `kn_net_mbedtls.c`). Fixes go in the
     Win32 body; in the sandbox only the cross `-DKN_TLS_BACKEND_MBEDTLS=1`
     legs even COMPILE it — there is no runtime test off-target.
+13. **A bare HTTP 403 from cm_create is a SEAT COOLDOWN, not a dead
+    token** (run24v2: two instant 403s after a recovery_exhausted
+    exit, then the SAME token queued fine after a pause). F4 backs
+    off automatically (20 s × 3, `cm_create_403_backoff` lines). The
+    JSON-body sibling `cloud_status 11 = SESSION_LIMIT` is a
+    different signal and is deliberately NOT retried.
 
 ## 9. Repository map
 
@@ -575,6 +628,7 @@ logs/                   ALL logs/evidence (gitignored): knvstd --log-dir
 | XLI | **run 22 PROVED the loop fix live** (`loop_ticks` 143/s, `recv_timeouts` = ticks − datagrams − 1, QoS 19.5/s) **and delivered the first sustained real-rate GFN video** (1013 continuous frames @ 29.98 fps ≈ 3.7 Mbps, zero gaps/errors; BWE estimate 25 398 kbps — warm-up left for the first time; 0x010a decoded = JSON app notifications) — **then the server froze every plane at ~t+30–45 s** (no termination; WSS died ~t+216 s; 2535 reliable IDRs unanswered) and exposed our dead end: `kn_rx_video_recover` was never called → **D8 the reference's bounded recovery contract ships** (attempt 1 = keyframe + recover, attempt 2 = terminal `recovery_exhausted`) + `ctrl_ping_dead` + the summary `recovery` block + knrx 218; D-t13 defers the decode-side watchdog. Run 23 = T10 (expect 79, knrx 218) + the run-22 procedure answers + stdout AND `logs/` |
 | XLI.1 | **the operator's answers killed the takeover theory and revived idle/no-input as the prime freeze suspect** (the web client was never attached during run 22; the app matched the 0x010a shortName; ZERO input ever reached the session — survival is monotone in fidelity: ~10-11 s → ~30.5 s → ~45 s, and input was the one missing item) → **G3's first slice ships**: `kn_input_mouse_relative` byte-exact against the reference's OWN Rust golden (nvst_input.rs:1888-1911), routed to control_partial (**sid 6**, unordered PR-TTL 300 ms), as a gated **10 Hz ±1 px zero-net-drift jiggle** on the existing outbox path (gate: the pump's volatile activation latch). kninput 446→**548**, `input.vectors` 48→**50**, KAT singles 11→13, summary 73→**74** specs, stamp **XLI.1**. Run 23 = the decision matrix (RTSP §29.7): survival past ~45 s ⇒ idle policy CONFIRMED; freeze with the jiggle flying ⇒ input eliminated → rig-side, and D8 dates it (`recovery_exhausted`, early end) |
 | XLII | **run 23 = the decision-matrix run: THE JIGGLE FLEW (198 reports, sid 6, 0 drops) AND THE FREEZE CAME ANYWAY at 10.58 s** — earlier than run 22's zero-input 41 s ⇒ **input eliminated**, the fidelity ladder is dead, media survival (1.2–41 s over runs 16–23) is a **rig-side lottery**. **D8's live debut to the second** (stall+5 s → recover + 50 IDR/PLI → +5 s → terminal → `recovery_exhausted`, exit 20.6 s vs run 22's 248 s dead air). 0x010a IDENTICAL to run 22: Arknights never left its **Qt launcher portal** (foreground lost pid 0) — the untested variable is the APP. WSS never ponged in any run. Target T10 **79** (knrx +15=243 cmake-recipe, kninput 548, vectors 50). Ships **F2** (010a cap 800→2400 — `SESSION_LENGTH_TIMER` was self-truncated in both runs) + **F3** (`rel_ms` on ctrl evidence) + stamp XLII; jiggle stays ON. Run 24 = a gameplay-reaching app + optional 2–3 lottery draws |
+| XLIII | **run 24 = lottery draw #4, a near-exact CLONE of run 23** (freeze 10.43 s vs 10.58 s of media, `recovery_exhausted` 20.54 s vs 20.56 s; 314/314 AUs, zero gaps, jiggle 200/0) — **F3** proved all control traffic arrived inside the first 10 s (the freeze lands on a silent control plane); **F2** decoded the eight-notification burst in full (t+257–264 ms; two payloads had been truncated by the old 800 hex cap) and exposed the rig's classification: the Arknights session runs under **`drsProfileName:"EA Desktop"`** (it follows the Qt window, not our cmsId); NO SESSION_LENGTH_TIMER this draw — the set varies per draw. The ~10.5 s mode is now the plurality (4 of 8 draws). Operator probe: instant cm_create after exit → bare **HTTP 403** ×2, same token queued after a pause ⇒ seat cooldown, token reusable. Ships **F4** (403 backoff 20 s × 3, TLS rebuilt per retry) + **F5** (`--lottery=N`/`--lottery-gap=SEC` in-process re-draw driver with `lottery_gap/draw/summary` envelope, early stop on rc==0, full re-callability audit of `run_session()`) + stamp **XLIII**; validator 112 blocks. Run 25 = the first unattended lottery: five draws, one command |
 
 ## 11. The user protocol
 

@@ -100,6 +100,9 @@ static void usage(void)
            "         [--session-play-settle=N] (extra ms after sctp_up before\n"
            "                                    PLAY; default 250)\n"
            "         [--session-expect-frames=N] [--session-au-dir=DIR]\n"
+"         [--lottery=N] [--lottery-gap=SEC]  (re-draw the WHOLE\n"
+"          bring-up to N times after a terminal draw, SEC pause\n"
+"          between draws, default 20; round XLIII media lottery)\n"
            "       [--log-dir=DIR]   (WASAPI synthetic PCM unless --no-audio)\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
            "  knvstd --list-selftests\n"
@@ -1664,6 +1667,14 @@ static int64_t sess_bw_now_ns(void *ud)
  * feel at 30 fps without claiming a fidelity we cannot prove. */
 #define SESS_JIGGLE_INTERVAL_MS  100u
 #define SESS_FRAME_TIME_US       16666u
+/* Round XLIII (F4): cm_create seat-cooldown backoff. The run-24 field
+ * probe (run24v2.log) showed a bare HTTP 403 (cloud_status 0, empty
+ * desc) when cm_create fires seconds after the previous session's
+ * recovery_exhausted exit — the rig still holds the seat — while the
+ * SAME token queued fine minutes later. 20 s x 3 retries covers the
+ * observed cooldown without a new knob. */
+#define SESS_CM_403_BACKOFF_MS   20000
+#define SESS_CM_403_RETRIES      3
 /* Round XL: the reference's IDR_RETRY_INTERVAL (nvst.rs:104) — the armed
  * keyframe latch re-fires every 100 ms until a keyframe is assembled
  * (bundle-loop retry :8092-8110). Run 20 died on a ONE-SHOT idr on the
@@ -4522,6 +4533,7 @@ static int run_session(const char *token, const char *device_id,
     size_t tag_len = 8;
     const char *profile_name;
     int rc, http_status = 0, ring_ok, exit_code = 1, i;
+    int cm_try = 0;                    /* round XLIII (F4): 403 backoff */
     uint16_t ws_port = 0;
     uint64_t t_start, next_poll_ms, now_ms, t_last_stats;
     uint64_t ctrl_ping_next_ms = 0;    /* R3-D service beat */
@@ -4585,23 +4597,39 @@ static int run_session(const char *token, const char *device_id,
         kn_lctx_str(&b, "token", "redacted");
         kn_log_emit(&b);
     }
-    cm_tls = kn_net_tls_stream_open(cm_host, 443, 15000, err, sizeof err);
-    if (!cm_tls) {
-        printf("{\"mode\":\"session\",\"error\":\"cm_tls\",\"detail\":\"%.150s\"}\n",
-               err);
+    /* Round XLIII (F4): a bare HTTP 403 from cm_create means "the rig
+     * still holds your previous seat", not "dead token" (run24v2 field
+     * probe: two instant 403s after a recovery_exhausted exit, then the
+     * SAME token queued fine after a pause). Back off 20 s and rebuild
+     * the TLS stream, up to SESS_CM_403_RETRIES times; every other
+     * failure aborts at once, exactly as before. */
+    for (cm_try = 0;; ++cm_try) {
+        cm_tls = kn_net_tls_stream_open(cm_host, 443, 15000, err,
+                                        sizeof err);
+        if (!cm_tls) {
+            printf("{\"mode\":\"session\",\"error\":\"cm_tls\",\"detail\":\"%.150s\"}\n",
+                   err);
+            fflush(stdout);
+            kn_log_on_failure("session.cm", "E_SESSION_CM_TLS",
+                              "CloudMatch TLS stream failed to open", err);
+            kn_log_shutdown();
+            return 1;
+        }
+        cm_io_ctx.s = cm_tls;
+        hio.send = tls_send; hio.recv = tls_recv; hio.ctx = &cm_io_ctx;
+        rc = kn_cm_create(hio, cm_host, "/", &st, 20000, sess_now, NULL,
+                          cm_rxb, sizeof cm_rxb, cm_json, sizeof cm_json,
+                          &http_status, &sess);
+        kn_net_tls_stream_close(cm_tls);
+        cm_tls = NULL;
+        if (rc == KN_HTTP_OK && http_status == 200) break;
+        if (http_status != 403 || cm_try >= SESS_CM_403_RETRIES) break;
+        printf("{\"mode\":\"session\",\"event\":\"cm_create_403_backoff\","
+               "\"attempt\":%d,\"wait_ms\":%d}\n",
+               cm_try + 1, SESS_CM_403_BACKOFF_MS);
         fflush(stdout);
-        kn_log_on_failure("session.cm", "E_SESSION_CM_TLS",
-                          "CloudMatch TLS stream failed to open", err);
-        kn_log_shutdown();
-        return 1;
+        sess_sleep((uint32_t)SESS_CM_403_BACKOFF_MS, NULL);
     }
-    cm_io_ctx.s = cm_tls;
-    hio.send = tls_send; hio.recv = tls_recv; hio.ctx = &cm_io_ctx;
-    rc = kn_cm_create(hio, cm_host, "/", &st, 20000, sess_now, NULL,
-                      cm_rxb, sizeof cm_rxb, cm_json, sizeof cm_json,
-                      &http_status, &sess);
-    kn_net_tls_stream_close(cm_tls);
-    cm_tls = NULL;
     if (rc != KN_HTTP_OK || http_status != 200) {
         char esc[96];
         lb_json_path(esc, sizeof esc, sess.req_status_desc);
@@ -6504,6 +6532,11 @@ int main(int argc, char **argv)
      * 160+ deep; 180 s risked aborting a legitimate wait (the abort now
      * also cancels the session, but a seat is a seat) */
     long sess_seconds = 60, sess_queue_timeout = 600, sess_expect = 0;
+    long lottery_n = 1, lottery_gap_s = 20;  /* round XLIII (F5): the
+        media-survival lottery driver — runs 16-24 drew 1.2-41 s of media
+        from the SAME app with identical client behaviour, so one user
+        invocation can now re-draw the whole bring-up N times and report
+        every draw. Default 1 = byte-identical legacy behaviour. */
     long sess_play_wait = 2500, sess_play_settle = 250;   /* round XXXIII
         PLAY gating: the reference's finish() lands after its receiver
         plumbing gave DTLS+SCTP a head start (lib.rs:937->1117); runs
@@ -6579,6 +6612,10 @@ int main(int argc, char **argv)
             sess_expect = strtol(a + 24, NULL, 10);
         else if (strncmp(a, "--session-au-dir=", 17) == 0)
             sess_au_dir = a + 17;
+        else if (strncmp(a, "--lottery=", 10) == 0)
+            lottery_n = strtol(a + 10, NULL, 10);
+        else if (strncmp(a, "--lottery-gap=", 14) == 0)
+            lottery_gap_s = strtol(a + 14, NULL, 10);
         else if (strcmp(a, "--diagnostics") == 0) diagnostics = 1;
         else if (strcmp(a, "--version") == 0) version = 1;
         else if (strcmp(a, "--list-selftests") == 0) list = 1;
@@ -6605,7 +6642,7 @@ int main(int argc, char **argv)
      * that contract (the native gate's json.load validators). --version
      * already prints the full build.json for the deep identity. */
     if (!list && !version && !(selftest && selftest[0]) && !diagnostics) {
-        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLII\"}\n",
+        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLIII\"}\n",
                __DATE__, __TIME__);
         fflush(stdout);
     }
@@ -6629,16 +6666,61 @@ int main(int argc, char **argv)
         if (!sess_token || !sess_token[0] || sess_app <= 0 ||
             sess_seconds < 0 || sess_seconds > 86400 ||
             sess_queue_timeout < 0 || sess_queue_timeout > 86400 ||
-            sess_expect < 0 || sess_expect > 100000000) {
+            sess_expect < 0 || sess_expect > 100000000 ||
+            lottery_n < 1 || lottery_n > 100 ||
+            lottery_gap_s < 0 || lottery_gap_s > 3600) {
             usage();
             return 2;
         }
-        return run_session(sess_token, sess_device, sess_app, sess_title,
-                           sess_cm_host && sess_cm_host[0] ? sess_cm_host
-                               : KN_CM_DEFAULT_BASE_HOST,
-                           sess_seconds, sess_queue_timeout, sess_keep,
-                           sess_expect, sess_play_wait, sess_play_settle,
-                           sess_au_dir, log_dir);
+        if (lottery_n == 1)
+            return run_session(sess_token, sess_device, sess_app,
+                               sess_title,
+                               sess_cm_host && sess_cm_host[0] ? sess_cm_host
+                                   : KN_CM_DEFAULT_BASE_HOST,
+                               sess_seconds, sess_queue_timeout, sess_keep,
+                               sess_expect, sess_play_wait, sess_play_settle,
+                               sess_au_dir, log_dir);
+        /* Round XLIII (F5): lottery driver. run_session() is re-callable
+         * by construction — every stateful static is re-initialised at
+         * entry (memset &c, memset &pump + sess_fb_init) and destroyed
+         * before return (sess_pump_stop joins the worker,
+         * sess_fb_destroy), and the kn_log init/shutdown cycle is the
+         * same one the selftest suites already run back-to-back in one
+         * process. Each draw prints its own full summary; the driver
+         * adds lottery_gap / lottery_draw / lottery_summary envelope
+         * lines. rc == 0 (the draw satisfied --session-expect-frames)
+         * stops the lottery — that draw is a keeper. */
+        {
+            const char *cmh = sess_cm_host && sess_cm_host[0]
+                                  ? sess_cm_host : KN_CM_DEFAULT_BASE_HOST;
+            long draw, done = 0;
+            int lrc = 1;
+            for (draw = 1; draw <= lottery_n; ++draw) {
+                if (draw > 1 && lottery_gap_s > 0) {
+                    printf("{\"mode\":\"session\",\"event\":\"lottery_gap\","
+                           "\"draw\":%ld,\"wait_ms\":%ld}\n",
+                           draw, lottery_gap_s * 1000L);
+                    fflush(stdout);
+                    sess_sleep((uint32_t)(lottery_gap_s * 1000L), NULL);
+                }
+                lrc = run_session(sess_token, sess_device, sess_app,
+                                  sess_title, cmh, sess_seconds,
+                                  sess_queue_timeout, sess_keep,
+                                  sess_expect, sess_play_wait,
+                                  sess_play_settle, sess_au_dir, log_dir);
+                done = draw;
+                printf("{\"mode\":\"session\",\"event\":\"lottery_draw\","
+                       "\"draw\":%ld,\"of\":%ld,\"rc\":%d}\n",
+                       draw, lottery_n, lrc);
+                fflush(stdout);
+                if (lrc == 0) break;
+            }
+            printf("{\"mode\":\"session\",\"event\":\"lottery_summary\","
+                   "\"draws\":%ld,\"of\":%ld,\"last_rc\":%d}\n",
+                   done, lottery_n, lrc);
+            fflush(stdout);
+            return lrc;
+        }
     }
     if (diagnostics) return run_diagnostics(log_dir);
     usage();
