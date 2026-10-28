@@ -6417,9 +6417,21 @@ static int run_session(const char *token, const char *device_id,
             long long produced = (c.stream && !c.decode_aborted)
                                      ? (long long)c.frames_out
                                      : (long long)c.aus;
-            exit_code = (datagrams > 0 && produced > 0 &&
-                         c.au_write_errors == 0 &&
-                         strcmp(stop_reason, "socket_error") != 0) ? 0 : 1;
+            /* Round XLIV (F6): the honest verdict exit code. Before this
+             * fix ANY session that received at least one datagram and was
+             * not a socket_error exited 0 — including one the server froze
+             * and D8 ended with "recovery_exhausted" (runs 23-25 all
+             * exited 0 despite the rig dying at ~10 s of media). That
+             * silently broke the documented contract ("0 ok, 1 failed
+             * verdict") and made the F5 lottery misread every dead draw
+             * as a keeper — run 25 stopped at draw 1 of 5. Now ONLY the
+             * natural endings ("time" = the requested seconds elapsed,
+             * "expect_frames" = the frame goal was met) can exit 0;
+             * every terminal / error / interrupted stop_reason exits 1. */
+            int natural = (strcmp(stop_reason, "time") == 0 ||
+                           strcmp(stop_reason, "expect_frames") == 0);
+            exit_code = (natural && datagrams > 0 && produced > 0 &&
+                         c.au_write_errors == 0) ? 0 : 1;
             if (expect_frames > 0 && produced < expect_frames)
                 exit_code = 1;
         }
@@ -6642,7 +6654,7 @@ int main(int argc, char **argv)
      * that contract (the native gate's json.load validators). --version
      * already prints the full build.json for the deep identity. */
     if (!list && !version && !(selftest && selftest[0]) && !diagnostics) {
-        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLIII\"}\n",
+        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLIV\"}\n",
                __DATE__, __TIME__);
         fflush(stdout);
     }
@@ -6688,8 +6700,12 @@ int main(int argc, char **argv)
          * same one the selftest suites already run back-to-back in one
          * process. Each draw prints its own full summary; the driver
          * adds lottery_gap / lottery_draw / lottery_summary envelope
-         * lines. rc == 0 (the draw satisfied --session-expect-frames)
-         * stops the lottery — that draw is a keeper. */
+         * lines. Round XLIV (F6b) corrected the stop rule after run 25
+         * exposed it: rc 0 now ONLY happens on a natural ending ("time"
+         * or "expect_frames" — F6a), rc 2/3 are usage/internal failures
+         * a re-draw cannot fix, and g_knv_stop is the operator's Ctrl-C;
+         * ONLY rc 1 (a dead draw: recovery_exhausted, socket_error,
+         * queue_timeout, terminations, cm failures) re-draws. */
         {
             const char *cmh = sess_cm_host && sess_cm_host[0]
                                   ? sess_cm_host : KN_CM_DEFAULT_BASE_HOST;
@@ -6713,7 +6729,7 @@ int main(int argc, char **argv)
                        "\"draw\":%ld,\"of\":%ld,\"rc\":%d}\n",
                        draw, lottery_n, lrc);
                 fflush(stdout);
-                if (lrc == 0) break;
+                if (lrc != 1 || g_knv_stop) break;  /* F6b: see above */
             }
             printf("{\"mode\":\"session\",\"event\":\"lottery_summary\","
                    "\"draws\":%ld,\"of\":%ld,\"last_rc\":%d}\n",

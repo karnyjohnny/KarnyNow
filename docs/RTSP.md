@@ -3130,3 +3130,153 @@ The same app is deliberately allowed again: with the lottery
 instrumented, every draw is data — the app switch is only needed for a
 KEEPER draw (gameplay), and the operator has not yet supplied a
 gameplay-reaching app id.
+
+---
+
+## 32. Round XLIV — R7 run 25: **THE LOTTERY'S FIRST LIVE FLIGHT EXPOSED ITS OWN STOP-RULE BUG (draw 1 of 5 declared a "keeper" while its summary said `recovery_exhausted`) — and the single draw it did deliver paid for the run twice over: F2 read the FULL `SESSION_LENGTH_TIMER` for the first time ever (`beforeEventMS: 3599657` — the rig granted the session a FULL ONE-HOUR budget, killing the session-limit theory of the early freezes) and the draw itself was the first LOSSY one on record** (gaps 2, `fec_repaired` 6, nack 5, withheld 90, lossy_frames 5 — yet 257/257 AUs decoded; BWE peaked at an all-time 45.9 Mbps). Media survived 11.59 s — the fifth straight draw in the ~10–12 s band. The bug: `run_session`'s exit code returned 0 for ANY session that received ≥1 datagram and wasn't `socket_error`, so `recovery_exhausted` exited 0 (runs 23–25 all did) — the documented contract says 1 ("failed verdict"). **F6** fixes the exit code (only the natural endings `"time"`/`"expect_frames"` can exit 0) and corrects the lottery stop rule (only rc 1 re-draws; rc 0 = keeper; rc 2/3 = abort; Ctrl-C = abort). Stamp **XLIV**. Run 26 = the lottery again — this time it will actually draw 5 times.
+
+### 32.1 What run 25 delivered in ONE draw
+
+| metric | run 23 | run 24 | run 25 |
+|---|---|---|---|
+| queue at entry | 118 | 33 | 32 |
+| activation | t+0.33 s | t+0.28 s | t+0.75 s (attempt 1, v3) |
+| jiggle `first_send` | t+1.28 s | t+1.10 s | t+1.32 s (196 reports, 0 drops) |
+| AUs / decoded | 319/319 | 314/314 | **257/257** |
+| media at freeze | 10.58 s | 10.43 s | **11.59 s** (`rtp_ms 11586`) |
+| gaps / fec / nack | 0/0/0 | 0/0/0 | **2 / 6 / 5** (first lossy draw) |
+| withheld / lossy_frames | – | – | **90 / 5** (`skip_reordered` 11) |
+| idr / pli / kf_requests | 50/50/1 | 50/50/1 | **69/69/2** (episode 1 early + cleared after 25 attempts, episode 2 = the recovery) |
+| BWE peak | 34.8 Mbps | 31.7 Mbps | **45.9 Mbps** (all-time) |
+| datagrams authenticated | 2586/2586 | 2578/2578 | 3074/3074 |
+| stop_reason / wall | recovery_exhausted / 20.56 s | recovery_exhausted / 20.54 s | recovery_exhausted / **21.76 s** |
+| rig IP (handoff) | — | 80.84.174.148 | **80.250.97.36** (different rig) |
+| 0x0101 heartbeat | none | none | **present** (`ctrl_in`: 16 msgs, codes 020e×1 0111×2 010a×9 010f×1 0106×1 010e×1 0101×1, all `rel_ms ≤ 9999`) |
+| SESSION_LENGTH_TIMER | truncated (own cap) | absent | **FULL BODY READ** (F2) |
+
+The loss is notable but not causal: the gaps/nacks rode in the middle of
+the stream, every frame still decoded, and the freeze arrived the same
+way (datagrams pinned at 3074 from one second to the next while
+`loop_ticks` kept climbing — transport.log tail: 4065 → 4121 → 4198 →
+4266, then `recovery_timeout` → `terminal` at 18:59:41.816Z). A
+different rig IP froze the same way at the same media age.
+
+`sctl_unknown code 526` = opcode **0x020e** — present in runs 23/24's
+`ctrl_in` too (`020e`×1 every time); the reference's decode table does
+not know it either (it lands in the reference's own Unknown bucket).
+Counted, logged, ignored — exactly the designed behaviour.
+
+### 32.2 The SESSION_LENGTH_TIMER, in full at last (F2's prize)
+
+Notification #9, `rel_ms 1665` (run 23's copy arrived ~12.9 s — the
+delivery time varies wildly per draw), 567 B payload = 1126 hex chars
+— **the old 800-char cap would have cut it in half**:
+
+```json
+{"messageType":"SESSION_LENGTH_TIMER",
+ "tracingData":{"requestId":"73eb5bc5-...","traceId":"8bfa0415c7b301a1",
+   "traceContext":[{"key":"ot-tracer-traceid","value":"8bfa0415c7b301a1"},
+                   {"key":"ot-tracer-spanid","value":"46fed972bd71745b"},
+                   {"key":"ot-tracer-sampled","value":"1"}]},
+ "timerData":{"timerType":"DEFAULT","presentDurationMS":0,
+              "beforeEventMS":3599657}}
+```
+
+**`beforeEventMS: 3 599 657` ≈ 3600 s = one hour.** The rig granted
+this session a full hour before its "event" (termination). The freeze
+at 11.6 s was therefore NOT a session-budget expiry, NOT an idle
+policy with a seconds-scale timer, and NOT a limit tied to our
+account's remaining time — the server's own stated budget had 59+
+minutes left. Combined with §31 (silent control plane at the freeze,
+no 0x0109/0x0112/0x0101-decay), the early freeze is now conclusively
+a rig-side encoder/app-state failure, invisible to every control
+channel the protocol offers.
+
+The notification set for this draw was otherwise the run-24 clone:
+the same eight-burst at t+658–664 ms (Launcher.exe → Games.exe
+cmsId 107057914 → Launcher exit → **QtWebEngineProcess.exe
+`drsProfileName:"EA Desktop"`** → foreground pid 0 → Games.exe
+fullscreen:false) + the timer at 1.67 s. The EA-Desktop profile on an
+Arknights session reproduced exactly (§31.3) — it is the rig's stable
+misclassification of the parked portal, not a one-off.
+
+### 32.3 The F6 bug — anatomy of a false keeper
+
+Run 25's stdout, verbatim:
+
+```
+{"mode":"session","summary":{"stop_reason":"recovery_exhausted",...}}
+{"mode":"session","event":"lottery_draw","draw":1,"of":5,"rc":0}
+{"mode":"session","event":"lottery_summary","draws":1,"of":5,"last_rc":0}
+```
+
+rc 0 from a frozen session. The pre-XLIV exit-code rule inside
+`run_session` was:
+
+```c
+exit_code = (datagrams > 0 && produced > 0 &&
+             c.au_write_errors == 0 &&
+             strcmp(stop_reason, "socket_error") != 0) ? 0 : 1;
+```
+
+— i.e. ANY media at all + anything except `socket_error` = "ok". That
+predates D8: before the recovery contract, a session that produced
+frames and ended had, in practice, run its course, and the rule was
+never exercised against a TERMINAL stop_reason (runs 23/24 exited 0 as
+well — nobody consumed the code until the lottery did). F5's stop rule
+(`rc == 0` = keeper) inherited the flaw. The documented contract in
+usage() always said the opposite: "exit codes: 0 ok/skipped, **1 failed
+verdict**" — a `recovery_exhausted` session IS a failed verdict.
+
+**F6a (the fix):** only the natural endings can exit 0 —
+`stop_reason == "time"` (the requested `--session-seconds` elapsed) or
+`"expect_frames"` (the `--session-expect-frames` goal was met) — AND
+datagrams > 0 AND produced > 0 AND no AU write errors. Every terminal
+or interrupted reason (`recovery_exhausted`, `server_termination`,
+`socket_error`, `queue_timeout`, `terminated`, `session_not_found`,
+`interrupted`, `cm_poll_failed`, `cm_poll_rejected`, `signal`) exits
+1. Historical note: this changes the process exit code of runs
+23–25-shaped sessions from 0 to 1; nothing in the gate set consumes
+the live-session exit code (T10/T13/e2e never touch it), and the
+contract line in usage() now matches reality.
+
+**F6b (the lottery stop rule):** re-draw ONLY on rc 1 (a dead draw).
+rc 0 = a genuine keeper → stop and keep the rig. rc 2/3 = usage /
+internal failure a re-draw cannot fix → stop. `g_knv_stop` (Ctrl-C)
+→ stop. The sandbox proof: `--lottery=5` against the TLS-less POSIX
+build now ends after draw 1 with `last_rc:3` (before F6b it spun all
+N draws on an unfixable error).
+
+### 32.4 The survival distribution after 9 draws (runs 16–25)
+
+| run | 16 | 17 | 18 | 20 | 21 | 22 | 23 | 24 | 25 |
+|---|---|---|---|---|---|---|---|---|---|
+| media s | 10.2 | 11.0 | 30.5 | ~1.3 | ~1.2 | ~41 | 10.6 | 10.4 | **11.6** |
+
+The ~10–12 s band now holds **5 of 9 draws** (16, 17, 23, 24, 25), on
+two different rig IPs, with and without activation, with and without
+jiggle, with and without 0x0101, with and without packet loss, with a
+one-hour session budget granted. The band is the rig's modal failure
+mode for launcher-parked sessions. The long draws (30.5, 41) remain
+unpredicted by any client-side variable — which is exactly why the
+lottery exists: run 26 draws five times unattended and the distribution
+speaks for itself.
+
+### 32.5 Run 26 — the lottery, actually lotterying
+
+Same command as run 25 (the operator's copy-paste stays valid); with
+F6 the driver will now re-draw after each `recovery_exhausted` and
+stop early ONLY on a draw that survives its full 360 s:
+
+```
+knvstd.exe --session --session-token=<tok> --session-app=107057914 --session-seconds=360 --lottery=5 --lottery-gap=30 --session-au-dir=logs\aus_r26 > logs\run26.log
+```
+
+Read matrix: 5 dead draws ⇒ the modal band is confirmed at n=5 in one
+sitting and the practical stage-2 exit is a persistence lottery (or a
+gameplay-reaching app); ANY draw surviving > 60 s ⇒ long draws are
+reachable on demand, keep drawing until a full-length keeper closes
+stage 2; `cm_create_403_backoff` lines ⇒ F4's live proof and the
+seat-cooldown bound. Every draw prints its own summary + envelope
+lines; stdout is the complete record (the knlog `logs/` channels hold
+the LAST draw only).

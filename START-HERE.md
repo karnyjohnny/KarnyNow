@@ -1,4 +1,4 @@
-# START HERE — KarnyNow entry point and living handoff (created at the close of round XXXVIII, 2026-10-27; updated at round XLIII close, 2026-10-28)
+# START HERE — KarnyNow entry point and living handoff (created at the close of round XXXVIII, 2026-10-27; updated at round XLIV close, 2026-10-28)
 
 > **You are an agent continuing this project.** This file replaces
 > `docs/archive/PROJECT-STATE.md` as the living handoff document.
@@ -49,11 +49,12 @@ stream **sustainability** (see §3).
 3. **`docs/BOOTSTRAP.md`** — the project map: mission, stage gates,
    logging spec (§7), decision register D1–D13, risk register, research
    provenance. Still authoritative for philosophy and stage definitions.
-4. **`docs/RTSP.md` §30–§31** — the two most recent rounds' records
-   (run 23's decision-matrix verdict + the lottery conclusion; run 24's
-   clone draw, the F2/F3 yields, the 403 seat probe, the lottery
-   driver). §1–§29 are the run-by-run history of the live protocol work.
-5. **`docs/INTEGRATION.md` rev 34 (the top block)** — the current delta:
+4. **`docs/RTSP.md` §31–§32** — the two most recent rounds' records
+   (run 24's clone draw, the F2/F3 yields, the 403 seat probe, the
+   lottery driver; run 25's false-keeper catch, the full
+   SESSION_LENGTH_TIMER, the F6 exit-code fix). §1–§30 are the
+   run-by-run history of the live protocol work.
+5. **`docs/INTEGRATION.md` rev 35 (the top block)** — the current delta:
    new/changed files, integration traps, gate results. Older revs below
    it are superseded history.
 6. **The layer doc for whatever you touch**: `docs/RX.md` (receive
@@ -73,7 +74,7 @@ stream **sustainability** (see §3).
    recovery document; historical only. `docs/archive/analiza/` — the
    round 0–3 analyses (Polish), incl. the byte-level NVST spec (04).
 
-## 3. Current state (as of round XLIII close, 2026-10-28)
+## 3. Current state (as of round XLIV close, 2026-10-28)
 
 **Live progress (R7 runs against the real production cloud):**
 
@@ -87,6 +88,7 @@ stream **sustainability** (see §3).
 | 22 | XLI | **THE LOOP FIX IS PROVEN AND THE FIRST SUSTAINED REAL-RATE VIDEO FLOWED**: `loop_ticks` 42 882 = 143/s, `recv_timeouts` 27 095 = ticks − datagrams − 1 (the paradox inverted into the proof), QoS 19.5/s, 15 786/15 786 datagrams authenticated, 1139 AUs — 1013 of them a continuous 29.98 fps @ ~3.7 Mbps stream, zero gaps, zero decode errors; BWE left warm-up for the first time (estimate 25 398 kbps); 0x010a DECODED (JSON app-lifecycle notifications). **Then the server froze EVERY plane at ~t+30–45 s** (video, 1 Hz heartbeat, WSS; no termination/warning; WSS errored only at ~t+216 s) and never answered 2535 reliable IDR+PLI. Run 22 exposed our own dead end: nothing ever called `kn_rx_video_recover` → D8 the reference's bounded recovery contract ships — full analysis `docs/RTSP.md` §28 |
 | 23 | XLII | **THE DECISION-MATRIX RUN — INPUT ELIMINATED**: the XLI.1 jiggle flew exactly as designed (`first_send` t+1.28 s, **198** reports on sid 6 — opened 8/8 acked, `dropped:0`) and the server froze every plane ANYWAY at **10.58 s** of pristine video (319/319 AUs decoded @ 30.15 fps continuous, zero gaps, BWE warm at **34.8 Mbps** peak) — EARLIER than run 22's zero-input 41 s. **D8's live debut to the second**: stall+5 s → recover + 50 IDR/PLI → +5 s → terminal → `stop_reason:"recovery_exhausted"`, clean exit at 20.6 s (vs run 22's 248 s of dead air). The 0x010a sequence is IDENTICAL to run 22's: Arknights: Endfield never got past its own **Qt launcher portal** (`QtWebEngineProcess.exe`, foreground lost to pid 0) in either run. With the same app state freezing at 41 s once and 10.6 s once, the run-16→22 fidelity ladder is DEAD: media survival (10.2, 11.0, 30.5, ~1.3, ~1.2, ~41, 10.6 s over runs 16–23) is a **rig-side lottery**. WSS has NEVER ponged in any run. Ships F2 (0x010a cap 800→2400 hex — the 566 B `SESSION_LENGTH_TIMER` was truncated by our own cap in both runs) + F3 (`rel_ms` on the control-evidence lines) — full analysis `docs/RTSP.md` §30 |
 | 24 | XLIII | **LOTTERY DRAW #4 — A NEAR-EXACT CLONE OF RUN 23**: same app state (Arknights' Qt launcher portal), freeze at **10.43 s** of media (vs 10.58 s), `recovery_exhausted` at wall **20.54 s** (vs 20.56 s), 314/314 AUs decoded, zero gaps, BWE warm (31.7 Mbps peak), jiggle 200 reports / 0 drops. **F3's first flight**: ALL control traffic arrived inside the first 10 s (`ctrl_in rel_ms:10000`, 15 msgs, no 0x0101) — the freeze lands on an already-silent control plane. **F2's first flight**: the eight-notification startup burst decoded IN FULL (t+257–264 ms; two payloads at 936/970 hex chars were truncated by the old 800 cap in runs 22–23) — the rig ran this Arknights session under **`drsProfileName:"EA Desktop"`**, final foreground `Games.exe fullscreen:false`; NO `SESSION_LENGTH_TIMER` this draw (run 23 had one — the notification set varies per draw). The ~10.5 s mode is now the plurality (4 of 8 draws). The operator's post-run probe settled the deferred restart question: instant cm_create → bare **HTTP 403** twice, same token queued after a pause ⇒ **403 = seat cooldown, token reusable** — full analysis `docs/RTSP.md` §31 |
+| 25 | XLIV | **THE LOTTERY'S FIRST LIVE FLIGHT — AND ITS FIRST BUG CATCH**: F5 stopped at draw 1 of 5 because `run_session`'s exit code returned **0 for any session with ≥1 datagram** (pre-D8 legacy — runs 23/24 exited 0 too, nobody consumed the code until the lottery did) so the frozen draw looked like a keeper. **F6** ships the honest contract (only `"time"`/`"expect_frames"` exit 0; every terminal stop_reason exits 1) + the corrected lottery stop rule (only rc 1 re-draws; rc 0 = keeper; 2/3/Ctrl-C = abort). The single draw still paid twice: **F2 read the FULL `SESSION_LENGTH_TIMER` — `beforeEventMS:3599657` ≈ a ONE-HOUR budget — killing the session-limit theory of the early freezes**; and it was the first LOSSY draw on record (gaps 2, fec_repaired 6, nack 5, withheld 90, lossy_frames 5 — yet **257/257 AUs decoded**; BWE all-time peak **45.9 Mbps**) on a DIFFERENT rig (80.250.97.36). 0x0101 returned; `sctl_unknown` = opcode 0x020e (the reference doesn't know it either); the EA-Desktop drsProfile misclassification reproduced exactly; media died at **11.59 s** — the ~10–12 s band is now **5 of 9 draws**. Target T10 on the XLIII build: **ALL PASS 79** (knrx 243) — full analysis `docs/RTSP.md` §32 |
 
 **Round XXXVIII shipped** (target-verified in round XXXIX: **T10 ALL PASS
 79 on Win7**, `test_knbw` reported 387 checks on target = sandbox — the
@@ -328,21 +330,51 @@ driver-side only, no wire-format change):**
   **112** JSON printf blocks (summary unchanged **74 = 74**).
   **Build stamp → `"XLIII"`.**
 
-**Sandbox gates at XLIII close (all green):** `build_native_tests.sh`
-**NATIVE TESTS PASS** (per-suite raw-recipe counts unchanged: knrx
-218, kninput 548, knbw 387, knselftest 117; paranoid legs incl.) ·
-`cross_check.sh` PASS ×2 arches, zero warnings · ctest **20/20 mbedTLS
-+ 20/20 schannel** · `sandbox_session_e2e` **43/43** (rebuilt per the
-header recipe) · T10 POSIX dry **69 checks, 0 failed** · T13 **ALL
-PASS 63** · summary-printf validation **112** blocks, 0 mismatches ·
-lottery mechanics field test: 3 draws / 2 gaps / wall 4.0 s exact,
-envelope `json.loads` **10/10**, exit code propagated, bounds
-(`--lottery=0/101`, `--lottery-gap=99999`) → usage exit 2, single-draw
-default emits ZERO lottery lines. ASan/UBSan not re-run (no wire or
-decoder code touched; the XLI.1 sanitized run stands).
+**Round XLIV shipped (run-25 analysis + the F6 exit-code fix —
+driver-side only, no wire-format change):**
+
+- **Run 25's verdict** (RTSP §32): the lottery stopped at draw 1 of 5
+  — our own bug, caught live on its first flight. The draw itself
+  delivered the project's biggest single control-plane fact yet: the
+  FULL `SESSION_LENGTH_TIMER` body (`timerType:"DEFAULT",
+  presentDurationMS:0, beforeEventMS:3599657`) — the rig granted a
+  ONE-HOUR session budget, so the ~10–12 s freezes are conclusively
+  NOT a session limit. Plus the first lossy draw (gaps 2 / fec 6 /
+  nack 5 / withheld 90 — 257/257 decoded anyway: the receive pipeline
+  is now loss-proven live), a different rig IP freezing identically,
+  and the fifth consecutive ~10–12 s draw.
+- **F6a**: the honest exit code — only the natural endings (`"time"`,
+  `"expect_frames"`) can exit 0; `recovery_exhausted`,
+  `server_termination`, `socket_error`, `queue_timeout`, `terminated`,
+  `session_not_found`, `interrupted`, `cm_poll_*`, `signal` all exit
+  1, matching usage()'s documented contract ("1 failed verdict") for
+  the first time. Historical note: runs 23–25 exited 0 despite
+  freezing; nothing in the gate set consumes the live-session exit
+  code, so no verdict ever depended on the old behaviour.
+- **F6b**: the lottery stop rule — re-draw ONLY on rc 1; rc 0 = keeper
+  (stop and keep the rig); rc 2/3 = usage/internal (a re-draw cannot
+  fix them — stop); `g_knv_stop` (Ctrl-C) = stop. Sandbox-proven: on
+  the TLS-less build `--lottery=5` now ends after draw 1 with
+  `last_rc:3`.
+- **Evidence**: no new line shapes (the F5 envelope carried the
+  diagnosis — `lottery_draw rc:0` next to `stop_reason:
+  "recovery_exhausted"` IS the bug report); validator unchanged at
+  **112** blocks, summary **74 = 74**. **Build stamp → `"XLIV"`.**
+
+**Sandbox gates at XLIV close (all green):** `build_native_tests.sh`
+**NATIVE TESTS PASS** (per-suite counts unchanged: knrx 218, kninput
+548, knbw 387, knselftest 117; paranoid legs incl.) · `cross_check.sh`
+PASS ×2 arches, zero warnings · ctest **20/20 ×3** (native + mbedTLS +
+schannel) · T10 POSIX dry **69 checks, 0 failed** · T13 **ALL PASS
+63** · summary-printf validation **112** blocks, 0 mismatches,
+summary skeleton `json.loads` PASS · F6b field test (`--lottery=5` on
+the TLS-less build: stops after draw 1, `last_rc:3`, exit 3, envelope
+`json.loads` 4/4, stamp XLIV) · `sandbox_session_e2e` 43/43 carried
+from XLIII (e2e links no file XLIV touched) · ASan/UBSan carried from
+XLI.1 (no wire/decoder code touched in XLIII/XLIV).
 
 **Codebase shape:** 28 `streamer/src/*.c` + 26 `streamer/include/kn/*.h`;
-the production binary is `knvstd` (`knvstd_main.c`, 6728 lines: modes
+the production binary is `knvstd` (`knvstd_main.c`, 6744 lines: modes
 `--capture`, `--decode`, `--replay-capture`, `--session`, `--selftest`,
 `--list-selftests`); 15 registered production self-tests; 18 native test
 suites. Third-party (vendored, gitignored, re-stage if cleaned):
@@ -353,8 +385,8 @@ tiny-AES-c, crypto-algorithms-sha1, usrsctp, mbedTLS 3.6.0 (+framework).
 > The operator asked for **very simple, step-by-step** instructions —
 > this section is written to be followed literally, one step at a time.
 
-**Step 1 — sync these 4 files** (round XLIII delta, on top of the
-already-synced XLII set):
+**Step 1 — sync these 4 files** (round XLIV delta, on top of the
+already-synced XLIII set):
 
 - `streamer/src/knvstd_main.c`
 - `docs/RTSP.md`
@@ -364,45 +396,46 @@ already-synced XLII set):
 **Step 2 — clean rebuild + T10 on Win7** (the usual procedure):
 delete the build tree, build, run T10 in full.
 Expected verdict: **ALL PASS 79**, `test_knrx` **243**,
-`test_kninput` **548**, `input.vectors` **50** — XLIII changed no
-test file, so these are IDENTICAL to run 24's fresh T10.
+`test_kninput` **548**, `input.vectors` **50** — identical to run
+25's fresh T10 (XLIV changed no test file).
 
-**Step 3 — run 25, the lottery.** ONE command (replace `<TOKEN>`):
+**Step 3 — run 26, the lottery — the SAME command as run 25** (only
+the file names change; replace `<TOKEN>`):
 
 ```
-knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 --session-seconds=360 --lottery=5 --lottery-gap=30 --session-au-dir=logs\aus_r25 > logs\run25.log
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 --session-seconds=360 --lottery=5 --lottery-gap=30 --session-au-dir=logs\aus_r26 > logs\run26.log
 ```
 
-What happens: knvstd attempts the FULL session up to **5 times** in
-one invocation. Each attempt = queue → activation → media → (if the
-rig freezes) `recovery_exhausted` after ~20 s → a 30 s pause → the
-next attempt. If the server answers "seat busy" (HTTP 403), knvstd
-now waits 20 s and retries ON ITS OWN (`cm_create_403_backoff`
-lines). If any attempt survives the full 360 s, the lottery stops
-early — that draw is a keeper. Ctrl+C ends everything. Expect
-~15–40 minutes total (queues vary).
+What happens NOW (after the F6 fix): each dead draw (`recovery_
+exhausted`) exits 1 → the lottery waits 30 s and **draws again**, up
+to 5 times. It stops early ONLY if a draw survives the full 360 s
+(that is a keeper — leave the machine alone, it is streaming). HTTP
+403 seat cooldowns are handled automatically (`cm_create_403_
+backoff` lines are NORMAL between draws). Ctrl+C ends everything.
+Expect ~20–60 minutes total (5 × queue + ~20 s per dead draw +
+pauses).
 
-**Step 4 — check the first line** of `logs\run25.log`:
-`{"mode":"build","compiled":"...","round":"XLIII"}` — if it says
-`XLII`, the rebuild did not take; redo Step 2.
+**Step 4 — check the first line** of `logs\run26.log`:
+`{"mode":"build","compiled":"...","round":"XLIV"}` — if it says
+`XLIII`, the rebuild did not take; redo Step 2.
 
 **Step 5 — send back:**
 
-1. `logs\run25.log` — the WHOLE file (all five summaries live in it);
-2. the entire `logs\` directory (the last draw's knlog channels);
+1. `logs\run26.log` — the WHOLE file (every draw's summary is in it);
+2. the entire `logs\` directory (the LAST draw's knlog channels);
 3. the fresh `T10_skrot.txt` + `T10_wynik.txt` pair.
 
-**Read matrix for run 25 (agent side, RTSP §31.7):** any draw
-surviving > 60 s of media ⇒ the long-draw mode is reachable on
-demand and stage 2 can close against a real gameplay stream; all
-five draws ~10.5 s ⇒ the modal behaviour is measured, not suspected,
-and the lottery itself is the practical stage-2 exit; a draw carrying
-`SESSION_LENGTH_TIMER` ⇒ F2 finally reads the rig's own session-limit
-statement; `cm_create_403_backoff` lines followed by a queued draw ⇒
-F4 proven live and the seat-cooldown bound measured. If the operator
-can supply a gameplay-reaching app id, swapping `--session-app=`
-stays the single most valuable variable — the Arknights portal draws
-are now well-characterised.
+**Read matrix for run 26 (agent side, RTSP §32.5):** five dead draws
+⇒ the ~10–12 s modal band is confirmed at n=5 in one sitting and the
+practical stage-2 exit is a persistence lottery (or a gameplay-
+reaching app); ANY draw surviving > 60 s ⇒ long draws are reachable
+on demand — keep drawing until a full-length keeper closes stage 2;
+`lottery_summary draws:K last_rc:0` with K < 5 ⇒ a keeper happened —
+the run that changes everything. If the operator can supply a
+gameplay-reaching app id, swapping `--session-app=` remains the
+single most valuable variable (the Arknights portal draws are now
+fully characterised: 1-hour budget, EA-Desktop profile, ~10–12 s
+modal death).
 
 **Still deferred (unchanged):** D-t13 (decode-side watchdog), G3
 keyboard/wheel/text (deprioritised — input is eliminated as a
@@ -489,7 +522,7 @@ knvstd --session:  CloudMatch create/poll (kn_cm)  →  session context
    → evidence: one JSONL line per event; summary JSON at exit.
 ```
 
-## 8. Traps that will bite you (curated; full list in docs/INTEGRATION.md rev 34 §traps)
+## 8. Traps that will bite you (curated; full list in docs/INTEGRATION.md rev 35 §traps)
 
 1. **Clock exactness is load-bearing**: all estimator math runs on
    **integer nanoseconds** (int64) exactly like the reference's
@@ -570,6 +603,13 @@ knvstd --session:  CloudMatch create/poll (kn_cm)  →  session context
     off automatically (20 s × 3, `cm_create_403_backoff` lines). The
     JSON-body sibling `cloud_status 11 = SESSION_LIMIT` is a
     different signal and is deliberately NOT retried.
+14. **The live-session exit code only became honest in XLIV (F6a)**:
+    pre-XLIV builds exited **0 even for `recovery_exhausted`** (any
+    media at all ⇒ 0) — which is why run 25's lottery stopped at
+    draw 1. Since XLIV, exit 0 MEANS "the draw survived its full
+    `--session-seconds` (or met `--session-expect-frames`)"; every
+    terminal stop_reason exits 1. Never build automation on pre-XLIV
+    exit-code folklore.
 
 ## 9. Repository map
 
@@ -629,6 +669,7 @@ logs/                   ALL logs/evidence (gitignored): knvstd --log-dir
 | XLI.1 | **the operator's answers killed the takeover theory and revived idle/no-input as the prime freeze suspect** (the web client was never attached during run 22; the app matched the 0x010a shortName; ZERO input ever reached the session — survival is monotone in fidelity: ~10-11 s → ~30.5 s → ~45 s, and input was the one missing item) → **G3's first slice ships**: `kn_input_mouse_relative` byte-exact against the reference's OWN Rust golden (nvst_input.rs:1888-1911), routed to control_partial (**sid 6**, unordered PR-TTL 300 ms), as a gated **10 Hz ±1 px zero-net-drift jiggle** on the existing outbox path (gate: the pump's volatile activation latch). kninput 446→**548**, `input.vectors` 48→**50**, KAT singles 11→13, summary 73→**74** specs, stamp **XLI.1**. Run 23 = the decision matrix (RTSP §29.7): survival past ~45 s ⇒ idle policy CONFIRMED; freeze with the jiggle flying ⇒ input eliminated → rig-side, and D8 dates it (`recovery_exhausted`, early end) |
 | XLII | **run 23 = the decision-matrix run: THE JIGGLE FLEW (198 reports, sid 6, 0 drops) AND THE FREEZE CAME ANYWAY at 10.58 s** — earlier than run 22's zero-input 41 s ⇒ **input eliminated**, the fidelity ladder is dead, media survival (1.2–41 s over runs 16–23) is a **rig-side lottery**. **D8's live debut to the second** (stall+5 s → recover + 50 IDR/PLI → +5 s → terminal → `recovery_exhausted`, exit 20.6 s vs run 22's 248 s dead air). 0x010a IDENTICAL to run 22: Arknights never left its **Qt launcher portal** (foreground lost pid 0) — the untested variable is the APP. WSS never ponged in any run. Target T10 **79** (knrx +15=243 cmake-recipe, kninput 548, vectors 50). Ships **F2** (010a cap 800→2400 — `SESSION_LENGTH_TIMER` was self-truncated in both runs) + **F3** (`rel_ms` on ctrl evidence) + stamp XLII; jiggle stays ON. Run 24 = a gameplay-reaching app + optional 2–3 lottery draws |
 | XLIII | **run 24 = lottery draw #4, a near-exact CLONE of run 23** (freeze 10.43 s vs 10.58 s of media, `recovery_exhausted` 20.54 s vs 20.56 s; 314/314 AUs, zero gaps, jiggle 200/0) — **F3** proved all control traffic arrived inside the first 10 s (the freeze lands on a silent control plane); **F2** decoded the eight-notification burst in full (t+257–264 ms; two payloads had been truncated by the old 800 hex cap) and exposed the rig's classification: the Arknights session runs under **`drsProfileName:"EA Desktop"`** (it follows the Qt window, not our cmsId); NO SESSION_LENGTH_TIMER this draw — the set varies per draw. The ~10.5 s mode is now the plurality (4 of 8 draws). Operator probe: instant cm_create after exit → bare **HTTP 403** ×2, same token queued after a pause ⇒ seat cooldown, token reusable. Ships **F4** (403 backoff 20 s × 3, TLS rebuilt per retry) + **F5** (`--lottery=N`/`--lottery-gap=SEC` in-process re-draw driver with `lottery_gap/draw/summary` envelope, early stop on rc==0, full re-callability audit of `run_session()`) + stamp **XLIII**; validator 112 blocks. Run 25 = the first unattended lottery: five draws, one command |
+| XLIV | **run 25 = the lottery's first live flight caught our own bug**: it stopped at draw 1 of 5 because `run_session` exited **0 for any session with ≥1 datagram** (pre-D8 legacy contract drift — runs 23/24 exited 0 too) and F5 read rc 0 as "keeper". **F6a** restores the documented contract (only `"time"`/`"expect_frames"` exit 0; every terminal stop_reason exits 1) and **F6b** fixes the stop rule (only rc 1 re-draws; 0 = keeper; 2/3/Ctrl-C = abort). The lone draw still made the round: **F2 read the FULL `SESSION_LENGTH_TIMER` — `beforeEventMS:3599657` = a ONE-HOUR budget ⇒ the session-limit theory of the ~10–12 s freezes is DEAD**; first LOSSY draw (gaps 2, fec 6, nack 5, withheld 90 — 257/257 decoded: the pipeline is loss-proven live; BWE record 45.9 Mbps) on a different rig IP; 0x0101 back; 0x020e logged as `sctl_unknown` (the reference doesn't know it either); EA-Desktop drsProfile reproduced. Media 11.59 s — the band is **5 of 9 draws**. Target T10 (XLIII build): ALL PASS 79, knrx 243. Stamp **XLIV**. Run 26 = the same command — five real draws |
 
 ## 11. The user protocol
 
