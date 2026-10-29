@@ -163,11 +163,16 @@ Configs 16-31 are CELT NB/WB/SWB/FB × 2.5/5/10/20 ms
 `0xF8` as its default 20 ms packet; a mis-derived table shifts every
 granulepos.
 
-## 6. knvstd wiring (`knvstd_main.c`, stamp XLVIII)
+## 6. knvstd wiring (`knvstd_main.c`, stamp XLIX)
 
 - **CLI**: `--session-audio-out=F.opus` (help text updated; no file →
   counters still run, no capture). Threaded through `run_session(…,
-  audio_out, log_dir)`; both call sites (single + lottery).
+  audio_out, draw_index, log_dir)`; both call sites (single =
+  `draw_index` 0, lottery = the draw number). **XLIX/F13**: a lottery
+  draw writes its OWN file `<stem>_d<draw><ext>` (`audio.opus` +
+  `--lottery=4` → `audio_d1.opus … audio_d4.opus`), built with the
+  bounded-fill idiom (`pump_set_str` + `memcpy`) — never
+  `snprintf("%s")`, which `-Wformat-truncation=2` cannot prove.
 - **Arm** (inside the `dtls_ready` event, right after `srtp_prof`):
   `kn_dtls_srtp_export` → `kn_arx_init/set_srtp(server half)` →
   `fopen` + `kn_ogg_mux_init/begin` → one stdout event + one knlog
@@ -181,11 +186,21 @@ granulepos.
   the pump mirrors `arx.st` + Ogg totals into `pump.st.audio_*` after
   each packet so the snapshot handshake stays race-free (the pump.st
   discipline).
-- **Close** (teardown, after `sess_ctrl_ping_stop`, skipped while
-  `pump_persist` — closing under a live writer would race):
-  `kn_ogg_mux_finish` (EOS) + `fclose` + `audio_close` event
+- **Close** — **XLIX/F12 (was dead code in XLVIII)**:
+  `sess_audio_file_close(&pump, &ice_st)` runs `kn_ogg_mux_finish`
+  (EOS) + `fclose` + the ogg-totals mirror + the `audio_close` event
   (pages/bytes/packets/payload_bytes/red_packets/srtp_fail/seq_loss/
-  write_errors) + knlog MEDIA line.
+  write_errors) + the knlog MEDIA line. It is called **immediately
+  after `sess_pump_stop()`** on both live teardown paths (D21: the pump
+  thread is the single writer — once joined, main owns the FILE*; that
+  is the race the XLVIII `!pump_persist` gate was avoiding, and joining
+  first removes it), plus once defensively at the `teardown:` label.
+  Idempotent (`audio_file_on` is cleared), so `audio_close` fires
+  **exactly once per draw**. The XLVIII gate was wrong: `pump_persist`
+  is 1 for every live session, so the block never ran — run 30 has
+  `audio_arm` ×2 and `audio_close` ×0, no EOS page, and a leaked draw-1
+  FILE* across the lottery gap (the 2 505-byte scrambled page at the
+  draw boundary in the delivered `audio.opus`).
 - **Summary**: the 34-key `"audio"` block sits after `"recovery"`:
   armed, srtp_derived, profile, pt, red_pt, channels, clock_hz,
   bundle_rtp_in, bundle_rtcp_in, the 17 kn_arx counters + first_ms/
@@ -199,8 +214,11 @@ granulepos.
 
 ## 7. Run 30 — first flight (expectations + reaction matrix)
 
-Command (NO `--session-au-dir` — the ~600 s ceiling makes AU dumps
-pointless; §36):
+Command (NO `--session-au-dir` — at the time, the ~600 s ceiling was
+believed to make AU dumps pointless, §36. **XLIX withdrew the ceiling
+reading** (§37.4) but the choice stands for a better reason: the audio
+file *is* the content probe, and run 30's draws only lasted 75 s /
+197 s of media):
 
 ```
 knvstd.exe --session --session-token=<TOKEN> --session-app=<APP> \
@@ -225,6 +243,14 @@ anything in the band with `red_packets+packets` ≈ const is fine);
 | `packets` healthy, file unplayable | muxer/framing issue | `audio_close.write_errors` + `ogg.dropped_packets` localize it; send the .opus back |
 | `seq_loss` huge, `packets` healthy | audio SSRC epoch churn (rig restarts the stream) | benign if `ssrc_changes` tracks it (D-a2 resets per epoch) |
 
+### 7.1 Reaction-matrix rows ADDED by run 30
+
+| observation | reading | action |
+|---|---|---|
+| all counters healthy (as above) but the decoded PCM is a constant ±3 LSB noise floor | the rig encoded **silence** — the app never produced audio (launcher-parked, muted, or the game never started) | **read the video and the 0x010a burst first**: AU sizes ~1 KB/frame + no game process = nothing to hear. Not an audio-path bug; do not "fix" kn_arx. Re-run with a draw that reaches gameplay |
+| `audio_close` missing from stdout while `audio_arm file:1` is present | the teardown close never ran (the XLVIII `!pump_persist` gate — **fixed by F12/XLIX**) | pre-XLIX builds: the file has no EOS page and, under `--lottery`, the next draw reopens the same path with the previous `FILE*` leaked open (run 30's 2 505-byte scrambled page at the draw boundary). XLIX+: one `audio_close` per draw, one `audio_d<N>.opus` per draw |
+| first 1–2 audio packets of a stream carry TOC `0x7F`/`0x70` (CELT-NB configs) instead of `0xEC` | the rig encoder's warm-up frames | benign; `kn_opus_packet_samples48k` handles every config — but a future decoder must not assume a constant config across the stream |
+
 ## 8. Decision ledger (F11)
 
 - **D-o1** page flush at 255 segs / 16384 B / 48 pkts; **D-o2** no
@@ -237,3 +263,83 @@ anything in the band with `red_packets+packets` ≈ const is fine);
   deferred follow-ons — the .opus file IS the deliverable for now.
 - Audio RTCP (`bundle_rtcp_in`) is counted, not parsed — no RR/SR
   consumption for audio yet.
+
+## 9. Run 30 — RESULT (round XLIX): extraction PROVEN, content SILENT
+
+Full analysis: `docs/RTSP.md` §37. The short version for anyone touching
+this stage:
+
+**Everything the §7 "healthy" column asked for arrived, on both draws.**
+`audio_arm srtp_derived:1 armed:1 profile:1 pt:111 red_pt:63 channels:2
+clock_hz:48000 file:1` ×2 · `packets` 15 610 / **40 000** = `bundle_rtp_in`
+(no RTP datagram was ever dropped by the audio path) · `srtp_fail:0`,
+`srtp_nokey:0`, `replay_reject:0`, `malformed:0`, `toc_invalid:0`,
+`pt_filtered:0`, `padded:0` · `red_packets` = `packets`, `red_blocks` =
+2 × `red_packets`, `red_invalid:0` (the rig sends **every** audio packet
+as RFC 2198 RED with one redundancy block — D-a1's arrival-order emit is
+therefore loss-protected by the server itself) · `seq_loss/reorder/dup`
+0/0/0, `ssrc_changes:0` · `last_ms − first_ms` = 78.029 s / **199.952 s**
+= `packets × 20 ms` exactly · `ogg.dropped_packets:0`,
+`ogg.write_errors:0` · the delivered file is a valid OggOpus stream
+(ffprobe: Opus 48 kHz stereo 199.92 s, 83 kb/s; 834 pages, `seq`
+contiguous, `granulepos` monotone, `last_granule` = Σ TOC samples).
+**The DTLS-SRTP exporter's SERVER half (`km+16` key / `km+46` salt) is
+proven against live traffic** — 40 000/40 000 HMAC-SHA1-80
+authentications cannot pass with a wrong key half.
+
+**But the audio is digital silence**: decoded 199.44 s / 19 146 240
+samples → mean −91.0 dB, max −80.8 dB, per-10 s RMS 0.51 LSB everywhere,
+every sample |x| < 8. The packets are structurally perfect CELT-FB 20 ms
+(TOC `0xEC` on 39 929 of 39 936 readable audio packets), i.e. the rig
+**encoded silence**: no game ever ran in either draw (the 0x010a burst
+carries only `upc.exe` / `UplayService.exe` / `UplayWebCore.exe`; the AU
+sizes are 0.8–1.2 KB/frame = a static launcher window for 75 s / 200 s).
+The operator's browser control measured the boot: **≈2 min 19 s from
+stream start to gameplay audio** (queue→stream 2:26, launcher→game 1:08,
+game→first notification 1:11, sound from game start). Our draws died at
+75 s and 197 s of media.
+
+**Consequence for the stage plan:** F11's extraction contract is CLOSED
+(sandbox KAT + live zero-error proof). What is *not* proven yet is a
+**content-bearing** capture, and that is not an audio-stage problem — it
+needs a draw that (a) outlives ≈150 s and (b) reaches the game. Opus
+**decode** (PCM/WAV) + `kn_audio` playback stay the follow-on; they are
+now unblocked (the .opus files are valid input), but there is no point
+spending a round on them until one capture actually contains sound.
+
+### 9.1 What XLIX shipped on top of run 30 (F12–F15) and what run 31
+measures
+
+- **F12 — the close was dead code.** `sess_audio_file_close` was gated on
+  `!pump_persist`, and `pump_persist` is 1 in every live session, so
+  `audio_close` NEVER fired: no EOS page, no `fclose`, and under
+  `--lottery` the next draw reopened the same path with the previous
+  `FILE*` leaked open (run 30's 2 505-byte scrambled page at the draw
+  boundary, offset [815 462, 817 967)). XLIX closes the file **after
+  `sess_pump_stop` on both exit paths** plus a defensive close at
+  `teardown:`. Expect exactly one `audio_close` per armed draw.
+- **F13 — one file per draw.** `--session-audio-out=audio.opus` with
+  `--lottery=N>1` now writes `audio_d1.opus`, `audio_d2.opus`, … (single
+  draw, or `N=1`: the literal path, unchanged). This removes the
+  cross-draw interleaving hazard entirely instead of relying on the
+  close ordering.
+- **F14 — the interleaved A/B instrument.** With `--lottery>1` and
+  `--session-jiggle` set, ODD draws run with the jiggle ARMED and EVEN
+  draws with it DISARMED, and each draw emits a `lottery_arm` line
+  (`draw:N jiggle:1|0`). One run therefore answers two questions at
+  once: does input keep the session alive past ≈600 s (the idle-policy
+  hypothesis that replaced the withdrawn ceiling), and does a surviving
+  draw reach gameplay audio.
+- **F15 — `--lottery-stop-on-keeper=0|1`** (default 1 = the historical
+  behaviour: stop the lottery on the first keeper). Run 31 needs **0**,
+  otherwise an early keeper ends the A/B before the OFF arm is measured.
+  The pre-XLIX stop rule also had a logically dead first draft (an
+  `lrc==0` return swallowed by the surrounding `lrc != 1` break) — do not
+  re-introduce the flat form.
+
+Run-31 expectation for this stage: `audio_d<N>.opus` × up to 4, each with
+its own `audio_arm` + `audio_close`, `srtp_fail/malformed/toc_invalid/
+seq_loss` all 0, and — the actual prize — a **non-silent** decode
+(per-10 s RMS well above ~1 LSB) in whichever draw reaches gameplay.
+Read the arms against each other: if the jiggle-ON draws outlive ≈600 s
+and the OFF draws do not, the idle-policy hypothesis is confirmed.

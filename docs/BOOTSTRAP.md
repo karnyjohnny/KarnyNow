@@ -775,33 +775,76 @@ language-independent. Everything **you** write is in English (D12).
 **Do not start stage 1 until G0.2 is closed**, because the presentation path determines the
 shape of the video loop.
 
-> **Status marker (round XLVIII, 2026-10-29 — the definitions above are
+> **Status marker (round XLIX, 2026-10-29 — the definitions above are
 > unchanged; this note only records progress):** **STAGE 2 CLOSED
-> (XLVII); STAGE 3 UNDERWAY — the audio bundle extraction is BUILT.**
-> Runs 28/28b delivered two full-length keepers (G2 met and exceeded);
-> runs 29/29g then measured the **~600 s server ceiling** from both
-> sides (polite `0x0109`/TERM at 599.1–599.2 s; silent gradual decay
-> at 594 s) and produced the **first gameplay-reaching keeper**
-> (Watch Dogs: Legion, flawless 599.1 s / 17 970 AUs, zero gaps —
-> RTSP §36). XLVIII ships **F11**: `kn_arx` (bundle SRTP audio rx) +
-> `kn_ogg` (OggOpus capture) + the RFC 5764 §4.2 exporter +
-> `--session-audio-out` + the summary `"audio"` block — sandbox-proven
-> (audio.vectors 188 checks; test_knogg 163; test_knarx 62; ctest
-> 22/22 ×2; T10 dry 72), **target-pending (run 30)**. G3's "audible
-> audio" bar is met as EXTRACTION (a playable .opus file); decode-to-
-> speaker is the deferred follow-on. Remaining stage-3 scope after
-> run 30: G3 keyboard/wheel/text, G4 cursor payloads, G1 handshake
-> timeout, D-t13 — see `START-HERE.md` §3/§4, `docs/BUNDLE-AUDIO.md`,
-> `docs/RTSP.md` §36.
+> (XLVII); STAGE 3 UNDERWAY — audio extraction is BUILT AND
+> LIVE-PROVEN; the ceiling finding of XLVIII is WITHDRAWN.**
+> Run 30 (Watch Dogs: Legion, audio flight) came back: the
+> extraction pipeline is mechanically flawless — both lottery draws
+> armed (`armed:1 srtp_derived:1 file:1`), zero `srtp_fail` /
+> `malformed` / `toc_invalid` / `seq_loss` across 15 610 + 40 000
+> packets (40 000/40 000 HMAC-SHA1-80 authenticated proves the
+> server exporter half too), granulepos 9 596 160 = 48 000 x 199.92 s
+> exactly, valid 834-page OggOpus. The CONTENT is digital silence
+> (-91 dB mean, +/-3 LSB): the game never reached launched state
+> inside our 78 s / 200 s media windows. **The operator then
+> live-tested the same title in the browser** — Legion DOES launch
+> and DOES make sound (queue->stream 2 m 26 s; launcher->game
+> 1 m 08 s; game->first actionable notification 1 m 11 s; audio from
+> launch onward, continuing under the notification). That overturns
+> two XLVIII conclusions at once: there is **no ~600 s server
+> ceiling** (the operator is on the **Warsaw** `cloudmatchbeta`
+> pool, Free tier, 1 h browser sessions, never cut at 10 min), and
+> "Legion never starts" was a *timing* verdict, not a *capability*
+> one. Leading hypothesis for the 599.1-599.2 s deaths: server-side
+> **idle / no-input** policy. XLIX therefore ships four fixes:
+> **F12** `sess_audio_file_close` after `sess_pump_stop` on BOTH
+> exit paths + a defensive close at `teardown:` (run 30 leaked the
+> FILE* across the lottery gap — no EOS, corrupt span
+> [815 462, 817 967)); **F13** per-draw `audio_d<N>.opus`; **F14**
+> lottery alternates the jiggle (odd = ON, even = OFF) and emits a
+> `lottery_arm` line — one run answers both the audio question and
+> the idle question; **F15** `--lottery-stop-on-keeper=0|1`
+> (default 1; 0 is required for an A/B). Sandbox-proven: native
+> battery PASS zero warnings (knogg 163, knarx 62, knselftest 118,
+> kninput 548), cross `-Werror` x2 arches PASS with **0 SKIPs**,
+> ctest **22/22** on BOTH backends, T10 POSIX dry **ALL PASS 72**
+> (unchanged — no suite/self-test/check was added; the TARGET
+> expectation for run 31 stays **82**, which is what run 30's
+> XLVIII-build T10 scored).
+> **Target-pending: run 31.** G3's "audible audio" bar stays met as
+> EXTRACTION; decode-to-speaker remains the deferred follow-on.
+> Remaining stage-3 scope after run 31: G3 keyboard/wheel/text (the
+> next input candidate is a click / ENTER to clear the in-game
+> notification), G4 cursor payloads, G1 handshake timeout, D-t13 —
+> see `START-HERE.md` §3/§4/§8, `docs/RTSP.md` §37,
+> `docs/INPUT.md` §9, `docs/BUNDLE-AUDIO.md` §6/§7.1/§9.
 >
-> **Sandbox gate canon at XLVIII close:** native battery PASS (zero
-> warnings; new baselines test_knogg **163**, test_knarx **62**,
-> test_knselftest **118**) · cross `-Werror` ×2 arches PASS · ctest
-> **22/22** ×2 backends · T10 POSIX dry **ALL PASS 72** (target
-> expectation **82**) · T13 ALL PASS 63 (unchanged; no wire change) ·
-> e2e **43/43** · summary skeleton canon **113 recursive keys**
-> (`tools/check_summary_skeleton.py`) · selftest registry **16**
-> (audio.vectors 188 checks, gated).
+> **Sandbox gate canon at XLIX close:** native battery PASS (zero
+> warnings; baselines test_knogg **163**, test_knarx **62**,
+> test_knselftest **118**, test_kninput **548**) · cross `-Werror`
+> x2 arches PASS, **0 SKIPs** (all four vendor trees staged:
+> tiny-aes-c `23856752f`, crypto-algorithms-sha1 `cfbde484`,
+> mbedtls v3.6.0 `2ca6c285` + framework `750634d3`, usrsctp
+> `c625e219` — note the correct URL is
+> `github.com/sctplab/usrsctp`) · ctest **22/22** x2 backends
+> (`build/net-mb`, `build/net-sch`; cmake DOES build `knvstd` in both
+> trees — round XLIX stamp verified in all three sandbox binaries —
+> but **without FFmpeg**, because the owner's `build/ffmpeg/` dev
+> tree is gitignored: `kn_decode` compiles as the honest stub and
+> `decode.synthetic` reports `skipped`. That is the designed
+> no-FFmpeg mode (`CMakeLists.txt` :146-193), not a failure) · T10
+> POSIX dry **ALL PASS 72** (target expectation **82**; zero compiler
+> warnings) · T13 **ALL PASS 63** against the mbedTLS cmake binary
+> (`--knvstd build/net-mb/knvstd`; no wire change) — ALL PASS **51**
+> with ONE by-design SKIP (the gcm256 leg) against the bare
+> `build/knvstd`, which is cm128-only · e2e **43/43** (harness rebuilt
+> from XLIX sources, `-Wall -Wextra`, zero warnings) · summary skeleton
+> canon **113 recursive keys**, re-validated against run 30's real
+> stdout (`tools/check_summary_skeleton.py`: 113 == 113, F12–F15 add
+> and remove no key) · selftest registry **16** (audio.vectors 188
+> checks, gated) · knvstd stamp **XLIX** in all three sandbox binaries
+> (`build/knvstd`, `build/net-mb/knvstd`, `build/net-sch/knvstd`).
 
 ---
 

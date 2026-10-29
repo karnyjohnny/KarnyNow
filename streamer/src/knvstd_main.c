@@ -104,13 +104,24 @@ static void usage(void)
            "         [--session-expect-frames=N] [--session-au-dir=DIR]\n"
            "         [--session-audio-out=F.opus] (capture the rig's\n"
            "          bundle audio to an OggOpus file; needs the DTLS-SRTP\n"
-           "          key exporter — see the audio_arm event)\n"
+           "          key exporter — see the audio_arm event. Round XLIX:\n"
+           "          under --lottery=N>1 each draw writes its OWN file\n"
+           "          F_d<draw>.opus and every draw closes it with the EOS\n"
+           "          page — an audio_close line per draw is the proof)\n"
            "         [--session-jiggle=MS] (mouse-jiggle period in ms;\n"
            "          default 0 = OFF — run 27 proved the jiggle shortens\n"
            "          draws; 100 restores the legacy XLI.1 behaviour)\n"
            "         [--lottery=N] [--lottery-gap=SEC]  (re-draw the WHOLE\n"
            "          bring-up to N times after a terminal draw, SEC pause\n"
-           "          between draws, default 20; round XLIII media lottery)\n"
+           "          between draws, default 20; round XLIII media lottery.\n"
+           "          Round XLIX: with N>1 the jiggle ALTERNATES per draw\n"
+           "          (odd = --session-jiggle, even = OFF) so one run is a\n"
+           "          same-evening interleaved A/B — trap 17; each draw\n"
+           "          prints its arm in a lottery_arm line)\n"
+           "         [--lottery-stop-on-keeper=0|1] (default 1 = stop the\n"
+           "          lottery on the first surviving draw, the XLIII rule;\n"
+           "          0 = run every draw — REQUIRED for an interleaved A/B,\n"
+           "          otherwise the first keeper ends the experiment)\n"
            "       [--log-dir=DIR]   (WASAPI synthetic PCM unless --no-audio)\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
            "  knvstd --list-selftests\n"
@@ -3088,6 +3099,69 @@ static void sess_audio_emit(void *ctx, const uint8_t *payload, size_t len,
         (void)kn_ogg_mux_packet(&p->ogg, payload, len, samples48);
 }
 
+/* round XLIX (F12): close the bundle-audio capture — flush the final
+ * Ogg page (EOS), fclose the stream, mirror the muxer totals into the
+ * snapshot struct (the summary's "audio" block reads them) and print
+ * the audio_close evidence line.
+ *
+ * WHY THIS FUNCTION EXISTS: round XLVIII gated the whole block on
+ * `!pump_persist`, and pump_persist is 1 for EVERY live session (the
+ * bundle worker outlives PLAY by design) — so in run 30 the block NEVER
+ * RAN: no EOS page, no fclose, no audio_close line (run30.log has
+ * audio_arm ×2 and audio_close ×0), and draw 1's FILE* was leaked open
+ * across the lottery gap (draw 2's memset(&pump,0,...) dropped the
+ * handle without closing it). The delivered audio.opus carried a
+ * 2505-byte scrambled region at exactly the draw1→draw2 boundary
+ * (815462..817967 = one page's span; the stale tail bytes of draw1's
+ * last page are still legible inside it) — the file was 99.88 % valid
+ * (834 of 835 pages, ffmpeg played it) but one page was destroyed and
+ * the stream never got its EOS.
+ *
+ * CALL CONTRACT: only AFTER sess_pump_stop() has joined the worker —
+ * the pump thread is the single writer (D21); once it is joined the
+ * main thread owns the FILE* and the muxer. Idempotent: audio_file_on
+ * is cleared here, so a second call is a no-op (every teardown path
+ * calls it, including the defensive one at the `teardown:` label). */
+static void sess_audio_file_close(sess_pump *p, sess_ice_stats *st)
+{
+    kn_lctx b;
+
+    if (!p->audio_file_on)
+        return;
+    (void)kn_ogg_mux_finish(&p->ogg);          /* EOS page (idempotent) */
+    if (p->audio_fp) { fclose(p->audio_fp); p->audio_fp = NULL; }
+    p->audio_file_on = 0;   /* st->audio_file_on STAYS 1 — the summary
+                               reports "a file was written" */
+    if (st) {
+        st->audio_ogg_pages   = p->ogg.pages_out;
+        st->audio_ogg_bytes   = p->ogg.bytes_out;
+        st->audio_ogg_dropped = p->ogg.dropped_packets;
+        st->audio_ogg_werr    = p->ogg.write_errors;
+    }
+    kn_lctx_init(&b, KN_CH_MEDIA, KN_INFO, "audio_close");
+    kn_lctx_i64(&b, "pages", (long long)p->ogg.pages_out);
+    kn_lctx_i64(&b, "bytes", (long long)p->ogg.bytes_out);
+    kn_lctx_i64(&b, "packets", (long long)p->arx.st.packets);
+    kn_lctx_i64(&b, "payload_bytes", (long long)p->arx.st.payload_bytes);
+    kn_lctx_i64(&b, "srtp_fail", (long long)p->arx.st.srtp_fail);
+    kn_lctx_i64(&b, "write_errors", (long long)p->ogg.write_errors);
+    kn_log_emit(&b);
+    printf("{\"mode\":\"session\",\"event\":\"audio_close\","
+           "\"pages\":%llu,\"bytes\":%llu,\"packets\":%llu,"
+           "\"payload_bytes\":%llu,\"red_packets\":%llu,"
+           "\"srtp_fail\":%llu,\"seq_loss\":%llu,"
+           "\"write_errors\":%llu}\n",
+           p->ogg.pages_out % 1000000000ull,
+           p->ogg.bytes_out % 1000000000000ull,
+           p->arx.st.packets % 10000000000ull,
+           p->arx.st.payload_bytes % 1000000000000ull,
+           p->arx.st.red_packets % 1000000000ull,
+           p->arx.st.srtp_fail % 1000000000ull,
+           p->arx.st.seq_loss % 1000000000ull,
+           p->ogg.write_errors % 1000000000ull);
+    fflush(stdout);
+}
+
 /* bounded string fill — snprintf("%s") into a parameter-sized dst is
  * what -Wformat-truncation cannot prove (the kn_cm.c precedent) */
 static void pump_set_str(char *dst, size_t dstsz, const char *src)
@@ -4578,11 +4652,17 @@ static int run_session(const char *token, const char *device_id,
                        long expect_frames, long play_wait_ms,
                        long play_settle_ms, long jiggle_ms,
                        const char *au_dir, const char *audio_out,
-                       const char *log_dir)
+                       long draw_index, const char *log_dir)
 {
     static uint8_t cm_rxb[64 * 1024];
     static char cm_json[SESS_JSON_CAP];
     static char rtsp_buf[SESS_RTSP_BUF];
+    /* round XLIX (F13): the per-draw audio capture path. A lottery draw
+     * used to reopen the SAME path ("audio.opus always holds the LAST
+     * draw's audio" — START-HERE §4 step 3), which is how run 30's
+     * delivered file ended up a hybrid of both draws with one scrambled
+     * page. Draw 0 (no lottery) keeps the operator's path verbatim. */
+    static char audio_path[4096];   /* > any real path (Win7 MAX_PATH 260) */
     static uint8_t ws_msg[KN_RTSP_MAX_RESPONSE + 8192];
     static uint8_t pkt[KN_SOCK_RECV_BUF];
     static dec_ctx c;
@@ -5529,8 +5609,37 @@ static int run_session(const char *token, const char *device_id,
         pump.sctl_term_resumable = -1;
         pump.st.term_resumable = -1;
         pump.origin_us = kn_sock_now_us();
-        pump.audio_path = audio_out;   /* round XLVIII (F11); NULL = no
-                                          file, counters still run */
+        /* round XLVIII (F11); NULL/empty = no file, counters still run.
+         * round XLIX (F13): a lottery draw gets its OWN file
+         * ("<stem>_d<draw><ext>") so a multi-draw run delivers every
+         * draw's audio instead of the last one silently overwriting the
+         * others. Built with the bounded-fill idiom (pump_set_str), not
+         * snprintf("%s"), so -Wformat-truncation has nothing to prove. */
+        audio_path[0] = '\0';
+        if (audio_out && audio_out[0]) {
+            pump_set_str(audio_path, sizeof audio_path, audio_out);
+            if (draw_index > 0) {
+                const char *dot = strrchr(audio_path, '.');
+                size_t stem = (dot && dot > audio_path)
+                                  ? (size_t)(dot - audio_path)
+                                  : strlen(audio_path);
+                char tail[32];
+                int tn = snprintf(tail, sizeof tail, "_d%ld", draw_index);
+                if (tn > 0 && (size_t)tn < sizeof tail &&
+                    stem + (size_t)tn + (dot ? strlen(dot) : 0) + 1u
+                        <= sizeof audio_path) {
+                    memcpy(audio_path + stem, tail, (size_t)tn);
+                    if (dot)
+                        memcpy(audio_path + stem + (size_t)tn, dot,
+                               strlen(dot) + 1u);
+                    else
+                        audio_path[stem + (size_t)tn] = '\0';
+                }
+                /* else: honestly keep the un-suffixed path (cannot
+                 * happen — the caller bounds the path length) */
+            }
+        }
+        pump.audio_path = audio_path[0] ? audio_path : NULL;
         pump.next_ctrl_log_ms = kn_sock_now_ms() + 10000u;
         kn_input_cursor_init(&pump.cursor);
         kn_input_hist_init(&pump.ctrl_hist);
@@ -6703,6 +6812,7 @@ static int run_session(const char *token, const char *device_id,
          * bsock, the dtls + sctp contexts while running), then close
          * sctp (its write path is dtls), then free dtls, then sockets */
         sess_pump_stop(&pump);
+        sess_audio_file_close(&pump, &ice_st);  /* F12: after the join */
         sess_fb_destroy(&fb);
         if (pump.sctp) { kn_sctp_close(pump.sctp); pump.sctp = NULL; }
         if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
@@ -6712,6 +6822,7 @@ static int run_session(const char *token, const char *device_id,
 
     teardown_sock:
         sess_pump_stop(&pump);          /* idempotent (started flag) */
+        sess_audio_file_close(&pump, &ice_st);  /* F12: after the join */
         sess_fb_destroy(&fb);
         if (pump.sctp) { kn_sctp_close(pump.sctp); pump.sctp = NULL; }
         if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
@@ -6722,50 +6833,14 @@ teardown:
     /* best-effort TEARDOWN (the reference's Drop path: 1 s, errors
      * ignored, sequence mismatches skipped) then close everything */
     sess_ctrl_ping_stop(&ctrl_ping);   /* R3-D: join before TEARDOWN */
-    /* round XLVIII (F11): close the bundle-audio capture — flush the
-     * final Ogg page (EOS), close the file, print the totals (they
-     * also land in the summary "audio" block). Skipped while the pump
-     * thread persists (keep mode — the file closes with the process;
-     * closing it under a live writer would race). */
-    if (pump.audio_file_on && !pump_persist) {
-        (void)kn_ogg_mux_finish(&pump.ogg);
-        if (pump.audio_fp) { fclose(pump.audio_fp); pump.audio_fp = NULL; }
-        pump.audio_file_on = 0;   /* ice_st.audio_file_on STAYS 1 — the
-                                     summary reports "a file was written" */
-        ice_st.audio_ogg_pages = pump.ogg.pages_out;
-        ice_st.audio_ogg_bytes = pump.ogg.bytes_out;
-        ice_st.audio_ogg_dropped = pump.ogg.dropped_packets;
-        ice_st.audio_ogg_werr = pump.ogg.write_errors;
-        {
-            kn_lctx b;
-            kn_lctx_init(&b, KN_CH_MEDIA, KN_INFO, "audio_close");
-            kn_lctx_i64(&b, "pages", (long long)pump.ogg.pages_out);
-            kn_lctx_i64(&b, "bytes", (long long)pump.ogg.bytes_out);
-            kn_lctx_i64(&b, "packets",
-                        (long long)pump.arx.st.packets);
-            kn_lctx_i64(&b, "payload_bytes",
-                        (long long)pump.arx.st.payload_bytes);
-            kn_lctx_i64(&b, "srtp_fail",
-                        (long long)pump.arx.st.srtp_fail);
-            kn_lctx_i64(&b, "write_errors",
-                        (long long)pump.ogg.write_errors);
-            kn_log_emit(&b);
-        }
-        printf("{\"mode\":\"session\",\"event\":\"audio_close\","
-               "\"pages\":%llu,\"bytes\":%llu,\"packets\":%llu,"
-               "\"payload_bytes\":%llu,\"red_packets\":%llu,"
-               "\"srtp_fail\":%llu,\"seq_loss\":%llu,"
-               "\"write_errors\":%llu}\n",
-               pump.ogg.pages_out % 1000000000ull,
-               pump.ogg.bytes_out % 1000000000000ull,
-               pump.arx.st.packets % 10000000000ull,
-               pump.arx.st.payload_bytes % 1000000000000ull,
-               pump.arx.st.red_packets % 1000000000ull,
-               pump.arx.st.srtp_fail % 1000000000ull,
-               pump.arx.st.seq_loss % 1000000000ull,
-               pump.ogg.write_errors % 1000000000ull);
-        fflush(stdout);
-    }
+    /* round XLIX (F12): defensive close. Both live teardown paths above
+     * already called it after joining the pump; this catches any early
+     * `goto teardown` that could ever land here with an armed file
+     * (today they all predate the pump start, so this is a no-op — it
+     * stays as the guarantee that a lottery draw can NEVER leak an open
+     * audio FILE* into the next draw, which is what scrambled run 30's
+     * audio.opus at the draw1→draw2 boundary). */
+    sess_audio_file_close(&pump, &ice_st);
     {
         kn_rtsp_header th[4];
         kn_rtsp_response tresp;
@@ -6833,6 +6908,9 @@ int main(int argc, char **argv)
         22.9 s (4 of 5 beyond the ON maximum, one a project record),
         ON draws 10.6/10.4/11.6/13.2/11.3 s (5 of 5 inside the band).
         --session-jiggle=100 restores the XLI.1 legacy behaviour. */
+    long lottery_stop_on_keeper = 1;  /* round XLIX (F15): 0 = run every
+        draw even after a keeper — an interleaved A/B is worthless if the
+        first surviving draw ends it. Default 1 = the XLIII rule. */
     long lottery_n = 1, lottery_gap_s = 20;  /* round XLIII (F5): the
         media-survival lottery driver — runs 16-24 drew 1.2-41 s of media
         from the SAME app with identical client behaviour, so one user
@@ -6921,6 +6999,8 @@ int main(int argc, char **argv)
             lottery_n = strtol(a + 10, NULL, 10);
         else if (strncmp(a, "--lottery-gap=", 14) == 0)
             lottery_gap_s = strtol(a + 14, NULL, 10);
+        else if (strncmp(a, "--lottery-stop-on-keeper=", 25) == 0)
+            lottery_stop_on_keeper = strtol(a + 25, NULL, 10);
         else if (strcmp(a, "--diagnostics") == 0) diagnostics = 1;
         else if (strcmp(a, "--version") == 0) version = 1;
         else if (strcmp(a, "--list-selftests") == 0) list = 1;
@@ -6947,7 +7027,7 @@ int main(int argc, char **argv)
      * that contract (the native gate's json.load validators). --version
      * already prints the full build.json for the deep identity. */
     if (!list && !version && !(selftest && selftest[0]) && !diagnostics) {
-        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLVIII\"}\n",
+        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLIX\"}\n",
                __DATE__, __TIME__);
         fflush(stdout);
     }
@@ -6974,6 +7054,7 @@ int main(int argc, char **argv)
             sess_expect < 0 || sess_expect > 100000000 ||
             lottery_n < 1 || lottery_n > 100 ||
             lottery_gap_s < 0 || lottery_gap_s > 3600 ||
+            lottery_stop_on_keeper < 0 || lottery_stop_on_keeper > 1 ||
             sess_jiggle_ms < 0 || sess_jiggle_ms > 10000) {
             usage();
             return 2;
@@ -6986,7 +7067,7 @@ int main(int argc, char **argv)
                                sess_seconds, sess_queue_timeout, sess_keep,
                                sess_expect, sess_play_wait, sess_play_settle,
                                sess_jiggle_ms, sess_au_dir,
-                               sess_audio_out, log_dir);
+                               sess_audio_out, 0L, log_dir);
         /* Round XLIII (F5): lottery driver. run_session() is re-callable
          * by construction — every stateful static is re-initialised at
          * entry (memset &c, memset &pump + sess_fb_init) and destroyed
@@ -7007,6 +7088,33 @@ int main(int argc, char **argv)
             long draw, done = 0;
             int lrc = 1;
             for (draw = 1; draw <= lottery_n; ++draw) {
+                /* Round XLIX (F14): the interleaved jiggle A/B. Trap 17
+                 * forbids cross-evening comparisons (era drift turned
+                 * 5/5 band draws into 2/2 keepers within four hours on
+                 * Oct 28), so an input/policy A/B has to interleave its
+                 * arms INSIDE one run. With --lottery=N>1 the jiggle
+                 * alternates: ODD draws fly --session-jiggle=MS, EVEN
+                 * draws are OFF (0) — the arm is stated per draw in the
+                 * lottery_arm line and is visible afterwards in the
+                 * summary's feedback.jiggle and the input_jiggle lines.
+                 * --lottery=1 keeps the byte-identical legacy path
+                 * (draw_jiggle == sess_jiggle_ms, no lottery_arm line).
+                 * The run-31 question this answers: the ~599 s cut in
+                 * runs 29/29g is NOT a pool/tier ceiling (the operator's
+                 * browser control: Free tier, Warsaw pool, one-hour
+                 * budget — SESSION_LENGTH_TIMER beforeEventMS 3599657
+                 * said the same in run 25), so the prime suspect is a
+                 * server-side idle/no-input policy: a draw that flies
+                 * synthetic motion past 600 s kills the ceiling theory
+                 * and the idle theory with one measurement. */
+                const long draw_jiggle = (lottery_n > 1 && (draw % 2) == 0)
+                                             ? 0L : sess_jiggle_ms;
+                if (lottery_n > 1) {
+                    printf("{\"mode\":\"session\",\"event\":\"lottery_arm\","
+                           "\"draw\":%ld,\"jiggle_ms\":%ld}\n",
+                           draw, draw_jiggle);
+                    fflush(stdout);
+                }
                 if (draw > 1 && lottery_gap_s > 0) {
                     printf("{\"mode\":\"session\",\"event\":\"lottery_gap\","
                            "\"draw\":%ld,\"wait_ms\":%ld}\n",
@@ -7018,14 +7126,24 @@ int main(int argc, char **argv)
                                   sess_title, cmh, sess_seconds,
                                   sess_queue_timeout, sess_keep,
                                   sess_expect, sess_play_wait,
-                                  sess_play_settle, sess_jiggle_ms,
-                                  sess_au_dir, sess_audio_out, log_dir);
+                                  sess_play_settle, draw_jiggle,
+                                  sess_au_dir, sess_audio_out, draw,
+                                  log_dir);
                 done = draw;
                 printf("{\"mode\":\"session\",\"event\":\"lottery_draw\","
                        "\"draw\":%ld,\"of\":%ld,\"rc\":%d}\n",
                        draw, lottery_n, lrc);
                 fflush(stdout);
-                if (lrc != 1 || g_knv_stop) break;  /* F6b: see above */
+                /* F6b: only rc 1 re-draws; rc 2/3 and Ctrl-C abort.
+                 * F15 (XLIX): rc 0 (a keeper) stops the lottery ONLY
+                 * when --lottery-stop-on-keeper=1 — the default, and
+                 * the XLIII/XLIV behaviour an ordinary keeper hunt
+                 * wants. An interleaved A/B (F14) must pass 0, or its
+                 * first surviving draw ends the experiment. */
+                if (lrc != 1) {
+                    if (lrc != 0 || lottery_stop_on_keeper) break;
+                }
+                if (g_knv_stop) break;
             }
             printf("{\"mode\":\"session\",\"event\":\"lottery_summary\","
                    "\"draws\":%ld,\"of\":%ld,\"last_rc\":%d}\n",

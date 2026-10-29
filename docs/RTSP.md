@@ -3612,3 +3612,284 @@ content test (scene-cut bitrate storms vs the parked portal's static
 screen — the estimator's real exam).
 
 ## 36. Round XLVIII — R7 runs 29 + 29g: **THE ~600-SECOND SERVER CEILING IS MEASURED FROM BOTH SIDES, AND THE FIRST GAMEPLAY-REACHING APP DELIVERED A FLAWLESS 599-SECOND DRAW.** Run 29 (Arknights: Endfield, `--session-seconds=1800 --lottery=3`, XLVII stamp) never got near 30 minutes — the rig pool enforces a **session ceiling at ~600 s**: draw 1 died `recovery_exhausted` in the classic band; draw 2 streamed **17 821/17 821 AUs = 594 s of perfect 30 fps video** (280 505/280 505 datagrams, zero gaps) and then the datagram plane DECAYED GRADUALLY (444 → 0 over ~9 s — the rig-freeze signature is abrupt silence; a decay is the ceiling's) until `recovery_exhausted` at wall 604.1 s (the ~10 s recovery window included); draw 3 ran to **599.2 s and received the POLITE termination** (control `0x0109`, transport TERM `0x80008BE3` code 56 / `0x80008BC7`) → `stop_reason:"server_termination"` with **17 974/17 974 AUs, 285 078/285 078 datagrams, zero gaps**. Run 29g repeated the protocol on **Watch Dogs: Legion (app 100361011) — the first gameplay-reaching title in project history** (animated loading screens, intros, then a static settings-confirmation window): draw 1 = **a flawless 599.1 s `server_termination` keeper — 17 970/17 970 AUs decoded, zero gaps, zero decode errors** (only 54 307 datagrams — ~3 per AU: the static settings window is a low-bitrate scene, and the pipeline holds on real interactive content: scene cuts, video intros, launcher transitions); draws 2–3 died `recovery_exhausted` at **110 s and 144 s of media** (3 297 and 4 323 AUs, near-zero gaps) — long by band standards (the 10–13 s mode did NOT reproduce), short of the ceiling: the rig-free lottery still lives BELOW the ~600 s cap. **F10 matched all six draws** (every dead draw labelled `E_SESSION_RECOVERY_EXHAUSTED`, both ceiling draws `E_SESSION_SERVER_TERMINATION` — the XLVII mislabel class is extinct in the field); **F7 matched every queue** (403 → 20/40/80 s escalating backoff → create 200). Verdict: **session length is server-bounded at ~594–599 s** (silent-decay and polite-term are the ceiling's two faces); a soak must therefore target **≈570 s** (`--session-seconds=570`) so `stop_reason:"time"` remains reachable BELOW the floor — a 570 s keeper is the new full-length proof. Note for evidence readers: `bundle_rtp_in`/`bundle_rtcp_in` were counted internally in XLVII but are NOT in the summary JSON, so runs 29/29g carry **no retro audio measurement** — run 30 is the audio plane's first instrumented flight (the XLVIII `"audio"` summary block + `audio_arm`/`audio_close` events; `docs/BUNDLE-AUDIO.md`). **F11 ships** (sandbox-proven, target-pending): `kn_ogg` (OggOpus muxer) + `kn_arx` (bundle-audio SRTP receive: RFC 3711 AES_CM_128_HMAC_SHA1_80 via the RFC 5764 §4.2 DTLS-SRTP exporter → RFC 2198 RED → RFC 6716 TOC → Opus payload emit) + `--session-audio-out=F.opus` + the 34-key summary `"audio"` block, all pinned by two independent Python references (`tools/oggopus_reference.py`, `tools/arx_reference.py`) through `audio.vectors` (188 checks) and the new `test_knogg` (163) / `test_knarx` (62) suites. Stamp **XLVIII**. Run 30 = `--session-seconds=570 --lottery=2 --session-audio-out=audio.opus` (NO `--session-au-dir`): a `"time"` keeper + a playable ~570 s stereo 48 kHz .opus file.
+
+> **⚠ XLIX CORRECTION — read this before using ANYTHING in §36: the
+> "~600 s server ceiling" interpretation is WITHDRAWN.** The operator's
+> first-hand browser control on the same account and pool (Warsaw
+> `cloudmatchbeta`, Free tier) runs a **full hour** and has never been
+> cut at 10 minutes, so ≈600 s is not a pool / tier / session-length
+> limit. The *measurements* below all stand (the 594 s gradual decay,
+> the 599.1 s and 599.2 s polite terminations, the AU/datagram counts,
+> the F10 6/6 and F7 matches); what falls is the **cause attribution**,
+> and with it the "a soak must target ≈570 s" rule. Prime suspect now:
+> a server-side **idle / no-input policy** — every ≈600 s draw was
+> launcher-parked with zero input flying. Full correction: **§37.4**;
+> the run-31 A/B that tests it: **§37.7**; `START-HERE.md` trap 19 is
+> rewritten accordingly.
+
+## 37. Round XLIX — R7 run 30: **F11'S BUNDLE-AUDIO EXTRACTION FLEW PERFECTLY ON ITS FIRST FLIGHT — AND THE .opus IT DELIVERED IS DIGITAL SILENCE, BECAUSE THE GAME NEVER LAUNCHED. THE OPERATOR'S BROWSER CONTROL RETIRES THE "~600 s SERVER CEILING" READING OF §36.**
+
+Run 30 = `knvstd --session --session-app=100361011 (Watch Dogs: Legion)
+--session-seconds=570 --lottery=2 --lottery-gap=30
+--session-audio-out=audio.opus`, XLVIII stamp (target T10 first:
+**ALL PASS 82**, `audio.vectors` 188/0, `test_knogg` 163, `test_knarx`
+62 — the XLVIII expectation exactly). Both draws ended
+`recovery_exhausted` (rc 1 ×2, `lottery_summary draws:2 last_rc:1`,
+exit 1 — F6 honest as designed); neither reached 570 s, so there is no
+run-30 keeper. **That is not an audio-stage failure** — the audio block
+is complete for both draws, and it is the cleanest first flight a new
+receive pipeline has ever had in this project.
+
+### 37.1 F11 verdict: the audio pipeline is PROVEN LIVE, zero-error, on both draws
+
+| counter | draw 1 | draw 2 | reading |
+|---|---|---|---|
+| `audio_arm` | `srtp_derived:1 armed:1 profile:1 pt:111 red_pt:63 channels:2 clock_hz:48000 file:1` | identical | the RFC 5764 §4.2 exporter fired on the Win7 mbedTLS build; DTLS-SRTP profile 0x0001 as negotiated (`dtls_ready.srtp_prof:1`) |
+| `bundle_rtp_in` = `packets` | 15 610 | **40 000** | every bundle RTP datagram was audio and every one was accepted |
+| `srtp_fail` / `srtp_nokey` / `replay_reject` | 0 / 0 / 0 | 0 / 0 / 0 | **AES_CM_128_HMAC_SHA1_80 with the SERVER half of the exporter output authenticates 40 000/40 000 packets** — the key half, the RFC 3711 KDF labels and the ROC/replay window are all correct on live traffic (a wrong half cannot pass an HMAC) |
+| `red_packets` / `red_blocks` / `red_invalid` | 15 610 / 31 216 / 0 | 40 000 / 79 996 / 0 | **every** packet is RFC 2198 RED with exactly 2 blocks (1 primary + 1 redundancy) — the RFC 2198 walk is right, and the rig's audio is loss-protected by design |
+| `pt_filtered` / `malformed` / `toc_invalid` / `padded` | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | PT 111 as hardcoded; RFC 6716 TOC valid on all 40 000 |
+| `seq_loss` / `seq_reorder` / `seq_dup` / `ssrc_changes` | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | the audio plane is lossless AND in-order — a cleaner channel than the video plane has ever been (video carries FEC/NACK work in every long draw) |
+| `first_ms`→`last_ms` | 78.029 s | **199.952 s** | = 40 000 × 20 ms exactly: 50 pkt/s without one missing tick |
+| `ogg.pages` / `ogg.bytes` | 327 / 815 473 | 835 / 2 089 866 | `dropped_packets:0 write_errors:0` |
+
+The delivered `audio.opus` (2 089 866 B = draw 2's `ogg.bytes` exactly)
+was verified off-box: `ffprobe` → **Opus, 48 000 Hz, stereo, 199.92 s,
+83 kb/s**; the page walk gives 834 valid pages, `seq` 0…834 contiguous,
+`granulepos` monotone to 9 596 160 = 199.92 s, and
+`last_granule / 48000` ≈ `packets × 960 / 48000` to the sample — the
+OggOpus framing, the granule arithmetic and the TOC-duration table are
+right on live traffic. OpusHead (family 0, preskip 0, 48 kHz, stereo,
+mapping 0) and OpusTags ("KarnyNow") parse; and of the **39 936 audio
+packets readable in the delivered file** (both draws' pages minus the
+one destroyed page), **39 929 carry TOC `0xEC` = CELT fullband 20 ms,
+code 0 (one frame, 960 samples)** — the rig's encoder is a
+fixed-configuration low-latency CELT-FB encoder at ~83 kb/s (packet
+sizes 51/50/52/49 B = 16 267/15 341/5 212/2 035 packets). The only
+exceptions are the **first two audio packets of a stream** (`0x7F`,
+`0x70` = CELT-NB configs — an encoder warm-up artefact to remember when
+the first frames ever get decoded) and 5 packets adjacent to the
+corrupted page. `kn_opus_packet_samples48k` read all 40 000 TOCs
+correctly in flight (`toc_invalid:0`).
+
+### 37.2 THE FINDING: the extraction is perfect and the audio is SILENCE — the game never launched
+
+Decoded off-box (ffmpeg → s16le, 199.44 s, 19 146 240 samples):
+`mean_volume −91.0 dB`, `max_volume −80.8 dB`, per-10 s RMS **0.51
+LSB at every bucket** (peak ≤ 3 LSB), and **all 19 146 240 samples lie
+in |x| < 8**. This is not "quiet game audio" and not a decode failure:
+it is a valid Opus stream whose *content* is silence — packet sizes
+51/50/52 B (6359/5990/2032), a real CELT bitstream (the recurring
+`ec 6f …` band-energy prefix), 83 kb/s of a constant noise floor.
+
+Three independent lines of evidence say the silence is CONTENT-SIDE,
+not a client bug:
+
+1. **No game process ever appeared.** All 32 `0x010a` app-lifecycle
+   notifications of the run (16 + 16, both within t+266…368 ms — the
+   F1 dumper's 16-line cap) are `upc.exe` (Ubisoft Connect,
+   `shortName:"uplay"`, `cmsId:18761111`, `drsProfileName:"Ultimate
+   Paintball Challenge"` — the DRS misclassification again: it follows
+   the window it sees), `UplayService.exe` ×4 and `UplayWebCore.exe` ×6
+   (`drsProfileName:"Ubisoft Connect"`), plus their exits. **No
+   WatchDogsLegion.exe / any game exe in either draw.**
+2. **The video is a static screen for both draws.** AU-size buckets:
+   draw 1 = 0.8–1.2 KB/frame at exactly 30 fps for 75 s (one initial
+   keyframe, then nothing until a 9-keyframe / 2.2 KB-mean burst in
+   the last 10 s — the scene change at the freeze); draw 2 = 0.8–1.0
+   KB/frame for 200 s (a mild 1.0–1.1 KB bump at 110–140 s, a
+   9-keyframe burst at 190–200 s). Animated game intros cost tens of
+   KB/frame; these are launcher windows. 10 keyframes per draw = the
+   scene-change count, not motion.
+3. **The operator's live browser control (same account, same pool, same
+   app, run to disprove exactly this reading) measured the boot**: Play
+   → 80-person queue → stream start **2 min 26 s**; Ubisoft Connect
+   appears and **auto-logs-in**, game running **+1 min 8 s** later;
+   the first in-game notification needing a reaction **+1 min 11 s**
+   after that (**≈ 2 min 19 s after stream start**); **sound from game
+   start** (intro, then in-game music, still audible behind the
+   notification). Our draws died at **75 s and 197 s of media** — draw
+   1 well before the game could exist, draw 2 at best marginally into
+   it, and its static 0.9 KB video says the game window never took over
+   the rig.
+
+So run 30 answers the F11 question and *defers* the audio-content
+question: **extraction is proven; a content-bearing capture needs a
+draw that (a) outlives ≈150 s and (b) actually reaches the game.** The
+`docs/BUNDLE-AUDIO.md` §7 reaction matrix has a new row for exactly
+this (§7.1): healthy counters + silence = look at the video/0x010a
+first, not at the audio path.
+
+### 37.3 First clean separation of a MEDIA-PLANE freeze from a rig death
+
+Both draws died the classic abrupt way, and for the first time the
+evidence separates the planes:
+
+- video: 90–95 datagrams/s and 30 AU/s → **0 in one second** (draw 1 at
+  11:08:11Z after 75.0 s of media, `rtp_ms` 75 023 vs `wall_ms` 85 080;
+  draw 2 at 11:17:27Z after 196.99 s, 10 dat/s in the last second);
+- audio: `last_ms` 3 s (draw 1) / 3 s (draw 2) after the video's last
+  RTP timestamp — the bundle plane stopped at the same instant;
+- **SCTP control: ALIVE.** `0x0101` heartbeats kept arriving at ~1 Hz
+  for ~5 s after the media died (draw 1 `ctrl_summary` 97 msgs / 63
+  heartbeats; draw 2 217 msgs / 183 heartbeats), `terminations:0`,
+  `idle_warning:0`, `timers:0`;
+- WSS: `ctrl_ping_stop pings:41/101, pongs:0/0, expired:40/100,
+  dead:0` — the socket stayed writable to the end and the server still
+  has **never** ponged in any run of the project;
+- D8 to the second again: `recovery_timeout` → `recover` → (+5.003 s) →
+  `terminal` → `recovery_exhausted` (11:08:16.706 → 11:08:21.709;
+  11:17:32.006 → 11:17:37.012);
+- F10 labelled both draws `E_SESSION_RECOVERY_EXHAUSTED` (2/2 — the
+  XLVII mislabel class stays extinct); F7 matched the inter-draw queue
+  exactly (`cm_create_backoff` 403 → 20 s → 40 s → 80 s → create 200).
+
+Draw 2's last seconds also carry the run's only estimator drama:
+`qos_owd_us` spiked to 229 752 µs and `qos_jitter_us` to 41 230 µs at
+t−4 s (a scene-change burst, 117–141 dat/s, BWE 38–41 Mbps), then the
+plane died — the same "degrade-then-abrupt-stop" shape as the §36
+freeze draws, and *not* the §36 ceiling's gradual decay (444 → 0 over
+~9 s). **Abrupt + control alive = rig freeze** (trap 19's discriminator
+held).
+
+### 37.4 THE OPERATOR'S CORRECTION: the "~600 s server ceiling" (§36, trap 19) is WITHDRAWN
+
+Operator statement (round XLIX, authoritative — it is a first-hand
+control experiment): **the pool we connect to is Warsaw**
+(`prod.cloudmatchbeta.nvidiagrid.net` → poll host
+`np-waw-01.cloudmatchbeta.nvidiagrid.net`, rigs
+`80-250-98-39` / `77-111-250-40` in run 30 — the "beta" in those names
+is the pool's own naming, not a beta tier), **the account is GeForce
+NOW Free**, **the browser client at play.geforcenow.com gets a
+ONE-HOUR maximum session**, and **a session has NEVER been cut at 10
+minutes** — sessions always run the hour. This matches the run-25
+`SESSION_LENGTH_TIMER` body read in full (`timerType:"DEFAULT",
+presentDurationMS:0, beforeEventMS:3599657` ≈ 3 599.7 s ≈ one hour).
+
+Therefore §36's conclusion — "session length is server-bounded at
+~594–599 s" — is **wrong as stated** and is corrected here:
+
+- what stands: runs 29/29g measured **three** draws ending at
+  594 s (silent datagram decay 444 → 0 over ~9 s) and 599.1 / 599.2 s
+  (polite `0x0109` + TERM `0x80008BE3`, code 56 / `0x80008BC7`) — a
+  real, reproducible cut at ≈600 s **for those sessions**;
+- what falls: that this is a *pool/tier/session-length ceiling*. The
+  tier grants an hour, so ≈600 s must be caused by something our
+  sessions do (or fail to do);
+- **the prime suspect is now a server-side idle/no-input policy**: in
+  every ≈600 s draw the app was parked at a launcher/menu (Endfield's
+  Qt portal in run 29, Legion's Ubisoft Connect + a static settings
+  window in 29g) **and zero input ever flew** (jiggle OFF is the
+  default since XLVI/F9). Run 30 adds the mechanism's plausibility: the
+  rig froze both draws while they sat at a static launcher screen with
+  no input, and the control plane stayed alive (the rig was not dead —
+  the *media* was cut). Reference support: the server-control decoder
+  has an idle-warning family (`0x104`/`0x105` → `NvstSessionTimer`) and
+  a `session_resumable()` table keyed on the termination reason — our
+  `sctl_stats` shows `timers:0 idle_warning:0` in every run, i.e. the
+  rig never *warned* us, it just cut.
+- **the decisive test is an interleaved A/B inside ONE run** (trap 17
+  forbids cross-evening comparisons — Oct 28's era drift turned 5/5
+  band draws into 2/2 keepers in four hours): draws that fly synthetic
+  motion vs draws that do not, long enough that "past 600 s" is
+  observable. F14 ships exactly that (§37.5). If any jiggle-ON draw
+  outlives 600 s, both the ceiling reading and the "input is not a
+  survival factor" reading die together; if ON draws die at ≈600 s
+  too, the idle theory dies and the cut is app/policy-specific.
+- Soak guidance is unchanged and now for a different reason: ≈570 s
+  still keeps `stop_reason:"time"` reachable *below* the observed cut;
+  900 s+ draws are the experiment, not the soak.
+
+### 37.5 Round XLIX ships (F12–F15; `docs/INTEGRATION.md` rev 40)
+
+- **F12 — the audio-file close was DEAD CODE on every live session.**
+  The XLVIII teardown block was gated `if (pump.audio_file_on &&
+  !pump_persist)`, and `pump_persist` is 1 for every live session (the
+  bundle worker outlives PLAY by design) — so run 30 has
+  `audio_arm` ×2 and **`audio_close` ×0**: no EOS page, no `fclose`,
+  and draw 1's `FILE*` was **leaked open across the lottery gap**
+  (draw 2's `memset(&pump, 0, …)` dropped the handle without closing
+  it). The delivered file is 99.88 % valid (834 of 835 pages, ffmpeg
+  plays it) but carries a **2 505-byte scrambled region at
+  815 462…817 967 = exactly one page's span at the draw1→draw2
+  boundary**, and the bytes of draw1's last page (CRC `9b da 06 b2`,
+  serial `GONK`, seq 327, nseg 0 — the 22-byte tail page) are still
+  legible inside it. Fix: `sess_audio_file_close(&pump, &ice_st)` —
+  idempotent, `kn_ogg_mux_finish` (EOS) + `fclose` + the totals mirror
+  + the `audio_close` line — called **after `sess_pump_stop()`** on
+  both live teardown paths (D21: the pump thread is the single writer;
+  once joined, main owns the FILE*), plus one defensive call at the
+  `teardown:` label so no future `goto` can leak a handle into the next
+  draw. `audio_close` now fires **once per draw**, and its `pages`
+  include the EOS page.
+- **F13 — one audio file per draw.** `run_session()` takes a
+  `draw_index` (0 = no lottery) and derives `<stem>_d<draw><ext>`, so
+  `--session-audio-out=audio.opus --lottery=4` delivers
+  `audio_d1.opus … audio_d4.opus` — each a self-contained stream with
+  its own OpusHead/OpusTags, BOS and EOS. The XLVIII rule "audio.opus
+  always holds the LAST draw's audio" is gone (it was how run 30's
+  single file became a two-draw hybrid). Bounded-fill construction
+  (`pump_set_str` + `memcpy`), never `snprintf("%s")` — trap:
+  `-Wformat-truncation=2` cannot prove a `%s` fits.
+- **F14 — the interleaved jiggle A/B.** With `--lottery=N>1` the
+  jiggle **alternates per draw**: odd draws fly `--session-jiggle=MS`,
+  even draws are OFF; a new `lottery_arm {"draw":N,"jiggle_ms":M}` line
+  states each arm (and the summary's `feedback.jiggle` +
+  `input_jiggle` lines confirm it afterwards). `--lottery=1` is
+  byte-identical to XLVIII (no `lottery_arm` line, `draw_jiggle ==
+  sess_jiggle_ms`).
+- **F15 — `--lottery-stop-on-keeper=0|1` (default 1 = the XLIII rule).**
+  An interleaved A/B is worthless if the first surviving draw ends it,
+  so run 31 passes 0 and every draw is flown.
+- **Stamp XLIX**; the summary key set is **unchanged (113)** — F12 only
+  moves *when* the ogg counters are mirrored, and `lottery_arm` is a
+  stdout JSONL event, not a summary key.
+
+### 37.6 Sandbox gates at XLIX (see INTEGRATION rev 40 §verification)
+
+`build_native_tests.sh` **NATIVE TESTS PASS**, zero warnings, every
+suite at its XLVIII baseline (knogg 163, knarx 62, knselftest 118,
+knrx 218, kninput 548) · `cross_check.sh` **PASS ×2 arches** under
+`-Werror` with all four vendor trees staged (mbedtls `2ca6c285` +
+framework `750634d3`, usrsctp `c625e219` — note the clone URL is
+**`github.com/sctplab/usrsctp`**; `github.com/sctp/usrsctp` no longer
+resolves) · F12–F15 touch **no wire format, no module interface and no
+test vector**, so the KAT/self-test counts are unchanged by
+construction.
+
+Those two were then **not left as the whole gate set** — everything
+below was re-run against the XLIX tree, so XLIX closes on a complete
+rather than an inherited canon:
+
+| leg | result |
+|---|---|
+| `cmake -G Ninja` + `ninja` + `ctest`, mbedtls (`build/net-mb`) | **22/22 PASS**, `CFG_RC=0 BUILD_RC=0 CTEST_RC=0` (`logs/cmake_mb.log`) |
+| same, `-DKN_TLS_BACKEND=schannel` (`build/net-sch`) | **22/22 PASS** (`logs/cmake_sch.log`) |
+| cmake `knvstd` target | **built in BOTH trees**; stamp `XLIX` verified in all three sandbox binaries. Built **without FFmpeg** (the owner's `build/ffmpeg/` is gitignored) → `kn_decode` is the honest stub, `decode.synthetic` reports `skipped`, `build.json` extras `ffmpeg=disabled,tls=mbedtls`. Designed mode (`CMakeLists.txt` :146-193), not a failure |
+| `tests/T10_build_and_test.py` POSIX dry | **ALL PASS 72**, 0 failed, zero compiler warnings, bundle 6 767 B, rc 0 (`logs/t10_xlix.log`). Target expectation stays **82** |
+| `tests/T13_udp_e2e.py --knvstd build/net-mb/knvstd` | **ALL PASS 63**, rc 0, no SKIP (`logs/t13_mb_xlix.log`) |
+| `tests/T13_udp_e2e.py` (bare `build/knvstd`) | **ALL PASS 51** with ONE by-design SKIP (the gcm256 leg — a bare build is cm128-only) (`logs/t13_xlix.log`) |
+| `sandbox_session_e2e` (rebuilt from XLIX sources, header recipe, `-Wall -Wextra`) | zero build warnings; **43 checks, 0 failures → PASS** from the repo root (`logs/e2e_xlix.log`) |
+| `tools/check_summary_skeleton.py . ../karnynow-logs/run30_logs/run30.log` | **PASS — skeleton 113 == live 113**, nothing only-in-skeleton / only-in-live. First time the validator has been run against a REAL target summary: F12–F15 add and remove no key |
+| knvstd CLI smoke | `--lottery-stop-on-keeper=2` → usage + **rc 2** (the new bounds check bites). A `--lottery=2 --lottery-gap=0 --session-jiggle=100 --lottery-stop-on-keeper=0` launch against a dead `--cm-host` printed `{"event":"lottery_arm","draw":1,"jiggle_ms":100}` **before** failing `tls_stream_unavailable` (a bare build has no TLS backend) → `lottery_draw rc:3` → `lottery_summary draws:1 last_rc:3`: F14's arm line is live and the F6b rule still holds (rc 2/3 abort, no re-draw). The **exact run-31 argument set** (`--session-seconds=900 --lottery=4 --lottery-gap=60 --session-jiggle=100 --lottery-stop-on-keeper=0 --session-audio-out=audio.opus`) was fed to the sandbox binary the same way: it clears the bounds check and prints `lottery_arm draw:1 jiggle_ms:100`, so no argument in `START-HERE.md` §4 Step 4 can be rejected on the target |
+| not runnable in the sandbox | the sanitizer legs on the changed file and any real `--session` traffic — those are the target's (run 31) |
+
+### 37.7 Run 31 (the operator's chosen design: BOTH questions in one run)
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=100361011 ^
+  --session-seconds=900 --lottery=4 --lottery-gap=60 ^
+  --session-jiggle=100 --lottery-stop-on-keeper=0 ^
+  --session-audio-out=audio.opus > logs\run31.log
+```
+
+Four draws, alternating **ON (draws 1, 3) / OFF (draws 2, 4)**, each up
+to 900 s, no early stop. 900 s is chosen so that (a) the ≈600 s cut is
+*observable* rather than hidden under a 570 s `--session-seconds`, (b)
+Legion's measured boot (≈2 min 19 s from stream start to gameplay
+audio) fits with room to spare, and (c) the Free-tier one-hour budget
+is never approached. Deliverables: `logs\` whole (it APPENDs across
+draws — trap 15), `run31.log`, the T10 pair, and **all four
+`audio_d*.opus` files**. Expected new evidence per draw: a
+`lottery_arm` line, an `audio_close` line, and one self-contained
+`audio_d<N>.opus` with an EOS page.

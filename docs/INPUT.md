@@ -425,3 +425,50 @@ either way. The G3 caveat stands unchanged: any future periodic
 input pattern gets survival-tested before adoption, and any such
 test must be same-evening-interleaved or it is unreadable. Full
 record: `docs/RTSP.md` §35.3.
+
+### Round XLIX — the interleaved A/B instrument EXISTS (F14), and the idle-policy question is load-bearing again
+
+XLVII deprioritised the jiggle A/B because settling it "would require
+interleaved ON/OFF draws inside one run" and keepers were reachable
+either way. **Round XLIX ships exactly that instrument**: with
+`--lottery=N>1` the jiggle now ALTERNATES per draw — odd draws fly
+`--session-jiggle=MS`, even draws are OFF — and every draw states its arm
+in a `lottery_arm {"draw":N,"jiggle_ms":M}` stdout line (the summary's
+`feedback.jiggle` and the `input_jiggle` lines confirm it afterwards).
+`--lottery=1` is byte-identical to XLVIII, and
+`--lottery-stop-on-keeper=0` (F15) keeps the lottery running after a
+survivor so an A/B actually completes both arms. Trap 17
+(same-evening-interleaved or unreadable) is now satisfiable by
+construction rather than by luck.
+
+The reason it matters changed, though. Run 30's operator correction
+retired the "~600 s server ceiling" reading of runs 29/29g: the Warsaw
+pool on a Free tier grants a **one-hour** session in the browser and has
+never been cut at ten minutes (`SESSION_LENGTH_TIMER beforeEventMS:3599657`
+said the same in run 25). So the ≈594–599 s endings of runs 29/29g need a
+cause, and the leading candidate is precisely the one this file has been
+arguing about since round XLI.1: a **server-side idle/no-input policy**.
+Every ≈600 s draw was parked on a launcher/menu screen with zero input
+flying, and run 30 froze two more static, input-less draws (at 75 s and
+197 s of media) while their SCTP control plane kept heartbeating — the
+rig was alive, the media was cut.
+
+Run 31 is the measurement: four 900 s draws on Watch Dogs: Legion with
+the arms interleaved (ON, OFF, ON, OFF) and no early stop. The outcomes
+and their meanings are in `START-HERE.md` §4's read matrix and
+`docs/RTSP.md` §37.4/§37.7. Two notes for whoever reads it:
+
+- if an ON draw outlives 600 s while OFF draws die at ≈600 s, the jiggle
+  stops being "not necessary" and becomes **load-bearing for long
+  sessions** — which reverses the XLVI/XLVII default-OFF reasoning for
+  soaks (though not the bot-signature caution: a real G3 input path is
+  still the better long-term answer).
+- if BOTH arms die at ≈600 s, input is exonerated a third time and the
+  cut is app- or policy-specific; the next probe is a different app at
+  900 s, not a different input pattern.
+
+The G3 caveat is unchanged and now sharper: a launcher-parked session
+cannot produce audio or gameplay evidence, so the first *real* input
+(a click / ENTER at a chosen t) is the next input-stage candidate —
+run 30's silence is the field argument for it (`docs/BUNDLE-AUDIO.md`
+§9, trap 24).
