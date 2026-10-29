@@ -327,6 +327,22 @@
     --session-release > logs\run32.log
   ```
 
+* **CONFIRMED ON TARGET (2026-10-29, `karnynow-logs/run32_logs/`):**
+  T10 = **ALL PASS 84**, 0 failed, zero compiler warnings, with
+  `test_kndrawpath` 1051/0 and `test_kninput` 794/0 executed on Win7
+  (`T10_wynik.txt`), target self-tests all green on real backends
+  (`decode.synthetic` libavcodec 63.2.100, `d3d.present` present mean
+  0.31 ms on Intel HD 8086:2a42, `input.vectors` 50, `audio.vectors`
+  188, `net.*`/`tls.chain` ok), stamp **L**. Run 32 then proved F16
+  (`audio.opus` correctly named), F17 (`video.264` 668/668 frames,
+  watched by the operator) and F18 (`rtsp_teardown` status 200 +
+  `cm_release` 200 `gone:1`, zero 403 ladders) live; F19 armed but
+  never fired — the 29 s draw died before the macro's first event
+  (`input_summary fired:0 gated:0 sent:0` with `aus:668`), which is
+  the scheduling lesson `docs/INPUT.md` §10.9 and `docs/RTSP.md` §39
+  turn into run 33's early timeline. Analysis-only delta: no code
+  moved between rev 41 and this confirmation, so no rev 42 is opened
+  yet — round M starts when run 33 lands.
 * What settles it, in order: (1) `input_summary` with `sent > 0` and
   `gated` small — the client typed; (2) `video_d1.264` decoded with
   ffprobe — did the launcher dialog give way to a game screen; (3) a game

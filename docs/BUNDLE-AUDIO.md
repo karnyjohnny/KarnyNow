@@ -161,7 +161,9 @@ Configs 16-31 are CELT NB/WB/SWB/FB × 2.5/5/10/20 ms
 120 samples**, and CELT-FB 20 ms is **cfg 31 → TOC `0xF8` = 960**
 (NOT `0xE0` — that is FB 2.5 ms = 120). The reference model uses
 `0xF8` as its default 20 ms packet; a mis-derived table shifts every
-granulepos.
+granulepos. **What the GFN rig actually sends** (measured runs 30–32):
+TOC **`0xEC`** = config **29** = CELT-FB **5 ms**, `s=1` stereo, `c=0`
+one frame = **240 samples/packet at ~200 packets/s**.
 
 ## 6. knvstd wiring (`knvstd_main.c`, stamp L)
 
@@ -246,9 +248,11 @@ knvstd.exe --session --session-token=<TOKEN> --session-app=<APP> \
 ```
 
 Healthy draw: `audio_arm` with `srtp_derived:1 armed:1 file:1`;
-summary `audio.packets` ≈ **9.5k–30k** (50 pkt/s × ~570 s minimum for
-20 ms Opus; RED doubles the payload count while halving packet count —
-anything in the band with `red_packets+packets` ≈ const is fine);
+summary `audio.packets` ≈ **38k–120k** (the rig sends **200 pkt/s of
+5 ms Opus** — measured in runs 30, 31 AND 32; see §10.1 — so ~570 s of
+media ≈ 114k packets; RED doubles the payload count while the packet
+count stays at one primary per RTP datagram — anything in the band with
+`red_packets == packets` is fine);
 `srtp_fail:0`, `malformed:0`, `toc_invalid:0`, `seq_loss` small;
 `ogg.pages` ≈ packets/48 + 3; `audio.opus` plays ≈570 s stereo 48 kHz
 (mpv/VLC); `stop_reason:"time"` BELOW the 594 s floor.
@@ -299,7 +303,8 @@ clock_hz:48000 file:1` ×2 · `packets` 15 610 / **40 000** = `bundle_rtp_in`
 as RFC 2198 RED with one redundancy block — D-a1's arrival-order emit is
 therefore loss-protected by the server itself) · `seq_loss/reorder/dup`
 0/0/0, `ssrc_changes:0` · `last_ms − first_ms` = 78.029 s / **199.952 s**
-= `packets × 20 ms` exactly · `ogg.dropped_packets:0`,
+= `packets × 5 ms` exactly (200 pkt/s — corrected in §10.1; the XLIX
+"× 20 ms" sentence was wrong by the factor 4) · `ogg.dropped_packets:0`,
 `ogg.write_errors:0` · the delivered file is a valid OggOpus stream
 (ffprobe: Opus 48 kHz stereo 199.92 s, 83 kb/s; 834 pages, `seq`
 contiguous, `granulepos` monotone, `last_granule` = Σ TOC samples).
@@ -309,8 +314,9 @@ authentications cannot pass with a wrong key half.
 
 **But the audio is digital silence**: decoded 199.44 s / 19 146 240
 samples → mean −91.0 dB, max −80.8 dB, per-10 s RMS 0.51 LSB everywhere,
-every sample |x| < 8. The packets are structurally perfect CELT-FB 20 ms
-(TOC `0xEC` on 39 929 of 39 936 readable audio packets), i.e. the rig
+every sample |x| < 8. The packets are structurally perfect CELT-FB **5 ms**
+stereo single-frame packets (TOC `0xEC` = config 29, `s=1`, `c=0`, on
+39 929 of 39 936 readable audio packets — NOT 20 ms; see §10.1), i.e. the rig
 **encoded silence**: no game ever ran in either draw (the 0x010a burst
 carries only `upc.exe` / `UplayService.exe` / `UplayWebCore.exe`; the AU
 sizes are 0.8–1.2 KB/frame = a static launcher window for 75 s / 200 s).
@@ -427,3 +433,28 @@ Legion, all `recovery_exhausted`):**
 If (3) is still silence while (4) shows a game process, THEN it is an
 audio-stage question again (mixer/mute/PT) and the reaction matrix in
 §7/§7.1 is the place to start. Until then, do not touch `kn_arx`.
+
+### 10.1 Run 32 (round M read): silence again, the seat came back, and the 5 ms correction
+
+`run32_logs/audio.opus` (Endfield launcher, 29 s draw): 333 274 B =
+`audio_close.bytes` exactly (F16's name + F12's close, both proven on
+target), 135 pages, 6374 packets, `red_packets == packets`,
+`srtp_fail:0`, `write_errors:0`, and — the first real audio loss ever
+delivered — `seq_loss:68` (1.07 %), invisible in the output because every
+packet rides RFC 2198 RED with one redundancy block (D-a1's arrival-order
+emit absorbing loss exactly as designed). Decoded: 31.87 s, **peak 1 LSB
+in every 5 s bucket** — digital silence, because the Endfield LAUNCHER
+makes no sound and nothing else ran. The first content-bearing capture
+still waits behind a typed login (docs/RTSP.md §39).
+
+**The frame-size correction, measured on all three audio runs:** the
+delivered timeline is **240 samples = 5 ms per packet at ~200 pkt/s**
+(run 30: 40 000 × 5 ms = 199.95 s = ffprobe's 199.92 s; × 20 ms would be
+800 s). TOC `0xEC` = config 29 = CELT-FB 5 ms, `s=1`, `c=0` under RFC 6716
+§3.1's `config(5)|s(1)|c(2)` layout — which is exactly what
+`kn_opus_packet_samples48k` returns (its `code = toc & 3` reads the
+2-bit frame-count field in the LOW bits, the stereo flag is bit 2), so
+the muxer's granulepos was right all along and the XLIX "20 ms / CELT-FB
+20 ms" label was the only thing that was wrong. Any future decoder or
+playback work (§8's deferred follow-on) must budget **200 packets/s**,
+not 50.

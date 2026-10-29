@@ -707,3 +707,43 @@ lines. Two permanent ctest legs pin the parser:
 This exists because a rejected script must cost nothing: run 31 showed a
 draw is 2–20 minutes of queue plus a seat cooldown, and a mistyped
 password wastes all of it silently.
+
+### 10.9 Run 32 taught the timing rule: the login UI is on screen at t≈1 s, so the macro must START inside the window draws actually give
+
+Run 32 (docs/RTSP.md §39) was the first run with a real macro: 80 events
+over **416 s**, parsed clean on the rig (`unmapped_chars:0`), activation
+chain latched at rel 0.83 s (`input_activation ready:1`) — and
+`input_summary {fired:0, sent:0, gated:0, late_skips:0}`, because the draw
+died at **29 s of media**, long before the macro's first timestamp. The
+video proves the waste: the Endfield launcher's `Log In` button is on
+screen **from the first decoded frame**. A login timeline that begins at
+t≈25–60 s can only ever fire in a keeper draw, and keeper draws are the
+rare case.
+
+The rules that follow, for every future script:
+
+1. **First event at t≈6–12 s.** ICE/DTLS settle inside ~1 s, the gate
+   latches inside ~1 s, and launchers render their login UI within a few
+   seconds. Nothing useful happens before t≈5 s and nothing survives
+   waiting past t≈15 s in the draws measured so far (media survival:
+   14–122 s in run 31, 29 s in run 32).
+2. **Retries are cheap, misses are not.** Repeat the click/type sequence
+   at ~30 s / 60 s / 90 s. A `key enter` into a screen that has no dialog
+   is harmless; a draw that dies with `fired:0` is a wasted seat.
+3. **Add `--input-anti-afk=60000` to every login run.** Two 44-byte
+   messages a minute, the reference's own pulse (§10.5), and the only
+   instrument that probes the idle-policy hypothesis while the login
+   attempt runs.
+4. **Absolute coordinates are PIXELS in the 1280×720 viewport** (§10.7 /
+   the wire table): the measured targets in run 32's frame 1 are `Log In`
+   ≈ (984, 44) and the launcher's `Play` pill ≈ (1104, 632). Re-measure
+   per app from `video.264` frames — ffmpeg -i video.264 -vf fps=1 gives
+   one PNG per second, which is also how you time the dialog's arrival.
+5. **Read `input_summary` as a three-way diagnostic**, not a pass/fail:
+   `sent>0` = input flew; `fired:0, gated>0` = the activation chain never
+   armed (gate/wire problem); `fired:0, gated:0, late_skips:0` = the draw
+   died before the first event (run 32 — move the timeline left);
+   `late_skips>0` = a recovery stall ate part of the timeline. (The knlog
+   `note` string on the WARN line predates run 32 and overstates the
+   `gated:0` case as "the media loop never ticked" — the triple above is
+   the correct reading; the note text is queued for correction.)

@@ -3650,7 +3650,7 @@ receive pipeline has ever had in this project.
 | `red_packets` / `red_blocks` / `red_invalid` | 15 610 / 31 216 / 0 | 40 000 / 79 996 / 0 | **every** packet is RFC 2198 RED with exactly 2 blocks (1 primary + 1 redundancy) — the RFC 2198 walk is right, and the rig's audio is loss-protected by design |
 | `pt_filtered` / `malformed` / `toc_invalid` / `padded` | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | PT 111 as hardcoded; RFC 6716 TOC valid on all 40 000 |
 | `seq_loss` / `seq_reorder` / `seq_dup` / `ssrc_changes` | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | the audio plane is lossless AND in-order — a cleaner channel than the video plane has ever been (video carries FEC/NACK work in every long draw) |
-| `first_ms`→`last_ms` | 78.029 s | **199.952 s** | = 40 000 × 20 ms exactly: 50 pkt/s without one missing tick |
+| `first_ms`→`last_ms` | 78.029 s | **199.952 s** | = 40 000 × **5 ms** exactly: 200 pkt/s without one (corrected §39.4 — the "× 20 ms / 50 pkt/s" reading of this row was wrong by the factor 4; TOC `0xEC` = config 29 = CELT-FB 5 ms stereo) missing tick |
 | `ogg.pages` / `ogg.bytes` | 327 / 815 473 | 835 / 2 089 866 | `dropped_packets:0 write_errors:0` |
 
 The delivered `audio.opus` (2 089 866 B = draw 2's `ogg.bytes` exactly)
@@ -4171,3 +4171,144 @@ operator can WATCH, and it answers the only question that matters — did
 the game start? Expected new evidence lines: `input_script_loaded`,
 `input_first_send`, `input_summary` (WARN if armed but silent),
 `video_stream_begin/end`, `rtsp_teardown`, `cm_release`.
+
+## 39. Round M read — RUN 32: **THE FIRST TYPING RUN FLEW EVERYTHING EXCEPT THE TYPING — F17/F18 PROVEN LIVE, THE SEAT CAME BACK, AND THE DRAW DIED AT 29 s OF MEDIA, BEFORE THE OPERATOR'S MACRO'S FIRST EVENT**
+
+Run 32 (2026-10-29, target build = T10 **ALL PASS 84**, stamp **L**) was
+the operator's own design: Endfield instead of Legion ("easier x/y for the
+login"), their own 80-event / 416 s login macro, one draw, everything on:
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914
+  --session-seconds=900 --input-script=build\login.txt
+  --session-video-out=logs\video.264 --session-audio-out=logs\audio.opus
+  --session-release > logs\run32.log
+```
+
+### 39.1 The target gate: 84, exactly as rev 41 predicted
+
+`run32_logs/T10_wynik.txt`: **T10 VERDICT: ALL PASS (84 checks), 0
+failed, zero compiler warnings** — the +2 over XLIX's 82 are precisely
+`test_kndrawpath.exe exists in build` and `test_kndrawpath -> PASS`, i.e.
+the suites-list catch in rev 41 is the only reason the F16 rule ran on
+Win7 at all (`test_kndrawpath` 1051/0 and `test_kninput` 794/0 inside
+T10). The target self-tests are all green with REAL backends:
+`decode.synthetic` ok (libavcodec 63.2.100, 60 frames), `d3d.present` ok
+(Intel HD 8086:2a42, 1280×800@60, StretchRect+Present ×30, present mean
+**0.31 ms**), `input.vectors` 50, `audio.vectors` 188, `net.dns` /
+`net.tcp443` / `net.tls` / `tls.chain` ok. Stamp line:
+`{"mode":"build","compiled":"Oct 29 2026 19:52:38","round":"L"}`.
+
+### 39.2 The draw by the numbers: 39.2 s wall, 29.0 s media, and the first LOSSY freeze
+
+| quantity | value |
+|---|---|
+| stop_reason / rc | `recovery_exhausted` / 1 (app.log: `E_SESSION_RECOVERY_EXHAUSTED`) |
+| wall / media (`au_clock.rtp_ms`) | 39 231 ms / 28 978 ms, drift −37 ms |
+| frames the SERVER produced | **871** in 29 s = 30.0 fps (last `au` line: `fi:871`) |
+| frames WE assembled / decoded | **668 / 668**, `decode_errors` 0, keyframes 21 |
+| loss signature | `gaps` **17**, `withheld` **191**, `fec_repaired` **31**, `nack` 51, `idr`/`pli` 137/137, `rfi` 114, `kf_requests` 8 — ≈3.3 % of 5857 datagrams |
+| bandwidth | BWE 24–42 Mbps the whole draw (`qos_bwe_kbps`), `q_depth` 0 — NOT congestion on our side of the math |
+| audio | armed 1, 6374 packets, `srtp_fail` 0, `seq_loss` **68** (first real audio loss ever seen; RED covered it), `write_errors` 0 |
+| freeze anatomy | media steady to t≈28 s (130–500 dg/s) → t=29.1 s `dg=5` → t≥30 s `dg=0` (video AND audio stop together) → `progress_stall` t=32.9 → `rx_recovery` attempt 1 `recover` (idle 5008 ms) t=33.1 → `rx_recovery` `terminal` (idle 5003 ms) t=38.1 → teardown |
+
+So the death is the SAME family as runs 30/31 — the rig goes totally
+silent mid-session — but this time wrapped in genuine packet loss the
+whole way (runs 30/31 were loss-free launcher screens; run 32's animated
+Endfield splash is a much busier encoder, and ~3 % of it never arrived).
+The recovery machinery did its job once (the t=22–24 s hole: `aus` 0/0/7
+then 30 again at t=25 s) and then met a freeze no keyframe can fix. The
+idle-policy hypothesis is still untested: the draw never lived long
+enough, and no input flew (below).
+
+### 39.3 What round L's four fixes did on the wire — all four PROVEN
+
+- **F17 — the operator WATCHED the stream.** `video_stream_begin` →
+  `video_stream_end {aus:668, bytes:3679210, file_bytes:3679210,
+  write_errors:0}`; the delivered `video.264` is 3 679 210 B, ffprobe
+  h264 1280×720 30 fps, **668/668 frames decode** in the sandbox, and the
+  operator's eye confirms it: "launcher, animations, everything that is
+  normally there after the stream starts". Frame extraction shows the
+  **Arknights: Endfield launcher** (END FIELD logo, splash animation,
+  `Notices/Events/News` panel, yellow `Play` pill) from t≈0, with loss
+  artifacts creeping into the t≈20 s frame — the video record of the 17
+  gaps.
+- **F16 — the name is right.** `audio.opus` (draw 0 → verbatim path),
+  333 274 B, byte-identical to `audio_close.bytes`. No `_d1_d1us`
+  anywhere; the F13 wound is closed on the target.
+- **F18 — THE SEAT CAME BACK.** `rtsp_teardown {"rc":0,"status":200,
+  "release_armed":1}` then `cm_release {"rc":0,"http_status":200,
+  "gone":1}` — the first TEARDOWN and the first CloudMatch DELETE this
+  project has ever put on the wire, both answered 200. Run 32 has **zero**
+  `cm_create_backoff` lines (runs 31's draws 2–4 each burned 140 s on the
+  403 ladder). This is the orphan-seat fix, proven where it matters.
+- **F19 — armed, loaded, validated… and silent.**
+  `input_script_loaded {events:80, span_ms:416000, lines:24, comments:0,
+  unmapped_chars:0}` (the operator's own macro parses clean, on the rig,
+  first try); `input_activation {sent:8, failed:0, version:3, ready:1}`
+  at rel 0.83 s (the gate was OPEN from the first second); and then
+  `input_summary {events:80, fired:0, sent:0, gated:0, late_skips:0}`.
+  **The macro never fired because the draw died before its first
+  event's timestamp** — 80 events spread over 416 s against a 29 s
+  window. `gated:0` rules out a gate problem, `late_skips:0` rules out a
+  stall, `build_fail/push_fail:0` rule out the wire. This is a
+  SCHEDULING miss, not a code miss — and it is the one lesson run 32
+  teaches (see §39.6).
+
+### 39.4 The audio: still silence, and the launcher is simply quiet
+
+`audio.opus` = 31.87 s, Opus 48 kHz stereo, 83.7 kb/s, and decoded:
+**peak 1 LSB in every 5 s bucket** — digital silence, as in runs 30/31.
+Not a bug: the Endfield LAUNCHER makes no sound, and nothing else ran.
+The first content-bearing capture still requires getting past a login.
+**Correction to XLIX's audio math (measured now, in all three audio
+runs):** the rig's audio packets carry **240 samples = 5 ms** each
+(≈200 packets/s): TOC byte **0xEC** = config **29** (CELT-FB **5 ms**),
+`s=1` (stereo), `c=0` (one frame) under RFC 6716 §3.1's
+`config(5)|s(1)|c(2)` layout — exactly what
+`kn_opus_packet_samples48k` computes and what the muxer's granulepos
+advances by. Run 30's "40 000 packets × 20 ms = 199.95 s" sentence and
+the "TOC `0xEC` = CELT-FB 20 ms" reading were both wrong by the factor
+4 (× 20 ms would be 800 s; the measured decode is 199.44 s). The
+extraction stage's promise — bit-exact, playable, zero-error — stands
+untouched; only the frame-size label in the docs was off. (This is also
+why the §5 TOC trap in `docs/BUNDLE-AUDIO.md` matters: config 29 vs 31
+is 240 vs 960 samples, and a mis-derived table shifts every granulepos
+by 4×.)
+
+### 39.5 Who ran: the Endfield launcher chain, and GFN's Qt mislabel
+
+Nine `sctl_010a` notifications, all in the first 1.7 s:
+`nvcontainer.exe → Launcher.exe` (`drsProfileName:"launcher"`, exits
+immediately) `→ Games.exe` (**`cmsId:107057914`, `shortName:"107057914"`**
+— the wrapper for the app we asked for) `→ QtWebEngineProcess.exe`
+(`drsProfileName:"EA Desktop"`). The video settles it: that Qt WebEngine
+window **is** the Endfield launcher, so "EA Desktop" is the same class of
+DRS mislabel as run 31's "Ultimate Paintball Challenge" — and the app-id
+canon **107057914 = Arknights: Endfield** is CONFIRMED by the rig's own
+`cmsId` plus the pixels. No game process again: the launcher was still
+at its `Log In` button (visible top-right from frame 1, measured ≈(984,
+44) in the 1280×720 pixel space; the `Play` pill ≈(1104, 632)) when the
+rig froze.
+
+### 39.6 THE LESSON: login UI exists from t≈1 s, so a macro that starts at t≈40 s+ can never fire in a 29 s draw
+
+The counter triple is the diagnostic, and run 32 is its first live use:
+
+| `input_summary` shape | reading |
+|---|---|
+| `sent>0` | input flew; the run is about what the game did with it |
+| `fired:0, gated:>0` | the activation chain never latched `enable-input(true)` (gate problem) |
+| `fired:0, gated:0, late_skips:0` | **the media loop died before the first event came due** — run 32; the script starts too late for the draws we get |
+| `late_skips>0` | the loop stalled mid-script (recovery episode); events skipped by design |
+
+Run 33 therefore has one job: **put the macro's first click inside the
+window the draws actually give us.** The launcher login UI is on screen
+from t≈1 s, so the first `mouse`/`key` events belong at **t≈6–12 s**,
+with retries at ~30/60/90 s for slow boots, and `--input-anti-afk=60000`
+riding along — it is the reference's own keep-awake pulse, it costs two
+44-byte messages a minute, and it is the only instrument that can test
+the idle-policy hypothesis while the login attempt happens. Same app,
+same `--session-release`, one draw. If the draw survives the freeze
+family for once, run 33 is the first typed login in the project's
+history — and the first capture with sound in it.

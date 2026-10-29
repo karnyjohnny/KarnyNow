@@ -840,11 +840,28 @@ shape of the video loop.
 > goldens (`test_kninput` 548 -> **794**), gated on the activation
 > chain's `enable-input(true)` and routed sid 0 (keys/buttons/wheel) /
 > sid 6 (mouse motion).
-> **Target-pending: run 32 = THE LOGIN RUN** (`--input-script=login.txt
-> --session-video-out=video.264 --session-audio-out=audio.opus
-> --session-release`): does a typed login get past Ubisoft Connect,
-> i.e. does a GAME process appear in `0x010a`, does `video_d1.264`
-> show gameplay, and is `audio_d1.opus` finally non-silent. G3's
+> **Run 32 FLEW (2026-10-29, Endfield 107057914, the operator's own
+> 80-event macro) and PROVED F16/F17/F18 ON TARGET**: T10 on Win7 =
+> **ALL PASS 84** exactly as predicted (the +2 = `test_kndrawpath`,
+> which only ran there because round L added it to T10's own suites
+> list), stamp L, `video.264` 3 679 210 B with 668/668 frames decodable
+> and WATCHED by the operator (Endfield launcher + animations from
+> t≈0), `audio.opus` correctly named and byte-equal to `audio_close`,
+> and — first in project history — `rtsp_teardown` **status 200** +
+> `cm_release` **200 gone:1**: the seat came back, zero 403 ladders.
+> The typing itself did not happen: `input_summary fired:0 gated:0
+> sent:0` against `aus:668` means the draw (29.0 s of media, the first
+> LOSSY freeze: 17 gaps / 191 withheld / FEC 31 / NACK 51, BWE
+> 24–42 Mbps) died before the macro's first timestamp, and the login
+> UI was on screen from frame 1. Audio silent again — a launcher
+> makes no sound. Full read: `docs/RTSP.md` §39.
+> **Target-pending: run 33 = THE LOGIN RUN, TIMELINE MOVED LEFT**:
+> first event at t≈6–12 s (Endfield `Log In` ≈ (984, 44) px in the
+> 1280×720 viewport, `Play` ≈ (1104, 632)), retries at ~30/60/90 s,
+> `--input-anti-afk=60000` riding along, same app, same
+> `--session-release`. Questions it answers: does a typed login get
+> past the launcher, does a GAME process appear in `0x010a`, and is
+> the capture finally non-silent. G3's
 > "audible audio" bar stays met as EXTRACTION; decode-to-speaker
 > remains the deferred follow-on. Remaining stage-3 scope after run
 > 32: G3 mouse/wheel live proof (built, sandbox-proven, never flown),
