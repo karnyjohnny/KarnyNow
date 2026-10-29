@@ -1,0 +1,9 @@
+# The negative fixture for the F19 parser gate (ctest: knvstd_input_check_rejects,
+# registered WILL_FAIL because --input-check must exit 2 on this file).
+# The first two lines are valid; the third is not - `teleport` is not a
+# command, so the loader must stop with "unknown command 'teleport'" and
+# report line 9 (comments and blanks count as lines, as they must: the
+# number has to point at what the operator sees in their editor).
+0 key tab down
+30 key tab up
+100 teleport 640 360

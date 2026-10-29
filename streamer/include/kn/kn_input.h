@@ -133,6 +133,111 @@ int kn_input_haptics(uint64_t timestamp_us, int enabled,
 int kn_input_mouse_relative(int16_t dx, int16_t dy, uint64_t timestamp_us,
                             uint8_t *out, size_t out_len);
 
+/* ------------------------------------------------- discrete input (F19)
+ * Round L: the keyboard/mouse plane the login wall made load-bearing
+ * (run 31: Watch Dogs: Legion never got past Ubisoft Connect in four
+ * draws because the rig's launcher asks for credentials and this client
+ * had no way to type them — only the +/-1 px jiggle ever flew).
+ *
+ * The wire `key` field is a WINDOWS VIRTUAL-KEY CODE, big-endian u16.
+ * Oracle: OpenNOW docs/keyboard-mapping.md ("Wire VK" column: 0xbd,
+ * 0xbb, 0xdb, 0xc0, 0xbc, 0xbe, 0xbf, 0xe2 = the VK_OEM_* family) and
+ * CapturedInput::Key { virtual_key: u16, modifiers: u16 }
+ * (opennow-streamer-platform/src/media.rs:617-621). Modifiers are the
+ * bitmask of ShortcutChord::parse (media.rs:292-319). Button ids are the
+ * Raw-Input order (windows_raw_input.rs:326-332).
+ *
+ * Every builder below returns the TOTAL TLV length or a negative value
+ * (-1 bad argument, -2 output buffer too small), and every message rides
+ * the 0x0206 remote-input envelope: key/absolute are 52 bytes with TWO
+ * LE-u64 timestamp copies, button/wheel/relative are 44 bytes with one.
+ * Use kn_input_route_sid() for the channel — motion rides ControlPartial
+ * (sid 6, unordered, PR-SCTP TTL 300 ms), everything else
+ * ControlReliable (sid 0, ordered). Both halves are pinned by
+ * tools/input_reference.py against the reference's OWN Rust goldens
+ * (nvst_input.rs:1868-1911). */
+enum {
+    KN_INPUT_TYPE_HEARTBEAT      = 2,
+    KN_INPUT_TYPE_KEY_DOWN       = 3,
+    KN_INPUT_TYPE_KEY_UP         = 4,
+    KN_INPUT_TYPE_MOUSE_ABSOLUTE = 5,
+    KN_INPUT_TYPE_MOUSE_RELATIVE = 7,
+    KN_INPUT_TYPE_BUTTON_DOWN    = 8,
+    KN_INPUT_TYPE_BUTTON_UP      = 9,
+    KN_INPUT_TYPE_WHEEL          = 10,
+    KN_INPUT_TYPE_GAMEPAD        = 12,
+    KN_INPUT_TYPE_HAPTICS        = 13,
+    KN_INPUT_TYPE_LOCK_KEYS      = 19,
+    KN_INPUT_TYPE_TEXT           = 23
+};
+
+/* Modifier bits (media.rs:292-319). */
+#define KN_INPUT_MOD_SHIFT 0x01u
+#define KN_INPUT_MOD_CTRL  0x02u
+#define KN_INPUT_MOD_ALT   0x04u
+#define KN_INPUT_MOD_META  0x08u
+
+/* Mouse button ids (windows_raw_input.rs:326-332). */
+#define KN_INPUT_BTN_LEFT    1u
+#define KN_INPUT_BTN_MIDDLE  2u
+#define KN_INPUT_BTN_RIGHT   3u
+#define KN_INPUT_BTN_X1      4u
+#define KN_INPUT_BTN_X2      5u
+
+/* The reference's anti-AFK pulse is VK 0x7C (F13) down+up with no
+ * modifiers — opennow-streamer-core/src/lib.rs:1604-1648
+ * (anti_afk_pulse). F13 is bound to nothing in any normal layout, which
+ * is exactly why the reference chose it: it keeps the session looking
+ * active without touching the game. */
+#define KN_INPUT_VK_ANTI_AFK 0x7Cu
+
+/* 0x0206 KEY_DOWN(3)/KEY_UP(4): vk BE u16 | modifiers BE u16 | 10 zero
+ * bytes -> 52 B total, ControlReliable. Rust golden: vk 0x41 mods 1
+ * ts 0x015b15b1 (nvst_input.rs:1868-1891). */
+int kn_input_key(uint16_t vk, uint16_t modifiers, int pressed,
+                 uint64_t timestamp_us, uint8_t *out, size_t out_len);
+
+/* 0x0206 BUTTON_DOWN(8)/BUTTON_UP(9): [button, 0] -> 44 B,
+ * ControlReliable. `button` must be 1..5. */
+int kn_input_mouse_button(unsigned button, int pressed,
+                          uint64_t timestamp_us,
+                          uint8_t *out, size_t out_len);
+
+/* 0x0206 MOUSE_ABSOLUTE(5): x BE u16 | y BE u16 | 08 00 | w BE u16 |
+ * h BE u16 -> 52 B, ControlPartial. Coordinates are PIXELS inside the
+ * w x h viewport; w and h must be non-zero (the reference FFI rejects a
+ * zero viewport, opennow-streamer-ffi/src/lib.rs:1088-1108). */
+int kn_input_mouse_absolute(uint16_t x, uint16_t y, uint16_t width,
+                            uint16_t height, uint64_t timestamp_us,
+                            uint8_t *out, size_t out_len);
+
+/* 0x0206 WHEEL(10): dx BE i16 | dy BE i16 | 00 00 -> 44 B,
+ * ControlReliable (the reference's mouse-input doc: "Buttons and wheel
+ * use reliable control" — only MOTION rides sid 6). Windows has no
+ * RI_MOUSE_HWHEEL, so dx is normally 0 and one notch is +/-120. */
+int kn_input_wheel(int16_t delta_x, int16_t delta_y,
+                   uint64_t timestamp_us, uint8_t *out, size_t out_len);
+
+/* The SCTP stream id a discrete-input type rides: 6 for MOUSE_RELATIVE
+ * and MOUSE_ABSOLUTE (ControlPartial), 0 for everything else this
+ * project builds (ControlReliable), -1 for a type with no route here
+ * (gamepad rides InputPartial, text is not built yet). */
+int kn_input_route_sid(uint32_t input_type);
+
+/* Name -> Windows VK, mirroring the reference's shortcut_virtual_key
+ * (media.rs:323-357): a single ASCII letter/digit maps to its uppercase
+ * code, "f1".."f24" to 0x70 + n, plus the named keys (enter, esc, tab,
+ * space, arrows, ...). Case-insensitive. Returns the VK or -1. */
+int kn_input_vk_from_name(const char *name);
+
+/* One ASCII character -> (VK, modifier bits) for a US layout, the table
+ * the `type` command of the input script uses. Letters and digits need
+ * no modifiers; the shifted US punctuation sets KN_INPUT_MOD_SHIFT.
+ * Returns 0 and fills the vk/mods outputs, or -1 for a character the
+ * table does not cover (non-ASCII, e.g. Polish diacritics — the caller
+ * must count and report those rather than silently dropping them). */
+int kn_input_vk_from_ascii(int ch, uint16_t *vk, uint16_t *mods);
+
 /* The whole chain, in send order (nvst_input.rs:1318-1329). Fills
  * lens[0..7]; returns the number of messages built (8) or -1. Every
  * message is <= KN_INPUT_CMD_MAX bytes. */

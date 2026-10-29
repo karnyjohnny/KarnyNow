@@ -270,6 +270,30 @@ int main(void)
           "GET v2/session/{id} poll ok");
     close(fd);
 
+    /* ---- round L (F18): the release leg ------------------------------
+     * --session-release sends exactly this call at teardown, after the
+     * RTSP TEARDOWN, because run 31 proved an unreleased seat orphans:
+     * the cloud kept it, the next create hit 403 SESSION_LIMIT and the
+     * driver burned its 20/40/80 s backoff. kn_cm_cancel is the same
+     * function the queue-abort path has used since XXIII, so this leg
+     * pins the wire shape F18 now depends on at teardown time: a DELETE
+     * to /v2/session/{id} that the rig answers 204, and the caller reads
+     * 2xx-or-404 as "gone" (validate_delete_response, nvst:2728). */
+    fd = tcp_connect((uint16_t)http_port);
+    CHECK(fd >= 0, "HTTP connect for the release DELETE");
+    if (fd >= 0) {
+        int del_status = 0;
+        tcp.fd = fd;
+        rc = kn_cm_cancel(hio, "127.0.0.1", "/", &st, sess.session_id, 5000,
+                          real_now, NULL, rxb, sizeof rxb, jsonbuf,
+                          sizeof jsonbuf, &del_status);
+        CHECK(rc == KN_HTTP_OK, "DELETE v2/session/{id} transport ok");
+        CHECK(del_status == 204, "the rig answered 204 No Content");
+        CHECK((del_status >= 200 && del_status < 300) || del_status == 404,
+              "2xx/404 both mean the seat is gone");
+        close(fd);
+    }
+
     /* ---- WebSocket + the full RTSP sequence ---- */
     fd = tcp_connect((uint16_t)ws_port);
     CHECK(fd >= 0, "WS connect to the rig");
@@ -551,6 +575,8 @@ done:
               "rig validated >=1 hole-punch request (independent STUN)");
         CHECK(json_long(done_line, "ice_resp") >= 1,
               "rig answered >=1 binding request");
+        CHECK(json_long(done_line, "deletes") >= 1,
+              "rig saw the release DELETE (round L, F18)");
         CHECK(json_long(done_line, "play_455") == 1,
               "rig gated exactly one PLAY with 455");
         CHECK(json_long(done_line, "announce_has_key") == 1,

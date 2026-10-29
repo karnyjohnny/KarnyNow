@@ -775,76 +775,127 @@ language-independent. Everything **you** write is in English (D12).
 **Do not start stage 1 until G0.2 is closed**, because the presentation path determines the
 shape of the video loop.
 
-> **Status marker (round XLIX, 2026-10-29 — the definitions above are
+> **Status marker (round L, 2026-10-29 — the definitions above are
 > unchanged; this note only records progress):** **STAGE 2 CLOSED
-> (XLVII); STAGE 3 UNDERWAY — audio extraction is BUILT AND
-> LIVE-PROVEN; the ceiling finding of XLVIII is WITHDRAWN.**
-> Run 30 (Watch Dogs: Legion, audio flight) came back: the
-> extraction pipeline is mechanically flawless — both lottery draws
-> armed (`armed:1 srtp_derived:1 file:1`), zero `srtp_fail` /
-> `malformed` / `toc_invalid` / `seq_loss` across 15 610 + 40 000
-> packets (40 000/40 000 HMAC-SHA1-80 authenticated proves the
-> server exporter half too), granulepos 9 596 160 = 48 000 x 199.92 s
-> exactly, valid 834-page OggOpus. The CONTENT is digital silence
-> (-91 dB mean, +/-3 LSB): the game never reached launched state
-> inside our 78 s / 200 s media windows. **The operator then
-> live-tested the same title in the browser** — Legion DOES launch
-> and DOES make sound (queue->stream 2 m 26 s; launcher->game
-> 1 m 08 s; game->first actionable notification 1 m 11 s; audio from
-> launch onward, continuing under the notification). That overturns
-> two XLVIII conclusions at once: there is **no ~600 s server
-> ceiling** (the operator is on the **Warsaw** `cloudmatchbeta`
-> pool, Free tier, 1 h browser sessions, never cut at 10 min), and
-> "Legion never starts" was a *timing* verdict, not a *capability*
-> one. Leading hypothesis for the 599.1-599.2 s deaths: server-side
-> **idle / no-input** policy. XLIX therefore ships four fixes:
-> **F12** `sess_audio_file_close` after `sess_pump_stop` on BOTH
-> exit paths + a defensive close at `teardown:` (run 30 leaked the
-> FILE* across the lottery gap — no EOS, corrupt span
-> [815 462, 817 967)); **F13** per-draw `audio_d<N>.opus`; **F14**
-> lottery alternates the jiggle (odd = ON, even = OFF) and emits a
-> `lottery_arm` line — one run answers both the audio question and
-> the idle question; **F15** `--lottery-stop-on-keeper=0|1`
-> (default 1; 0 is required for an A/B). Sandbox-proven: native
-> battery PASS zero warnings (knogg 163, knarx 62, knselftest 118,
-> kninput 548), cross `-Werror` x2 arches PASS with **0 SKIPs**,
-> ctest **22/22** on BOTH backends, T10 POSIX dry **ALL PASS 72**
-> (unchanged — no suite/self-test/check was added; the TARGET
-> expectation for run 31 stays **82**, which is what run 30's
-> XLVIII-build T10 scored).
-> **Target-pending: run 31.** G3's "audible audio" bar stays met as
-> EXTRACTION; decode-to-speaker remains the deferred follow-on.
-> Remaining stage-3 scope after run 31: G3 keyboard/wheel/text (the
-> next input candidate is a click / ENTER to clear the in-game
-> notification), G4 cursor payloads, G1 handshake timeout, D-t13 —
-> see `START-HERE.md` §3/§4/§8, `docs/RTSP.md` §37,
-> `docs/INPUT.md` §9, `docs/BUNDLE-AUDIO.md` §6/§7.1/§9.
+> (XLVII); STAGE 3 UNDERWAY — audio extraction is LIVE-PROVEN (XLIX)
+> AND THE INPUT GAP IS NOW CLOSED IN CODE: THE CLIENT CAN TYPE.**
+> Run 31 (Watch Dogs: Legion, the interleaved jiggle A/B,
+> `--lottery=4 --lottery-gap=60 --session-jiggle=100
+> --lottery-stop-on-keeper=0 --session-audio-out=audio.opus`) came
+> back with **four draws, four `recovery_exhausted`** (media 16.19 /
+> 13.96 / 35.96 / 122.23 s; 487 / 420 / 1080 / 3668 AUs; 18 138
+> datagrams, all authenticated, 0 gaps, 0 decode errors) — so
+> **F14/F15 are proven live** (four `lottery_arm` lines alternating
+> 100/0/100/0, all four draws flown) and **F12 is proven live** (one
+> `audio_close` per draw, EOS pages present, no leaked FILE*, no
+> scrambled page) — but the **≈600 s A/B has NO RESULT**: nothing
+> survived past 123 s of media, so the idle-policy hypothesis is
+> still open. **Two of our own fixes were caught by their own
+> evidence.** (a) F13's per-draw naming was broken: the delivered
+> files are `audio_d1_d1us` … `audio_d4_d4us` — suffix doubled AND
+> no `.opus` extension — because the derivation `memcpy`'d
+> OVERLAPPING memory (`strrchr` into the destination; ASan
+> `memcpy-param-overlap` on the rig). Sizes match the `audio_close`
+> counters exactly, so the audio was intact and only the name was
+> wrong. (b) The `.264` complaint ("only the first file works") is
+> answered with the shipping binary: the single-AU dumps are NOT
+> corrupt — `au_00001_k.264` carries SPS/PPS and decodes, every
+> P-frame file cannot be started on (`Invalid data found when
+> processing input`) — and run 31 also flew four draws into ONE
+> `--session-au-dir`, so draw 2's `au_00001_k.264` replaced draw 1's.
+> **THE FINDING THAT REDIRECTS THE PROJECT — THE LOGIN WALL:** all
+> **64** `sctl_010a` process notifications were decoded and their
+> **46** `processName` entries are Ubisoft Connect ONLY
+> (`UplayWebCore.exe` x26, `UplayService.exe` x16, `upc.exe` x4) with
+> **ZERO game binaries on any draw**. The operator's retraction of
+> the XLIX "Legion launches with our client" claim is therefore
+> confirmed from our own capture, and the mechanism is now known:
+> play.geforcenow.com's web client **types the credentials INTO THE
+> STREAM** (auto-login), so the browser reaches the game in seconds
+> while our client — which sent no keystroke — is handed the
+> launcher's login dialog (`au_00001_k.264` IS that dialog). The
+> audio is silent for the same reason: nothing that makes sound ever
+> ran. **G3's keyboard scope is the critical path, not a follow-on.**
+> Also measured: the string `TEARDOWN` appears **ZERO times in any
+> run-31 log** (XLIX's teardown was fire-and-forget with no event
+> line), and draws 2, 3 and 4 each walked the CloudMatch 403
+> SESSION_LIMIT ladder (`cm_create_backoff` 20 s / 40 s / 80 s) —
+> **140 s of dead queue time on three of four draws** because the
+> previous draw never released its seat. Round L therefore ships four
+> fixes: **F16** `kn_drawpath.{c,h}` — the per-draw naming rule as ONE
+> pure, alias-free, in-place-safe module (`test_kndrawpath` **1051
+> checks**, the 21st suite; used by the audio path, the video path and
+> the AU names); **F17** `--session-video-out=F.264` /
+> `--replay-video-out=F.264` — ONE **continuous** per-draw Annex-B
+> stream (`video_d<N>.264`) through the shared writer
+> `knv_dump_au()`, plus draw-numbered AU names
+> `au_d<N>_%05u_%c.264`; **F18** the TEARDOWN is now ALWAYS logged
+> with its real rc/status (`rtsp_teardown`) and `--session-release`
+> (default **OFF**) adds the CloudMatch `DELETE v2/session/{id}` on a
+> fresh TLS stream (`cm_release`, 2xx|404 = gone); **F19** REAL INPUT
+> — `--input-script=FILE`, `--input-live`, `--input-anti-afk[=MS]`
+> (the reference's VK 0x7C pulse), `--input-text-gap=MS` and
+> `--input-check=FILE` (offline parse, rc 2 on error), with five
+> discrete builders in `kn_input.c` byte-exact against the Rust
+> goldens (`test_kninput` 548 -> **794**), gated on the activation
+> chain's `enable-input(true)` and routed sid 0 (keys/buttons/wheel) /
+> sid 6 (mouse motion).
+> **Target-pending: run 32 = THE LOGIN RUN** (`--input-script=login.txt
+> --session-video-out=video.264 --session-audio-out=audio.opus
+> --session-release`): does a typed login get past Ubisoft Connect,
+> i.e. does a GAME process appear in `0x010a`, does `video_d1.264`
+> show gameplay, and is `audio_d1.opus` finally non-silent. G3's
+> "audible audio" bar stays met as EXTRACTION; decode-to-speaker
+> remains the deferred follow-on. Remaining stage-3 scope after run
+> 32: G3 mouse/wheel live proof (built, sandbox-proven, never flown),
+> G4 cursor payloads, G1 handshake timeout, D-t13 — see
+> `START-HERE.md` §3/§4/§8, `docs/RTSP.md` §38, `docs/INPUT.md` §10,
+> `docs/BUNDLE-AUDIO.md` §6/§10, `docs/INTEGRATION.md` rev 41.
 >
-> **Sandbox gate canon at XLIX close:** native battery PASS (zero
-> warnings; baselines test_knogg **163**, test_knarx **62**,
-> test_knselftest **118**, test_kninput **548**) · cross `-Werror`
-> x2 arches PASS, **0 SKIPs** (all four vendor trees staged:
-> tiny-aes-c `23856752f`, crypto-algorithms-sha1 `cfbde484`,
-> mbedtls v3.6.0 `2ca6c285` + framework `750634d3`, usrsctp
-> `c625e219` — note the correct URL is
-> `github.com/sctplab/usrsctp`) · ctest **22/22** x2 backends
-> (`build/net-mb`, `build/net-sch`; cmake DOES build `knvstd` in both
-> trees — round XLIX stamp verified in all three sandbox binaries —
-> but **without FFmpeg**, because the owner's `build/ffmpeg/` dev
-> tree is gitignored: `kn_decode` compiles as the honest stub and
-> `decode.synthetic` reports `skipped`. That is the designed
-> no-FFmpeg mode (`CMakeLists.txt` :146-193), not a failure) · T10
-> POSIX dry **ALL PASS 72** (target expectation **82**; zero compiler
-> warnings) · T13 **ALL PASS 63** against the mbedTLS cmake binary
-> (`--knvstd build/net-mb/knvstd`; no wire change) — ALL PASS **51**
-> with ONE by-design SKIP (the gcm256 leg) against the bare
-> `build/knvstd`, which is cm128-only · e2e **43/43** (harness rebuilt
-> from XLIX sources, `-Wall -Wextra`, zero warnings) · summary skeleton
-> canon **113 recursive keys**, re-validated against run 30's real
-> stdout (`tools/check_summary_skeleton.py`: 113 == 113, F12–F15 add
-> and remove no key) · selftest registry **16** (audio.vectors 188
-> checks, gated) · knvstd stamp **XLIX** in all three sandbox binaries
-> (`build/knvstd`, `build/net-mb/knvstd`, `build/net-sch/knvstd`).
+> **Sandbox gate canon at L close** (every gate re-run after the last
+> edit): native battery **PASS**, zero warnings, **21 suites** —
+> baselines **test_kndrawpath 1051 (NEW)**, **test_kninput 794** (was
+> 548), test_knogg 163, test_knarx 62, test_knselftest 118, test_knrx
+> 218, test_knbw 387, test_kncm 148, test_knrtsp 150 · cross
+> `-Werror` x2 arches **PASS, 0 SKIPs** (all four vendor trees staged:
+> tiny-aes-c `23856752f`, crypto-algorithms-sha1 `cfbde484`, mbedtls
+> v3.6.0 `2ca6c285` + framework `750634d3`, usrsctp `c625e219` — the
+> correct URL is `github.com/sctplab/usrsctp`) · ctest **25/25** x2
+> backends (`build/net-mb`, `build/net-sch`; was 22/22 — the three new
+> entries are `test_kndrawpath`, `knvstd_input_check` and
+> `knvstd_input_check_rejects` (WILL_FAIL). cmake DOES build `knvstd`
+> in both trees — round **L** stamp verified — but **without FFmpeg**,
+> because the owner's `build/ffmpeg/` dev tree is gitignored:
+> `kn_decode` compiles as the honest stub and `decode.synthetic`
+> reports `skipped`. That is the designed no-FFmpeg mode
+> (`CMakeLists.txt` :146-193), not a failure) · T10 POSIX dry **ALL
+> PASS 74** (was 72) and the **TARGET expectation moves 82 -> 84**:
+> round L caught that cmake *builds* every suite while T10 *runs* only
+> the ones its own `suites` list names, so `test_kndrawpath` was added
+> there AND to `required_bins` — without that edit the F16 suite would
+> have been built, shipped and never executed on the target, silently ·
+> T13 **ALL PASS 63** against the mbedTLS cmake binary (`--knvstd
+> build/net-mb/knvstd`) and 63 against the cmake `build/knvstd` (cmake
+> auto-detects the staged mbedTLS) — **ALL PASS 51** with ONE by-design
+> SKIP (the gcm256 leg) against the raw-recipe `build/knvstd-bare`,
+> which is cm128-only · e2e **48/48** (was 43; the F18 release leg
+> asserts `deletes: 1` in the fake rig's `done` line over a real
+> loopback socket) · summary skeleton canon **113 recursive keys**,
+> re-validated against run 31's REAL stdout (113 == 113, "only in
+> skeleton/live: (none)" — F16–F19 add and remove NO key, deliberately:
+> the per-draw evidence lives on the `input_summary`,
+> `video_stream_end`, `rtsp_teardown` and `cm_release` event lines) ·
+> selftest registry **16** (audio.vectors 188 checks, gated) ·
+> ASan/UBSan clean on `test_kndrawpath`, `test_kninput` and a fully
+> sanitized `knvstd` (`--input-check` x2 + the F17 replay with both
+> dump legs); the only runtime note in the tree remains the vendored
+> `crypto-algorithms-sha1/sha1.c:26` · **F17 host proof**
+> (`logs/f17_video_proof_L.txt`): the repo's 60-frame clip replayed
+> through the full rx pipeline -> `video.264` 42 944 B, ffprobe/ffmpeg
+> **60 frames OK**, while `au_00002_p.264` / `au_00030_p.264` report
+> `Invalid data` and `au_00001_k.264` decodes (1 frame) · knvstd stamp
+> **L** in all three sandbox binaries (`build/knvstd`,
+> `build/net-mb/knvstd`, `build/net-sch/knvstd`).
 
 ---
 

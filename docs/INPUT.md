@@ -240,8 +240,11 @@ malformed JSONL — the round-XVIII discipline.
 | `streamer/src/kn_input.c` | builders, TLV walker, version parser, histogram, cursor machine |
 | `streamer/src/kn_input_kat_vectors.h` | **generated** — do not edit |
 | `tools/input_reference.py` | the independent Python model; self-proves, then emits the header |
-| `streamer/tests/test_kninput.c` | 548 checks: goldens (incl. the round-XLI.1 relative-mouse Rust golden), parser vectors, the 5 cursor tests, truncation sweep |
-| `streamer/src/knvstd_main.c` | `sess_ctrl_*` (pump-thread service) + the evidence lines + the round-XLI.1 jiggle cadence (§9) |
+| `streamer/tests/test_kninput.c` | **794** checks (was 548): activation + single goldens, the round-XLI.1 relative-mouse Rust golden, **the 21 round-L discrete vectors** (key/absolute/button/wheel + the second Rust golden), parser vectors, the 5 cursor tests, truncation sweep |
+| `streamer/tests/fixtures/input_login_example.txt` | **round L**: the input-script format as a runnable fixture (137 events, every command form) + the `knvstd_input_check` ctest |
+| `streamer/tests/fixtures/input_bad.txt` | **round L**: the rejection fixture (`knvstd_input_check_rejects`, WILL_FAIL) |
+| `streamer/include/kn/kn_drawpath.h`, `streamer/src/kn_drawpath.c` | **round L (F16)**: the per-draw capture-naming rule, alias-free (pinned by `test_kndrawpath`, 1051 checks) |
+| `streamer/src/knvstd_main.c` | `sess_ctrl_*` (pump-thread service) + the evidence lines + the round-XLI.1 jiggle cadence (§9) + **the round-L input driver `si_*` (§10)** |
 | `streamer/src/kn_selftest.c` | the **`input.vectors`** self-test (50 checks, phase A, gated) — the shipped binary re-proves the same goldens; registry 14 → 15 |
 | `streamer/tests/test_knselftest.c` | 117 checks — registry/run-all counts and the portable-must-be-OK set updated for `input.vectors` |
 
@@ -251,7 +254,7 @@ must be byte-identical.
 Two ways to prove the builders on any machine:
 
 ```sh
-./build/test_kninput                          # 548 checks (the full battery)
+./build/test_kninput                          # 794 checks (the full battery)
 ./build/knvstd --selftest=input.vectors       #  50 checks from the SHIPPED binary
 ```
 
@@ -472,3 +475,235 @@ cannot produce audio or gameplay evidence, so the first *real* input
 (a click / ENTER at a chosen t) is the next input-stage candidate —
 run 30's silence is the field argument for it (`docs/BUNDLE-AUDIO.md`
 §9, trap 24).
+
+## 10. Round L — REAL INPUT (F19): the discrete wire layer, three sources, one gate
+
+> §9 is the *synthetic* jiggle and its A/B history. This section is the
+> thing §9 kept deferring: a client that can actually type and click.
+> Everything here shipped in round L and is live-pending (run 32).
+
+### 10.1 Why now: the login wall, named from the rig's own notifications
+
+Run 31 (four interleaved Legion draws) decoded all 64 `sctl_010a`
+notifications. Their `processName` tally: `UplayWebCore.exe` ×26,
+`UplayService.exe` ×16, `upc.exe` ×4 — **46/46 Ubisoft Connect, zero game
+processes**. The rig launched Ubisoft Connect for app 100361011 and went
+no further, so every draw streamed a static launcher screen (~3
+datagrams/AU) with silent audio until it froze.
+
+The operator then retracted XLIX's "Legion launches itself" note after
+seeing run 31's `au_00001_k.264`: the stream shows the **Ubisoft login
+dialog**. Their explanation matches the process evidence exactly —
+play.geforcenow.com's web client performs auto-login **by sending the
+credentials into the stream as input**, so the browser is in the game in
+seconds while our client, which sent **zero discrete input messages in
+four draws**, is handed the login prompt and waits.
+
+A grep of the reference client settles what we can copy: the OpenNOW
+sparse clone has **no credential or login handling anywhere in the
+streamer protocol** — auto-login is a web-tier feature. So there is no
+shortcut. The only route past that wall is the one the browser takes:
+**type**. (`docs/RTSP.md` §38.2–§38.3 carries the full analysis.)
+
+### 10.2 The five discrete builders (byte-exact, two Rust goldens)
+
+`kn_input.c` grew the discrete set alongside the round-XLI.1 relative
+mouse. All five ride the same `0x0206` envelope as §9; only the inner
+body and the timestamp count differ:
+
+| type | code | inner body (offsets from `[20]`) | total | route |
+|---|---|---|---|---|
+| KEY_DOWN / KEY_UP | 3 / 4 | vk BE u16, modifiers BE u16, 10×`00` | **52 B** | sid 0 |
+| MOUSE_ABSOLUTE | 5 | x BE u16, y BE u16, `08 00`, w BE u16, h BE u16 | **52 B** | sid 6 |
+| MOUSE_RELATIVE | 7 | dx BE i16, dy BE i16, `00 00` | **44 B** | sid 6 |
+| BUTTON_DOWN / BUTTON_UP | 8 / 9 | button u8, `00` | **44 B** | sid 0 |
+| WHEEL | 10 | dx BE i16, dy BE i16, `00 00` | **44 B** | sid 0 |
+
+Envelope fields are unchanged from §9 (`[0..2]` command, `[2..4]` payload
+length, `[4..8]` packet length BE, `[8..12]` `0x0e` LE, `[12..16]` inner
+length BE, `[16..20]` native type LE, body at `[20]`). **The timestamps
+are the trap**: they sit at `[36..44]` for every type and additionally at
+`[44..52]` for types 3/4/5 (KEY_DOWN, KEY_UP, MOUSE_ABSOLUTE) — *not* at
+32/40. Padding to the 24-byte floor happens before the timestamps are
+appended, which is what moves them there.
+
+API (all in `kn/kn_input.h`, each documented with its reference line):
+
+```c
+int kn_input_key(uint16_t vk, uint16_t modifiers, int pressed,
+                 uint64_t timestamp_us, uint8_t *out, size_t out_len);
+int kn_input_mouse_button(unsigned button, int pressed,
+                          uint64_t timestamp_us, uint8_t *out, size_t out_len);
+int kn_input_mouse_absolute(uint16_t x, uint16_t y, uint16_t width,
+                            uint16_t height, uint64_t timestamp_us,
+                            uint8_t *out, size_t out_len);
+int kn_input_wheel(int16_t delta_x, int16_t delta_y,
+                   uint64_t timestamp_us, uint8_t *out, size_t out_len);
+int kn_input_route_sid(uint32_t input_type);     /* 6 for motion, 0 else */
+int kn_input_vk_from_name(const char *name);     /* "enter", "f13", "a" … */
+int kn_input_vk_from_ascii(int ch, uint16_t *vk, uint16_t *mods);
+```
+
+Constants worth knowing: `KN_INPUT_MOD_SHIFT/CTRL/ALT/META` = 0x01/0x02/
+0x04/0x08 (AltGr = right Alt + the ctrl+alt bits, per the reference's
+`docs/keyboard-mapping.md`); `KN_INPUT_BTN_LEFT/MIDDLE/RIGHT/X1/X2` =
+1/2/3/4/5 (`windows_raw_input.rs:326-332`); `KN_INPUT_VK_ANTI_AFK` =
+0x7C. A wheel notch is ±120. **Absolute coordinates are PIXELS inside the
+w×h viewport, not normalized 0..65535**, and a zero viewport is rejected
+by the reference FFI (`opennow-streamer-ffi:1088-1108`) — so is ours.
+
+Proven three ways: `tools/input_reference.py` (independent Python model,
+self-proves 8/8 activation messages + **both** Rust goldens before
+emitting the header) → `kn_input_kat_vectors.h` (21 discrete vectors) →
+`test_kninput` **794 checks** (byte-exact rebuild of every vector, field
+offsets asserted, route/length/type checked, bounds sweep). The two
+goldens transcribed verbatim from `nvst_input.rs:1868-1911`:
+
+```
+KEY_DOWN vk=0x41 mods=1 ts=0x015b15b1
+060230000000002c0e000000000000120300000000410001000000000000000000000000b1155b0100000000b1155b0100000000
+MOUSE_RELATIVE dx=dy=24 ts=0x01861330
+06022800000000240e0000000000000a07000000001800180000000000000000000000003013860100000000
+```
+
+### 10.3 Source 1 — `--input-script=FILE`: a timeline
+
+One event per line, `#` or `;` comments, blank lines ignored. **`t_ms` is
+relative to the draw's FIRST MEDIA TICK**, not to process start — so one
+file replays identically on every lottery draw however long the queue
+took (run 31's queues burned 140 s each on the 403 ladder; a
+process-relative script would have typed into a dead channel).
+
+```
+<t_ms> key   <vk|name|char> <down|up> [mods]
+<t_ms> type  <text to end of line>
+<t_ms> mouse <x> <y> <w> <h>
+<t_ms> mrel  <dx> <dy>
+<t_ms> btn   <1..5|left|middle|right|x1|x2> <down|up>
+<t_ms> wheel <dx> <dy>
+```
+
+- `<vk>` accepts `0x41`, `65`, a single character (`A`), or a name from
+  the reference's `shortcut_virtual_key` table (`enter`, `esc`, `tab`,
+  `space`, `up`/`down`/`left`/`right`, `f1`..`f24`, …).
+- `[mods]` accepts `shift`/`ctrl`/`control`/`alt`/`meta`/`win` joined with
+  `+`, a number (`3`, `0x03`), or `none`. **A single character carries its
+  IMPLIED modifiers** (`key A down` = shift+0x41, not a lowercase "a";
+  `key ! down` = shift+1); an explicit argument REPLACES them. Without
+  that rule a login script silently mistypes every capital.
+- `type` expands to one down/up pair per character through the US table,
+  spaced `--input-text-gap=MS` (default 30; the up lands halfway).
+  Characters the table cannot express are **counted, not guessed**
+  (`unmapped_chars`) — see the caveat in §10.7.
+- `mouse` is absolute PIXELS in a `w×h` viewport (the CM create body asks
+  for 1280×720, so `mouse 640 360 1280 720` is the centre of the screen).
+- Capacity 4096 events; the loader sorts by `t_ms` (insertion), so an
+  out-of-order file still fires in order.
+
+`streamer/tests/fixtures/input_login_example.txt` is the format's
+runnable documentation: 137 events, every command form, the implied-mods
+rule, arrows, and a hand-placed anti-AFK pulse. It is also a permanent
+ctest (`knvstd_input_check`).
+
+### 10.4 Source 2 — `--input-live`: the console becomes the keyboard
+
+Keystrokes typed into the knvstd console are forwarded as they arrive
+(down+up per key). Win32 uses `_kbhit`/`_getch` (including the `0xE0`
+extended-key prefix); POSIX uses termios raw mode with `VMIN=VTIME=0` and a
+zero-timeout `select`, **restored on every exit path including Ctrl-C** so
+the operator never loses their shell. Mapped: arrows, Tab, Enter (`\r` and
+`\n` → VK 0x0D), Backspace, ESC, Home/End/PgUp/PgDn/Del; Ctrl-C is sent as
+ctrl+0x43 rather than swallowed. At most 16 keys are drained per media
+tick so a paste cannot starve the loop. Unmappable input is counted
+(`unmapped_chars`), never retyped as something else.
+
+Honest degradation: when stdin is not a TTY (the operator flies with
+`> logs\run32.log` — stdout redirection is fine, but a *piped* stdin is
+not) the flag reports
+`{"event":"input_live","armed":0,"reason":"no_console"}` and the run
+continues rather than pretending to read keys.
+
+Use the script for anything timed (a login), `--input-live` for poking at
+a menu interactively. Both may be armed at once (`source:"script+live"`).
+
+### 10.5 Source 3 — `--input-anti-afk[=MS]`: the reference's own pulse
+
+`opennow-streamer-core:1604-1648` keeps a session looking alive with
+**VK 0x7C (F13) down+up, no modifiers** — F13 is bound to nothing in any
+layout, which is exactly why the reference chose it. Our flag sends the
+same two messages every MS (bare flag = 60 000; the first pulse logs
+`input_anti_afk {"action":"first_pulse"}`). This is the *honest* instrument
+for the idle-policy question §9 raised: real key events from the
+reference's own keep-awake path, not synthetic ±1 px mouse motion whose
+survival effect is confounded (§9's XLVII downgrade).
+
+### 10.6 One sender, one gate, one route table
+
+All three sources go through the same `si_send` → `sess_fb_push(sid, …)`
+path, so there is exactly one place where a message can be built wrong:
+
+- **the gate**: nothing flies before the activation chain latches
+  `enable-input(true)` (`pump.input_active`) — the same latch the jiggle
+  uses, because input ahead of the chain is the one thing the reference
+  never does. Due-but-gated events are **counted (`gated`) and retried on
+  a later tick**, never dropped.
+- **the route**: `kn_input_route_sid(type)` → sid 6 (ControlPartial,
+  unordered, 300 ms PR-SCTP lifetime) for MOUSE_RELATIVE and
+  MOUSE_ABSOLUTE, sid 0 (ControlReliable, ordered) for keys, buttons and
+  wheel — the reference's `NVST_CHANNEL_PROFILE`
+  (`nvst_input.rs:72-158`), and the same split §9 proved live in run 23.
+- **the clock**: timestamps ride `pump.origin_us`, the activation chain's
+  own epoch (`transport_origin.elapsed()` in the reference).
+- **staleness**: an event more than 5 s past its due time is skipped and
+  counted (`late_skips`), so a recovery tick cannot dump a whole timeline
+  into a session that just came back.
+
+Evidence lines (stdout JSONL + knlog, channel `input`):
+`input_script_loaded` (path, events, span_ms, unmapped_chars),
+`input_live` (armed + reason), `input_first_send` (kind, sid, bytes,
+ts_us, source), `input_anti_afk` (first pulse), and a per-draw
+**`input_summary`** carrying `events/fired/sent/key/btn/abs/rel/wheel/
+gated/build_fail/push_fail/late_skips/unmapped/afk_pulses/live_keys`.
+`input_summary` is logged at **WARN when input was armed but `sent` is 0**
+— run 31's exact shape, now impossible to miss.
+
+### 10.7 Caveats (read before writing a login script)
+
+1. **The US table only.** `kn_input_vk_from_ascii` implements a US layout.
+   A password containing Polish diacritics (`ą ć ę ł ń ó ś ź ż`) cannot be
+   expressed: those characters are counted in `unmapped_chars` and
+   SKIPPED, so the login would silently mistype. `--input-check=FILE`
+   reports the count before you spend a queue slot — **if it is non-zero,
+   stop and say so**; the fix (a scancode/layout path, or the reference's
+   `INPUT_TEXT` type 23) is a round of its own.
+2. **Focus is blind.** Our client shows no video, so a script cannot
+   verify where the caret is. The run-32 template therefore uses
+   Tab/Enter only and repeats the whole attempt once ~70 s later. If the
+   launcher's focus is not on the e-mail field, the fix is a `mouse`
+   click at absolute pixels on that field (supported today).
+3. **Credentials never leave the rig.** The script file is not a log
+   artifact: do not commit it, paste it, or attach it. `--input-check`
+   output is safe to share (VK codes only, no text) — send that instead.
+4. **A CAPTCHA or 2FA prompt ends this route.** If run 32's video shows
+   one, typing is proven but insufficient, and the browser comparison
+   (the operator's DevTools capture of play.geforcenow.com's create body
+   + input) becomes necessary after all.
+
+### 10.8 Validating a script without a session: `--input-check=FILE`
+
+```sh
+knvstd --input-check=login.txt [--input-text-gap=30]
+```
+
+Prints one JSON line per event (`i`, `t_ms`, `kind`, and the kind's
+fields + the `sid` it will ride), then a summary (`events`, `span_ms`,
+`lines`, `comments`, `blanks`, `unmapped_chars`). **Exit 0** = the file
+will replay; **exit 2** = a parse error with the line number and the
+reason (`unknown command 'teleport'`). Per-event dump is capped at 200
+lines. Two permanent ctest legs pin the parser:
+`knvstd_input_check` (the 137-event fixture) and
+`knvstd_input_check_rejects` (WILL_FAIL on `input_bad.txt`).
+
+This exists because a rejected script must cost nothing: run 31 showed a
+draw is 2–20 minutes of queue plus a seat cooldown, and a mistyped
+password wastes all of it silently.

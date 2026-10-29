@@ -38,6 +38,7 @@
 #include "kn/kn_d3d.h"
 #include "kn/kn_decode.h"
 #include "kn/kn_diag.h"
+#include "kn/kn_drawpath.h"
 #include "kn/knfec.h"
 #include "kn/kn_http.h"
 #include "kn/kn_input.h"
@@ -65,8 +66,12 @@
 #endif
 #ifdef _WIN32
 #  include <direct.h>     /* _mkdir */
+#  include <conio.h>      /* round L (F19): _kbhit/_getch for --input-live */
 #else
 #  include <sys/stat.h>   /* mkdir */
+#  include <termios.h>    /* round L (F19): raw console for --input-live */
+#  include <unistd.h>
+#  include <sys/select.h>
 #endif
 
 #ifdef _WIN32
@@ -81,18 +86,28 @@
 
 static void usage(void)
 {
+    /* Split across four printf calls: the whole text is ~5.5 kB and
+     * ISO C99 only guarantees 4095 characters per string literal
+     * (-Woverlength-strings, round L). */
     printf("knvstd - KarnyNow streamer (stage-1 skeleton)\n"
            "usage:\n"
            "  knvstd --selftest=<name|all> [--log-dir=DIR]\n"
            "  knvstd --loopback[=FILE.264] [--loopback-seconds=N] [--no-audio]\n"
            "  knvstd --replay-capture=FILE.hex [--replay-au-dir=DIR]\n"
+           "         [--replay-video-out=F.264]  (round L (F17): ONE\n"
+           "          continuous Annex-B stream instead of per-AU files -\n"
+           "          the host-side proof that a session draw's\n"
+           "          video_d<N>.264 plays; ffprobe it)\n"
            "         [--replay-srtp=PROFILE:TAG:KEYHEX:SALTHEX] [--replay-vps=N]\n"
            "  knvstd --capture [--capture-port=N] [--capture-bind=IP]\n"
            "         [--capture-out=FILE] [--capture-seconds=N]   (0 = until Ctrl-C)\n"
            "  knvstd --decode [--decode-port=N] [--decode-bind=IP]\n"
            "         [--decode-seconds=N] [--decode-srtp=SPEC] [--decode-vps=N]\n"
            "         [--decode-au-dir=DIR] [--decode-expect-frames=N]\n"
-           "  knvstd --session --session-token=TOK --session-app=N\n"
+           "  knvstd --input-check=FILE [--input-text-gap=MS]\n"
+           "          parse + dump an input script WITHOUT a session (round L (F19);\n"
+           "          exit 2 with the line number on a parse error)\n");
+    printf("  knvstd --session --session-token=TOK --session-app=N\n"
            "         [--session-title=S] [--session-device=S] [--cm-host=HOST]\n"
            "         [--session-seconds=N] [--session-queue-timeout=N]\n"
            "         [--session-keep]  (leave the cloud session alive on abort\n"
@@ -107,7 +122,52 @@ static void usage(void)
            "          key exporter — see the audio_arm event. Round XLIX:\n"
            "          under --lottery=N>1 each draw writes its OWN file\n"
            "          F_d<draw>.opus and every draw closes it with the EOS\n"
-           "          page — an audio_close line per draw is the proof)\n"
+           "          page — an audio_close line per draw is the proof.\n"
+           "          Round L (F16): the per-draw name is built by\n"
+           "          kn_drawpath, so it is audio_d1.opus — run 31 delivered\n"
+           "          audio_d1_d1us (no extension) from an overlapping copy\n"
+           "          that ASan caught)\n"
+           "         [--session-video-out=F.264] (round L (F17): write ONE\n"
+           "          CONTINUOUS Annex-B stream per draw, every decoded AU\n"
+           "          appended in order — this file PLAYS, unlike the\n"
+           "          single-AU dumps, which have no SPS/PPS of their own.\n"
+           "          Under --lottery=N>1 each draw gets F_d<draw>.264; the\n"
+           "          single-AU dumps in --session-au-dir are now\n"
+           "          au_d<draw>_NNNNN_k.264 so draws stop overwriting each\n"
+           "          other. Proof: video_stream_begin/video_stream_end lines\n"
+           "          with aus/bytes/file_bytes)\n"
+           "         [--session-release] (round L (F18): after the draw,\n"
+           "          LOG the RTSP TEARDOWN (rc/status) and send the\n"
+           "          CloudMatch DELETE v2/session/{id} that actually\n"
+           "          frees the seat. DEFAULT OFF: today's behaviour is\n"
+           "          unchanged, and --no-session-release says so\n"
+           "          explicitly. Run 31 is why: no TEARDOWN ever reached\n"
+           "          the wire, the cloud kept the seat, and the next\n"
+           "          create hit 403 SESSION_LIMIT with a 20/40/80 s\n"
+           "          backoff. Evidence: rtsp_teardown + cm_release lines)\n");
+    printf("         [--input-script=FILE] (round L (F19): replay a\n"
+           "          timeline of key/mouse events into the stream.\n"
+           "          Format, one event per line, t_ms relative to the\n"
+           "          first media tick of the draw, '#' comments:\n"
+           "            <t> key <vk|name|char> <down|up> [mods]\n"
+           "            <t> type <text>       (a down/up pair per char)\n"
+           "            <t> mouse <x> <y> <w> <h>  (absolute PIXELS)\n"
+           "            <t> mrel <dx> <dy>         (relative, sid 6)\n"
+           "            <t> btn <1..5|left|right|middle|x1|x2> <down|up>\n"
+           "            <t> wheel <dx> <dy>        (a notch is +/-120)\n"
+           "          Nothing flies before the activation chain latches\n"
+           "          enable-input(true) — the same gate the jiggle uses)\n"
+           "         [--input-live] (round L (F19): forward keystrokes\n"
+           "          typed into the knvstd console to the rig; needs a\n"
+           "          real console, so it reports armed:0 when stdin is\n"
+           "          redirected. Arrows/Tab/Enter/Backspace are mapped)\n"
+           "         [--input-anti-afk[=MS]] (round L (F19): the\n"
+           "          reference's own pulse — VK 0x7C (F13) down+up, no\n"
+           "          modifiers, every MS (bare flag = 60000). F13 is bound\n"
+           "          to nothing, so it keeps the session looking active\n"
+           "          without touching the game)\n"
+           "         [--input-text-gap=MS] (spacing between the characters\n"
+           "          a 'type' line expands to; default 30)\n"
            "         [--session-jiggle=MS] (mouse-jiggle period in ms;\n"
            "          default 0 = OFF — run 27 proved the jiggle shortens\n"
            "          draws; 100 restores the legacy XLI.1 behaviour)\n"
@@ -821,9 +881,72 @@ static int run_loopback(const char *src_arg, int seconds, int no_audio,
  */
 typedef struct rp_ctx {
     const char *au_dir;
-    unsigned long aus, key_aus, write_errors;
+    long draw_index;                 /* round L (F17): 0 = no suffix */
+    FILE *video_fp;                  /* round L (F17): continuous stream */
+    unsigned long long video_aus, video_bytes;
+    unsigned long aus, key_aus, write_errors, video_write_errors;
     unsigned long long bytes;
 } rp_ctx;
+
+/* Round L (F17): the ONE place a decoded AU is written to disk, shared by
+ * the live session path (dec_drain_queue) and the offline replay path
+ * (rp_frame_cb) so the two can never drift apart.
+ *
+ *   au_dir      directory for the single-AU files (NULL/"" = skip that leg)
+ *   draw_index  > 0 puts "_d<N>" into the single-AU name — run 31 flew four
+ *               draws into ONE --session-au-dir, so draw 2's au_00001_k.264
+ *               silently replaced draw 1's (the operator's ".264 only the
+ *               first file works" complaint has this as its second cause)
+ *   video_fp    the continuous per-draw Annex-B stream (NULL = skip)
+ *   fi/kf/bytes/len   the AU itself
+ *   v_aus/v_bytes     optional stream counters
+ *
+ * Returns a bitmask: bit0 = a single-AU write failed, bit1 = a stream write
+ * failed. Both legs are best-effort: a dump failure must never take the
+ * session down (the counters are the evidence).
+ */
+static int knv_dump_au(const char *au_dir, long draw_index, FILE *video_fp,
+                       unsigned fi, int kf, const uint8_t *bytes, size_t len,
+                       unsigned long long *v_aus, unsigned long long *v_bytes)
+{
+    int errs = 0;
+
+    if (au_dir && au_dir[0]) {
+        char path[1200];
+        FILE *fp;
+        int n;
+        if (draw_index > 0)
+            n = snprintf(path, sizeof path, "%s/au_d%ld_%05u_%c.264", au_dir,
+                         draw_index, fi % 100000u, kf ? 'k' : 'p');
+        else
+            n = snprintf(path, sizeof path, "%s/au_%05u_%c.264", au_dir,
+                         fi % 100000u, kf ? 'k' : 'p');
+        if (n <= 0 || (size_t)n >= sizeof path) {
+            errs |= 1;
+        } else {
+            fp = fopen(path, "wb");
+            if (!fp) {
+                errs |= 1;
+            } else {
+                if (len && fwrite(bytes, 1, len, fp) != len) errs |= 1;
+                fclose(fp);
+            }
+        }
+    }
+
+    if (video_fp) {
+        /* The continuous stream: every AU appended in decode order. A
+         * partial write is counted and the file is left as-is (truncating
+         * it would destroy the part that DID play). */
+        if (len && fwrite(bytes, 1, len, video_fp) != len) {
+            errs |= 2;
+        } else {
+            if (v_aus) (*v_aus)++;
+            if (v_bytes) *v_bytes += (unsigned long long)len;
+        }
+    }
+    return errs;
+}
 
 static void rp_frame_cb(const kn_rx_frame *f, void *ud)
 {
@@ -845,19 +968,14 @@ static void rp_frame_cb(const kn_rx_frame *f, void *ud)
     c->aus++;
     if (f->keyframe) c->key_aus++;
     c->bytes += (unsigned long long)f->bytes_len;
-    if (c->au_dir && c->au_dir[0]) {
-        char path[1200];
-        FILE *fp;
-        int n = snprintf(path, sizeof path, "%s/au_%05u_%c.264", c->au_dir,
-                         (unsigned)(f->frame_index % 100000u),
-                         f->keyframe ? 'k' : 'p');
-        if (n <= 0 || (size_t)n >= sizeof path) { c->write_errors++; return; }
-        fp = fopen(path, "wb");
-        if (!fp) { c->write_errors++; return; }
-        if (f->bytes_len &&
-            fwrite(f->bytes, 1, f->bytes_len, fp) != f->bytes_len)
-            c->write_errors++;
-        fclose(fp);
+    /* round L (F17): one shared writer for both dump legs */
+    {
+        int e = knv_dump_au(c->au_dir, c->draw_index, c->video_fp,
+                            (unsigned)(f->frame_index % 100000u),
+                            f->keyframe ? 1 : 0, f->bytes, f->bytes_len,
+                            &c->video_aus, &c->video_bytes);
+        if (e & 1) c->write_errors++;
+        if (e & 2) c->video_write_errors++;
     }
 }
 
@@ -925,6 +1043,7 @@ static int rp_parse_srtp(const char *spec, int *profile, size_t *tag,
 #define RP_PKT_CAP   65600
 
 static int run_replay(const char *cap_path, const char *au_dir,
+                      const char *video_out,
                       const char *srtp_spec, long vps_override,
                       const char *log_dir)
 {
@@ -949,6 +1068,23 @@ static int run_replay(const char *cap_path, const char *au_dir,
 
     memset(&rc_ctx, 0, sizeof rc_ctx);
     rc_ctx.au_dir = au_dir;
+    /* Round L (F17): the CONTINUOUS stream leg, wired for replay too so
+     * the mechanism is provable on the host — no rig, no account, no
+     * queue. A replay-built video.264 is the same code path a session
+     * draw uses (one writer, knv_dump_au), so ffprobe'ing this file is
+     * evidence about the live one. */
+    if (video_out && video_out[0]) {
+        rc_ctx.video_fp = fopen(video_out, "wb");
+        if (!rc_ctx.video_fp) {
+            printf("{\"mode\":\"replay\",\"error\":\"video_out_open\","
+                   "\"path\":\"%.200s\"}\n", video_out);
+            fflush(stdout);
+        } else {
+            printf("{\"mode\":\"replay\",\"event\":\"video_stream_begin\","
+                   "\"path\":\"%.200s\"}\n", video_out);
+            fflush(stdout);
+        }
+    }
     if (au_dir && au_dir[0]) {
         /* best-effort create (the summary's au_write_errors is the honest
          * verdict when this fails — no silent fallback) */
@@ -1183,6 +1319,21 @@ static int run_replay(const char *cap_path, const char *au_dir,
         }
         if (doff >= sizeof drops) doff = sizeof drops - 1;
         drops[doff] = '\0';
+        if (rc_ctx.video_fp) {
+            long vsz;
+            fflush(rc_ctx.video_fp);
+            vsz = ftell(rc_ctx.video_fp);
+            fclose(rc_ctx.video_fp);
+            rc_ctx.video_fp = NULL;
+            printf("{\"mode\":\"replay\",\"event\":\"video_stream_end\","
+                   "\"path\":\"%.200s\",\"aus\":%llu,\"bytes\":%llu,"
+                   "\"file_bytes\":%ld,\"write_errors\":%lu}\n",
+                   video_out ? video_out : "",
+                   (unsigned long long)(rc_ctx.video_aus % 10000000000ull),
+                   (unsigned long long)(rc_ctx.video_bytes % 10000000000ull),
+                   vsz, rc_ctx.video_write_errors % 100000000ul);
+            fflush(stdout);
+        }
         lb_json_path(esc, sizeof esc, cap_path);
         printf("{\"mode\":\"replay\",\"summary\":{\"capture\":\"%.200s\","
                "\"records\":%lu,\"bad_lines\":%lu,\"authenticated\":%llu,"
@@ -1190,7 +1341,8 @@ static int run_replay(const char *cap_path, const char *au_dir,
                "\"fec_repaired\":%llu,\"stale\":%llu,\"gaps\":%llu,"
                "\"withheld\":%llu,\"kf_requests\":%llu,\"retransmits\":%llu,"
                "\"replay_rejected\":%llu,\"ev_overflow\":%u,"
-               "\"au_write_errors\":%lu,\"vps\":%u,\"srtp_profile\":%d,"
+               "\"au_write_errors\":%lu,\"vps\":%u,\"srtp_profile\":%d,\"video_aus\":%llu,\"video_bytes\":%llu,"
+               "\"video_write_errors\":%lu,"
                "\"state\":%d,\"drops\":{%s}}}\n",
                esc, records % 100000000ul, bad_lines % 100000000ul,
                (unsigned long long)(v.authenticated_packets % 10000000000ull),
@@ -1206,7 +1358,11 @@ static int run_replay(const char *cap_path, const char *au_dir,
                (unsigned long long)(v.replay_rejections % 1000000000ull),
                (unsigned)(v.ev_overflow % 1000000u),
                rc_ctx.write_errors % 100000000ul,
-               (unsigned)(vps % 100000000u), profile, v.state, drops);
+               (unsigned)(vps % 100000000u), profile,
+               (unsigned long long)(rc_ctx.video_aus % 10000000000ull),
+               (unsigned long long)(rc_ctx.video_bytes % 10000000000ull),
+               rc_ctx.video_write_errors % 100000000ul,
+               v.state, drops);
         fflush(stdout);
     }
 
@@ -1830,6 +1986,22 @@ typedef struct dec_ctx {
     long long    worst_decode_ms;
     /* reporting */
     const char  *au_dir;
+    /* Round L (F17): the per-draw identity of this capture + the
+     * CONTINUOUS stream dump. Run 31 delivered 5655 single-AU .264 files
+     * and the operator's complaint ("only the first .264 works", raised
+     * several times) is correct but its cause is not corruption: a lone
+     * AU has no SPS/PPS, so a player cannot start on it — that is
+     * container semantics. Two fixes, both here:
+     *   - `draw_index` goes INTO the per-AU filename
+     *     (au_d<N>_%05u_%c.264) so a lottery run's draws no longer
+     *     overwrite each other's dumps in one shared --session-au-dir;
+     *   - `video_fp` is ONE file per draw holding every AU back to back
+     *     (video_d<N>.264), which starts on the first keyframe and plays
+     *     as a normal Annex-B elementary stream.
+     * Counters are reported on the video_stream_end event line. */
+    long         draw_index;
+    FILE        *video_fp;
+    unsigned long long video_aus, video_bytes, video_write_errors;
     unsigned long long aus, key_aus, au_write_errors, event_lines,
                        event_lines_capped, kf_request_lines;
     unsigned long long rx_events_logged;
@@ -2286,22 +2458,15 @@ static void dec_drain_queue(dec_ctx *c)
 
         c->aus++;
         if (s->kf) c->key_aus++;
-        if (c->au_dir && c->au_dir[0]) {
-            char path[1200];
-            FILE *fp;
-            int n = snprintf(path, sizeof path, "%s/au_%05u_%c.264",
-                             c->au_dir, (unsigned)(s->fi % 100000u),
-                             s->kf ? 'k' : 'p');
-            if (n <= 0 || (size_t)n >= sizeof path) { c->au_write_errors++; }
-            else {
-                fp = fopen(path, "wb");
-                if (!fp) c->au_write_errors++;
-                else {
-                    if (s->len && fwrite(bytes, 1, s->len, fp) != s->len)
-                        c->au_write_errors++;
-                    fclose(fp);
-                }
-            }
+        /* round L (F17): the shared writer — draw-numbered single-AU names
+         * (no more cross-draw collision in one --session-au-dir) plus the
+         * continuous per-draw stream when --video-stream-out is armed. */
+        {
+            int e = knv_dump_au(c->au_dir, c->draw_index, c->video_fp,
+                                (unsigned)(s->fi % 100000u), s->kf ? 1 : 0,
+                                bytes, s->len, &c->video_aus, &c->video_bytes);
+            if (e & 1) c->au_write_errors++;
+            if (e & 2) c->video_write_errors++;
         }
     }
 }
@@ -3170,6 +3335,787 @@ static void pump_set_str(char *dst, size_t dstsz, const char *src)
     if (n >= dstsz) n = dstsz - 1;
     memcpy(dst, src, n);
     dst[n] = '\0';
+}
+
+/* ---- round L (F19): the real-input driver ------------------------------
+ * WHY: run 31 proved the input CHANNEL is live end to end (the 8-message
+ * activation chain flew on all four draws, 0 build failures) and that not
+ * ONE discrete input message ever followed it. The rig sat at the Ubisoft
+ * login prompt on every draw — the operator's retraction of the XLIX
+ * "Legion launches" claim explains why: play.geforcenow.com's web client
+ * types the credentials INTO THE STREAM (auto-login), so the browser is at
+ * the game in seconds while our client, which sends no keystrokes, is
+ * handed the launcher's login dialog. The reference client has no
+ * credential handling at all (sparse-clone grep: nothing), so there is
+ * nothing to copy — the only way past that wall is to type.
+ *
+ * THREE SOURCES, ONE SENDER:
+ *   --input-script=FILE   a timeline replayed against the media-loop clock
+ *                         (deterministic, reviewable, re-flyable — this is
+ *                         how the operator logs in without us ever seeing
+ *                         or storing the password: the script stays on the
+ *                         rig, and --input-check=FILE validates it offline)
+ *   --input-live          keystrokes typed into the knvstd console,
+ *                         forwarded as they arrive (interactive fallback)
+ *   --input-anti-afk[=MS] the reference's own keep-awake pulse: VK 0x7C
+ *                         (F13) down+up, no modifiers — F13 is bound to
+ *                         nothing in any layout, which is exactly why
+ *                         opennow-streamer-core picks it (:1604-1648)
+ *
+ * THE GATE: nothing is sent before the activation chain's enable-input(true)
+ * (the pump's volatile `input_active` latch) — the same gate the jiggle
+ * uses, because input before the chain is the one thing the reference never
+ * does. Gated events are COUNTED (si->gated), never silently dropped, and
+ * a due event that is still gated is retried on the next tick.
+ *
+ * THE WIRE: every message is built by kn_input.c (byte-exact against the
+ * Rust goldens — see test_kninput's 794 checks) and routed by
+ * kn_input_route_sid(): keys/buttons/wheel -> sid 0 (ControlReliable,
+ * ordered), mouse motion -> sid 6 (ControlPartial, unordered, 300 ms
+ * PR-SCTP lifetime). Timestamps ride pump.origin_us, the activation
+ * chain's own epoch.
+ */
+#define SESS_INPUT_MAX_EV   4096u
+#define SESS_INPUT_LINE_MAX 1024u
+#define SESS_INPUT_TEXT_MAX 256u
+
+enum { SI_KEY = 0, SI_BTN, SI_ABS, SI_REL, SI_WHEEL };
+
+typedef struct sess_input_ev {
+    long     t_ms;      /* fire at, relative to the first media-loop tick */
+    int      kind;      /* SI_* */
+    uint16_t vk;        /* SI_KEY: the Windows VK */
+    uint16_t mods;      /* SI_KEY: KN_INPUT_MOD_* bits */
+    int      down;      /* SI_KEY/SI_BTN: 1 = down, 0 = up */
+    int32_t  a, b;      /* SI_ABS: x,y px | SI_REL/SI_WHEEL: dx,dy */
+    uint16_t w, h;      /* SI_ABS: the viewport the pixels live in */
+    unsigned btn;       /* SI_BTN: 1..5 */
+} sess_input_ev;
+
+typedef struct sess_input {
+    sess_input_ev ev[SESS_INPUT_MAX_EV];
+    size_t   n, next;
+    int      have_script;
+    char     script[512];
+    long     span_ms;
+    unsigned long long lines, comments, blanks;
+    /* live console */
+    int      live, raw_on;
+    /* anti-AFK */
+    unsigned afk_ms;
+    uint64_t next_afk_ms;
+    /* clock */
+    uint64_t t0_ms;
+    int      started;
+    /* counters (all reported on the input_summary line) */
+    unsigned long long sent, sent_key, sent_btn, sent_abs, sent_rel,
+                       sent_wheel, gated, build_fail, push_fail,
+                       live_keys, live_unmapped, afk_pulses, skipped_late;
+    unsigned first_logged, afk_logged;
+    const char *source;              /* "script" | "live" | "anti_afk" */
+    /* the parse error, if any */
+    char     err[192];
+    unsigned err_line;
+} sess_input;
+
+/* The four --input-* knobs, as one value so run_session's signature does
+ * not grow again (it is already at eighteen parameters). */
+typedef struct sess_input_cfg {
+    const char *script;       /* --input-script=FILE   (NULL = none)      */
+    int         live;         /* --input-live                             */
+    unsigned    afk_ms;       /* --input-anti-afk[=MS] (0 = off)          */
+    unsigned    text_gap_ms;  /* --input-text-gap=MS   (default 30)       */
+} sess_input_cfg;
+
+static void si_init(sess_input *si)
+{
+    memset(si, 0, sizeof *si);
+    si->afk_ms = 0;              /* 0 = off */
+    si->source = "script";
+}
+
+/* ---- the little parsers ------------------------------------------------
+ * Deliberately strict: a script that types a password into a login prompt
+ * must not silently mistype it. Every rejection carries a line number. */
+
+/* "0x41" | "65" | "A" | "enter" | "f13" -> a Windows VK, or -1.
+ *
+ * `auto_mods` (optional) receives the modifiers the US table needs for a
+ * SINGLE-CHARACTER spec: "A" implies shift (VK 0x41 + MOD_SHIFT), "!" is
+ * shift+1, "a" needs none. That is the DEFAULT for a `key` line; an
+ * explicit modifiers argument replaces it. Hex/decimal/name forms have no
+ * implied modifiers, so they leave *auto_mods at 0. Without this, `key A
+ * down` would send a bare 0x41 and the rig would type a lowercase "a" —
+ * the exact class of silent mistype a login script cannot survive. */
+static int si_parse_vk(const char *s, uint16_t *vk, uint16_t *auto_mods)
+{
+    char name[64];
+    size_t i, n;
+    long v;
+    char *end = NULL;
+
+    if (auto_mods) *auto_mods = 0;
+    if (!s || !s[0] || !vk) return -1;
+
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        v = strtol(s + 2, &end, 16);
+        if (!end || *end || v <= 0 || v > 0xFF) return -1;
+        *vk = (uint16_t)v;
+        return 0;
+    }
+    if (s[0] >= '0' && s[0] <= '9') {
+        v = strtol(s, &end, 10);
+        if (!end || *end || v <= 0 || v > 0xFF) return -1;
+        *vk = (uint16_t)v;
+        return 0;
+    }
+    /* a single character: its ASCII VK (US layout) + implied modifiers */
+    if (s[0] && !s[1]) {
+        uint16_t mods = 0;
+        if (kn_input_vk_from_ascii(s[0], vk, &mods) == 0) {
+            if (auto_mods) *auto_mods = mods;
+            return 0;
+        }
+        /* fall through to the name table ('+' etc. may be named there) */
+    }
+    /* a name: copy into a NUL-terminated scratch (the token may not be) */
+    n = strlen(s);
+    if (n >= sizeof name) return -1;
+    for (i = 0; i < n; ++i) name[i] = s[i];
+    name[n] = '\0';
+    v = kn_input_vk_from_name(name);
+    if (v < 0 || v > 0xFF) return -1;
+    *vk = (uint16_t)v;
+    return 0;
+}
+
+/* "shift+ctrl" | "0x03" | "3" | "none" -> KN_INPUT_MOD_* bits, or -1. */
+static int si_parse_mods(const char *s, uint16_t *mods)
+{
+    const char *p = s;
+    uint16_t m = 0;
+    char *end = NULL;
+
+    if (!s || !mods) return -1;
+    if (strcmp(s, "none") == 0 || strcmp(s, "0") == 0) { *mods = 0; return 0; }
+    if (strncmp(s, "0x", 2) == 0 || strncmp(s, "0X", 2) == 0) {
+        long v = strtol(s + 2, &end, 16);
+        if (!end || *end || v < 0 || v > 0x0F) return -1;
+        *mods = (uint16_t)v;
+        return 0;
+    }
+    if (s[0] >= '0' && s[0] <= '9') {
+        long v = strtol(s, &end, 10);
+        if (!end || *end || v < 0 || v > 0x0F) return -1;
+        *mods = (uint16_t)v;
+        return 0;
+    }
+    while (*p) {
+        const char *q = strchr(p, '+');
+        size_t len = q ? (size_t)(q - p) : strlen(p);
+        int ok = 0;
+        if (len == 5 && strncmp(p, "shift", 5) == 0)
+            { m |= KN_INPUT_MOD_SHIFT; ok = 1; }
+        else if (len == 4 && strncmp(p, "ctrl", 4) == 0)
+            { m |= KN_INPUT_MOD_CTRL; ok = 1; }
+        else if (len == 7 && strncmp(p, "control", 7) == 0)
+            { m |= KN_INPUT_MOD_CTRL; ok = 1; }
+        else if (len == 3 && strncmp(p, "alt", 3) == 0)
+            { m |= KN_INPUT_MOD_ALT; ok = 1; }
+        else if ((len == 4 && strncmp(p, "meta", 4) == 0) ||
+                 (len == 3 && strncmp(p, "win", 3) == 0))
+            { m |= KN_INPUT_MOD_META; ok = 1; }
+        if (!ok) return -1;
+        if (!q) break;
+        p = q + 1;
+        if (!*p) return -1;               /* a trailing '+' */
+    }
+    *mods = m;
+    return 0;
+}
+
+/* "1".."5" | left|middle|right|x1|x2 -> the reference's button id, or 0. */
+static unsigned si_parse_btn(const char *s)
+{
+    if (!s || !s[0]) return 0;
+    if (strcmp(s, "left") == 0)   return KN_INPUT_BTN_LEFT;
+    if (strcmp(s, "middle") == 0) return KN_INPUT_BTN_MIDDLE;
+    if (strcmp(s, "right") == 0)  return KN_INPUT_BTN_RIGHT;
+    if (strcmp(s, "x1") == 0)     return KN_INPUT_BTN_X1;
+    if (strcmp(s, "x2") == 0)     return KN_INPUT_BTN_X2;
+    if (s[0] >= '1' && s[0] <= '5' && !s[1]) return (unsigned)(s[0] - '0');
+    return 0;
+}
+
+static int si_down_word(const char *s)
+{
+    if (!s) return -1;
+    if (strcmp(s, "down") == 0 || strcmp(s, "1") == 0) return 1;
+    if (strcmp(s, "up") == 0 || strcmp(s, "0") == 0) return 0;
+    return -1;
+}
+
+/* sorted insert (scripts are usually already ordered; insertion keeps the
+ * fire loop a single cursor and the timeline honest if they are not) */
+static int si_add(sess_input *si, const sess_input_ev *e)
+{
+    size_t i;
+    if (si->n >= SESS_INPUT_MAX_EV) {
+        snprintf(si->err, sizeof si->err,
+                 "timeline full (%u events)", (unsigned)SESS_INPUT_MAX_EV);
+        return -1;
+    }
+    i = si->n;
+    while (i > 0 && si->ev[i - 1].t_ms > e->t_ms) {
+        si->ev[i] = si->ev[i - 1];
+        --i;
+    }
+    si->ev[i] = *e;
+    si->n++;
+    if (e->t_ms > si->span_ms) si->span_ms = e->t_ms;
+    return 0;
+}
+
+/* One `type` line -> a down/up pair per character, `gap_ms` apart.
+ * Characters the US table does not cover (Polish diacritics, anything
+ * non-ASCII) are COUNTED as unmapped and skipped — the alternative is
+ * silently typing the wrong key into a password field. */
+static int si_expand_text(sess_input *si, long t_ms, const char *text,
+                          unsigned gap_ms, unsigned long long *unmapped)
+{
+    size_t i, n = strlen(text);
+    unsigned long long miss = 0;
+
+    for (i = 0; i < n; ++i) {
+        sess_input_ev e;
+        uint16_t vk = 0, mods = 0;
+        long t;
+
+        if (text[i] == ' ' && i + 1 == n) break;   /* a trailing space */
+        if (kn_input_vk_from_ascii((unsigned char)text[i], &vk, &mods) != 0) {
+            miss++;
+            continue;
+        }
+        t = t_ms + (long)(i * (gap_ms ? gap_ms : 30u));
+        memset(&e, 0, sizeof e);
+        e.kind = SI_KEY; e.vk = vk; e.mods = mods; e.down = 1; e.t_ms = t;
+        if (si_add(si, &e) != 0) return -1;
+        e.down = 0;
+        e.t_ms = t + (long)((gap_ms ? gap_ms : 30u) / 2u);
+        if (si_add(si, &e) != 0) return -1;
+    }
+    if (unmapped) *unmapped += miss;
+    if (miss && !si->err[0])
+        snprintf(si->err, sizeof si->err,
+                 "%llu character(s) outside the US VK table were skipped",
+                 miss);
+    return 0;
+}
+
+/* ---- the script loader -------------------------------------------------
+ * FORMAT (one event per line, '#' comments, blank lines ignored):
+ *   <t_ms> key  <vk> <down|up> [mods]     vk = 0x41 | 65 | A | enter | f13
+ *   <t_ms> type <text...>                 -> a down/up pair per character
+ *   <t_ms> mouse <x> <y> <w> <h>          absolute PIXELS in a w x h view
+ *   <t_ms> mrel <dx> <dy>                 relative motion (sid 6)
+ *   <t_ms> btn  <1..5|left|right|...> <down|up>
+ *   <t_ms> wheel <dx> <dy>                one notch is typically +/-120
+ * t_ms is relative to the first media-loop tick of the draw (the moment
+ * input is armed), NOT to process start — so a script replays the same way
+ * on every draw regardless of how long the queue took.
+ * Returns 0 on success (si->n events), -1 with si->err + si->err_line set.
+ */
+static int si_load(sess_input *si, const char *path, unsigned text_gap_ms)
+{
+    FILE *fp;
+    char line[SESS_INPUT_LINE_MAX];
+    unsigned lineno = 0;
+    unsigned long long unmapped = 0;
+
+    if (!si || !path || !path[0]) return -1;
+    fp = fopen(path, "rb");
+    if (!fp) {
+        snprintf(si->err, sizeof si->err, "cannot open the script");
+        si->err_line = 0;
+        return -1;
+    }
+    while (fgets(line, (int)sizeof line, fp)) {
+        /* six tokens: t_ms, command, and up to four arguments */
+        char ts[32], cmd[32], a1[64], a2[64], a3[64], a4[64];
+        char rest[SESS_INPUT_TEXT_MAX];
+        long t;
+        char *end = NULL;
+        char *p = line;
+        size_t l;
+        int got;
+        sess_input_ev e;
+
+        lineno++;
+        si->lines++;
+        l = strlen(p);
+        while (l && (p[l - 1] == '\n' || p[l - 1] == '\r')) p[--l] = '\0';
+        while (*p == ' ' || *p == '\t') { p++; l = strlen(p); }
+        if (!*p) { si->blanks++; continue; }
+        if (*p == '#' || *p == ';') { si->comments++; continue; }
+
+        ts[0] = cmd[0] = a1[0] = a2[0] = a3[0] = a4[0] = '\0';
+        got = sscanf(p, "%31s %31s %63s %63s %63s %63s",
+                     ts, cmd, a1, a2, a3, a4);
+        if (got < 2) {
+            snprintf(si->err, sizeof si->err, "expected '<t_ms> <cmd> ...'");
+            si->err_line = lineno; fclose(fp); return -1;
+        }
+        t = strtol(ts, &end, 10);
+        if (!end || *end || t < 0) {
+            snprintf(si->err, sizeof si->err, "bad t_ms '%.31s'", ts);
+            si->err_line = lineno; fclose(fp); return -1;
+        }
+        memset(&e, 0, sizeof e);
+        e.t_ms = t;
+
+        if (strcmp(cmd, "key") == 0) {
+            uint16_t vk = 0, mods = 0;
+            int down;
+            if (got < 3) {
+                snprintf(si->err, sizeof si->err, "key needs <vk> <down|up>");
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            if (si_parse_vk(a1, &vk, &mods) != 0) {
+                snprintf(si->err, sizeof si->err, "bad vk '%.63s'", a1);
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            down = si_down_word(a2);
+            if (down < 0) {
+                snprintf(si->err, sizeof si->err,
+                         "key needs 'down' or 'up', got '%.63s'", a2);
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            /* an explicit modifiers argument REPLACES the implied one */
+            if (got >= 4 && si_parse_mods(a3, &mods) != 0) {
+                snprintf(si->err, sizeof si->err, "bad modifiers '%.63s'", a3);
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            e.kind = SI_KEY; e.vk = vk; e.mods = mods; e.down = down;
+        } else if (strcmp(cmd, "type") == 0) {
+            /* everything after "type" is the literal text (spaces kept) */
+            const char *q = strstr(p, cmd);
+            if (!q) {
+                snprintf(si->err, sizeof si->err, "cannot locate 'type'");
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            q += strlen(cmd);
+            while (*q == ' ' || *q == '\t') q++;
+            if (!*q) {
+                snprintf(si->err, sizeof si->err, "type needs text");
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            snprintf(rest, sizeof rest, "%s", q);
+            if (si_expand_text(si, t, rest, text_gap_ms, &unmapped) != 0) {
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            continue;                      /* already added its own events */
+        } else if (strcmp(cmd, "mouse") == 0) {
+            long x, y, w, h;
+            char *e2 = NULL, *e3 = NULL, *e4 = NULL;
+            if (got < 6) {
+                snprintf(si->err, sizeof si->err, "mouse needs <x> <y> <w> <h>");
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            x = strtol(a1, &end, 10);
+            y = strtol(a2, &e2, 10);
+            w = strtol(a3, &e3, 10);
+            h = strtol(a4, &e4, 10);
+            if ((end && *end) || (e2 && *e2) || (e3 && *e3) || (e4 && *e4) ||
+                x < 0 || y < 0 || w <= 0 || h <= 0 ||
+                x > 0xFFFF || y > 0xFFFF || w > 0xFFFF || h > 0xFFFF) {
+                snprintf(si->err, sizeof si->err,
+                         "mouse needs <x> <y> <w> <h> as integers in range "
+                         "(x,y >= 0; w,h > 0)");
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            e.kind = SI_ABS; e.a = (int32_t)x; e.b = (int32_t)y;
+            e.w = (uint16_t)w; e.h = (uint16_t)h;
+        } else if (strcmp(cmd, "mrel") == 0 || strcmp(cmd, "wheel") == 0) {
+            long dx, dy;
+            char *e2 = NULL;
+            int is_wheel = (cmd[0] == 'w');
+            if (got < 4) {
+                snprintf(si->err, sizeof si->err, "%s needs <dx> <dy>", cmd);
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            dx = strtol(a1, &end, 10);
+            dy = strtol(a2, &e2, 10);
+            if ((end && *end) || (e2 && *e2) ||
+                dx < -32768 || dx > 32767 || dy < -32768 || dy > 32767) {
+                snprintf(si->err, sizeof si->err,
+                         "%s needs <dx> <dy> as i16 values", cmd);
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            e.kind = is_wheel ? SI_WHEEL : SI_REL;
+            e.a = (int32_t)dx; e.b = (int32_t)dy;
+        } else if (strcmp(cmd, "btn") == 0 || strcmp(cmd, "button") == 0) {
+            unsigned btn;
+            int down;
+            if (got < 4) {
+                snprintf(si->err, sizeof si->err,
+                         "btn needs <1..5|left|middle|right|x1|x2> <down|up>");
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            btn = si_parse_btn(a1);
+            if (!btn) {
+                snprintf(si->err, sizeof si->err, "bad button '%.63s'", a1);
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            down = si_down_word(a2);
+            if (down < 0) {
+                snprintf(si->err, sizeof si->err,
+                         "btn needs 'down' or 'up', got '%.63s'", a2);
+                si->err_line = lineno; fclose(fp); return -1;
+            }
+            e.kind = SI_BTN; e.btn = btn; e.down = down;
+        } else {
+            snprintf(si->err, sizeof si->err, "unknown command '%.31s'", cmd);
+            si->err_line = lineno; fclose(fp); return -1;
+        }
+        if (si_add(si, &e) != 0) { si->err_line = lineno; fclose(fp); return -1; }
+    }
+    fclose(fp);
+    if (unmapped) si->live_unmapped += unmapped;
+    pump_set_str(si->script, sizeof si->script, path);
+    si->have_script = (si->n > 0);
+    return 0;
+}
+
+/* ---- the console (live mode) ------------------------------------------
+ * Win7 is the target: _kbhit/_getch. The host is POSIX: termios raw mode +
+ * a zero-timeout select. Both are restored before exit (si_console_raw(0)),
+ * including on the Ctrl-C path, so the operator never loses their shell. */
+#ifndef _WIN32
+static struct termios si_saved_termios;
+static int si_have_saved;
+#endif
+
+static int si_console_raw(int on)
+{
+#ifdef _WIN32
+    (void)on;               /* _kbhit/_getch need no mode change */
+    return 0;
+#else
+    if (on) {
+        struct termios raw;
+        if (!isatty(STDIN_FILENO)) return -1;      /* piped: no live mode */
+        if (tcgetattr(STDIN_FILENO, &si_saved_termios) != 0) return -1;
+        si_have_saved = 1;
+        raw = si_saved_termios;
+        raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 0;
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) return -1;
+        return 0;
+    }
+    if (si_have_saved) {
+        (void)tcsetattr(STDIN_FILENO, TCSANOW, &si_saved_termios);
+        si_have_saved = 0;
+    }
+    return 0;
+#endif
+}
+
+static int si_console_peek(void)
+{
+#ifdef _WIN32
+    return _kbhit() ? 1 : 0;
+#else
+    fd_set rfds;
+    struct timeval tv;
+    if (!si_have_saved) return 0;
+    FD_ZERO(&rfds);
+    FD_SET(STDIN_FILENO, &rfds);
+    tv.tv_sec = 0; tv.tv_usec = 0;
+    return select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) > 0 ? 1 : 0;
+#endif
+}
+
+static int si_console_get(void)
+{
+#ifdef _WIN32
+    return _getch();
+#else
+    unsigned char ch = 0;
+    if (!si_have_saved) return -1;
+    if (read(STDIN_FILENO, &ch, 1) != 1) return -1;
+    return (int)ch;
+#endif
+}
+
+/* A console character -> (VK, mods). Extended keys arrive as a 0xE0/0x00
+ * prefix plus a scan code on Win32 (and as an ESC sequence on a POSIX
+ * terminal); the arrows matter because a login prompt is navigated with
+ * them, so they are mapped rather than dropped. */
+static int si_console_key(int ch, uint16_t *vk, uint16_t *mods)
+{
+    int ext = 0;
+    *mods = 0;
+
+    if (ch == 0xE0 || ch == 0) {           /* Win32 extended prefix */
+        if (!si_console_peek()) return -1;
+        ch = si_console_get();
+        ext = 1;
+    } else if (ch == 27) {                 /* ESC, or a POSIX escape seq */
+        if (!si_console_peek()) { *vk = 0x1Bu; return 0; }
+        ch = si_console_get();
+        if (ch != '[') { *vk = 0x1Bu; return 0; }
+        if (!si_console_peek()) { *vk = 0x1Bu; return 0; }
+        ch = si_console_get();
+        ext = 2;
+    }
+
+    if (ext == 2) {                        /* POSIX: 'A'..'D' arrows */
+        switch (ch) {
+        case 'A': *vk = 0x26u; return 0;   /* VK_UP    */
+        case 'B': *vk = 0x28u; return 0;   /* VK_DOWN  */
+        case 'C': *vk = 0x27u; return 0;   /* VK_RIGHT */
+        case 'D': *vk = 0x25u; return 0;   /* VK_LEFT  */
+        default:  return -1;               /* unknown sequence: skip */
+        }
+    }
+    if (ext == 1) {                        /* Win32 scan codes */
+        switch (ch) {
+        case 72: *vk = 0x26u; return 0;    /* up    */
+        case 80: *vk = 0x28u; return 0;    /* down  */
+        case 75: *vk = 0x25u; return 0;    /* left  */
+        case 77: *vk = 0x27u; return 0;    /* right */
+        case 71: *vk = 0x24u; return 0;    /* home  */
+        case 79: *vk = 0x23u; return 0;    /* end   */
+        case 73: *vk = 0x21u; return 0;    /* prior */
+        case 81: *vk = 0x22u; return 0;    /* next  */
+        case 83: *vk = 0x2Eu; return 0;    /* delete*/
+        case 15: *vk = 0x09u; return 0;    /* tab   */
+        default: return -1;
+        }
+    }
+
+    /* plain characters */
+    if (ch == '\r' || ch == '\n') { *vk = 0x0Du; return 0; }   /* VK_RETURN */
+    if (ch == '\t')               { *vk = 0x09u; return 0; }   /* VK_TAB    */
+    if (ch == 8)                  { *vk = 0x08u; return 0; }   /* VK_BACK   */
+    if (ch == 3)                  { *vk = 0x43u; *mods = KN_INPUT_MOD_CTRL;
+                                      return 0; }              /* Ctrl-C    */
+    if (ch < 32)                  return -1;                   /* other ctl */
+    return kn_input_vk_from_ascii(ch, vk, mods);
+}
+
+/* ---- the sender -------------------------------------------------------
+ * Builds one wire message with kn_input.c and pushes it on the feedback
+ * outbox at the sid the reference routes that type to. Returns 0 on send. */
+static int si_send(sess_input *si, sess_fb_outbox *fb, uint64_t origin_us,
+                   int kind, uint16_t vk, uint16_t mods, int down,
+                   int32_t a, int32_t b, uint16_t w, uint16_t h,
+                   unsigned btn)
+{
+    uint8_t buf[KN_INPUT_CMD_MAX];
+    uint64_t ts = kn_sock_now_us() - origin_us;
+    int n = -1, sid = 0;
+    uint32_t type = 0;
+
+    switch (kind) {
+    case SI_KEY:
+        type = down ? KN_INPUT_TYPE_KEY_DOWN : KN_INPUT_TYPE_KEY_UP;
+        n = kn_input_key(vk, mods, down, ts, buf, sizeof buf);
+        break;
+    case SI_BTN:
+        type = down ? KN_INPUT_TYPE_BUTTON_DOWN : KN_INPUT_TYPE_BUTTON_UP;
+        n = kn_input_mouse_button(btn, down, ts, buf, sizeof buf);
+        break;
+    case SI_ABS:
+        type = KN_INPUT_TYPE_MOUSE_ABSOLUTE;
+        n = kn_input_mouse_absolute((uint16_t)a, (uint16_t)b, w, h, ts,
+                                    buf, sizeof buf);
+        break;
+    case SI_REL:
+        type = KN_INPUT_TYPE_MOUSE_RELATIVE;
+        n = kn_input_mouse_relative((int16_t)a, (int16_t)b, ts,
+                                    buf, sizeof buf);
+        break;
+    case SI_WHEEL:
+        type = KN_INPUT_TYPE_WHEEL;
+        n = kn_input_wheel((int16_t)a, (int16_t)b, ts, buf, sizeof buf);
+        break;
+    default:
+        return -1;
+    }
+    if (n <= 0) { si->build_fail++; return -1; }
+    sid = kn_input_route_sid(type);
+    if (sid < 0) sid = 0;
+    if (sess_fb_push(fb, (uint16_t)sid, buf, (size_t)n) != 0) {
+        si->push_fail++;
+        return -1;
+    }
+    si->sent++;
+    switch (kind) {
+    case SI_KEY:   si->sent_key++;   break;
+    case SI_BTN:   si->sent_btn++;   break;
+    case SI_ABS:   si->sent_abs++;   break;
+    case SI_REL:   si->sent_rel++;   break;
+    case SI_WHEEL: si->sent_wheel++; break;
+    default: break;
+    }
+    if (!si->first_logged) {
+        si->first_logged = 1u;
+        printf("{\"mode\":\"session\",\"event\":\"input_first_send\","
+               "\"kind\":%d,\"sid\":%d,\"bytes\":%d,\"ts_us\":%llu,"
+               "\"source\":\"%s\"}\n", kind, sid, n,
+               (unsigned long long)ts,
+               si->source ? si->source : "script");
+        fflush(stdout);
+    }
+    return 0;
+}
+
+/* One media-loop tick: fire everything that is due, drain the console when
+ * live, and emit the anti-AFK pulse when its interval has elapsed.
+ * `input_active` is the pump's activation latch — the gate. Returns the
+ * number of messages sent this tick. */
+static size_t si_tick(sess_input *si, sess_fb_outbox *fb, uint64_t origin_us,
+                      uint64_t now_ms, int input_active)
+{
+    size_t sent = 0;
+
+    if (!si->started) { si->started = 1; si->t0_ms = now_ms; }
+
+    if (!input_active) {
+        /* the gate: nothing flies before the activation chain's
+         * enable-input(true). A due event is COUNTED as gated (and left
+         * for a later tick) so the summary can tell "never armed" from
+         * "armed and silent". */
+        if (si->next < si->n &&
+            now_ms >= si->t0_ms + (uint64_t)si->ev[si->next].t_ms)
+            si->gated++;
+        return 0;
+    }
+
+    /* 1. the script timeline */
+    while (si->next < si->n) {
+        const sess_input_ev *e = &si->ev[si->next];
+        uint64_t due = si->t0_ms + (uint64_t)(e->t_ms > 0 ? e->t_ms : 0);
+        if (now_ms < due) break;
+        /* An event more than 5 s late is stale (a stall, not a schedule):
+         * count it and skip rather than dumping the whole timeline at once
+         * into a session that just recovered. */
+        if (now_ms > due + 5000u) {
+            si->skipped_late++;
+            si->next++;
+            continue;
+        }
+        if (si_send(si, fb, origin_us, e->kind, e->vk, e->mods, e->down,
+                    e->a, e->b, e->w, e->h, e->btn) == 0)
+            sent++;
+        si->next++;
+    }
+
+    /* 2. the live console: at most 16 keys per tick, so a paste cannot
+     *    starve the media loop */
+    if (si->live) {
+        int budget = 16;
+        while (budget-- > 0 && si_console_peek()) {
+            int ch = si_console_get();
+            uint16_t vk = 0, mods = 0;
+            if (ch < 0) break;
+            if (si_console_key(ch, &vk, &mods) != 0) {
+                si->live_unmapped++;
+                continue;
+            }
+            if (si_send(si, fb, origin_us, SI_KEY, vk, mods, 1,
+                        0, 0, 0, 0, 0) == 0)
+                sent++;
+            if (si_send(si, fb, origin_us, SI_KEY, vk, mods, 0,
+                        0, 0, 0, 0, 0) == 0)
+                sent++;
+            si->live_keys++;
+        }
+    }
+
+    /* 3. the anti-AFK pulse (the reference's F13 down+up) */
+    if (si->afk_ms && now_ms >= si->next_afk_ms) {
+        if (si_send(si, fb, origin_us, SI_KEY, KN_INPUT_VK_ANTI_AFK, 0, 1,
+                    0, 0, 0, 0, 0) == 0)
+            sent++;
+        if (si_send(si, fb, origin_us, SI_KEY, KN_INPUT_VK_ANTI_AFK, 0, 0,
+                    0, 0, 0, 0, 0) == 0)
+            sent++;
+        si->afk_pulses++;
+        si->next_afk_ms = now_ms + si->afk_ms;
+        if (!si->afk_logged) {
+            si->afk_logged = 1u;
+            printf("{\"mode\":\"session\",\"event\":\"input_anti_afk\","
+                   "\"action\":\"first_pulse\",\"vk\":%u,\"interval_ms\":%u}"
+                   "\n", (unsigned)KN_INPUT_VK_ANTI_AFK, si->afk_ms);
+            fflush(stdout);
+        }
+    }
+    return sent;
+}
+
+/* The evidence line every draw prints (and the summary carries). */
+static void si_report(const sess_input *si)
+{
+    if (!si->have_script && !si->live && !si->afk_ms) return;
+    printf("{\"mode\":\"session\",\"event\":\"input_summary\","
+           "\"script\":\"%s\",\"events\":%llu,\"fired\":%llu,"
+           "\"live\":%d,\"live_keys\":%llu,\"anti_afk_ms\":%u,"
+           "\"afk_pulses\":%llu,\"sent\":%llu,\"key\":%llu,\"btn\":%llu,"
+           "\"abs\":%llu,\"rel\":%llu,\"wheel\":%llu,\"gated\":%llu,"
+           "\"build_fail\":%llu,\"push_fail\":%llu,\"late_skips\":%llu,"
+           "\"unmapped\":%llu}\n",
+           si->script[0] ? si->script : "",
+           (unsigned long long)si->n,
+           (unsigned long long)si->next,
+           si->live, (unsigned long long)si->live_keys,
+           si->afk_ms, (unsigned long long)si->afk_pulses,
+           (unsigned long long)si->sent, (unsigned long long)si->sent_key,
+           (unsigned long long)si->sent_btn, (unsigned long long)si->sent_abs,
+           (unsigned long long)si->sent_rel,
+           (unsigned long long)si->sent_wheel,
+           (unsigned long long)si->gated,
+           (unsigned long long)si->build_fail,
+           (unsigned long long)si->push_fail,
+           (unsigned long long)si->skipped_late,
+           (unsigned long long)si->live_unmapped);
+    fflush(stdout);
+    {
+        kn_lctx b;
+        /* WARN when input was armed but NOT ONE message flew: that is the
+         * run-31 shape (channel live, zero discrete input) and it is the
+         * single most diagnostic fact a draw can report. */
+        kn_lctx_init(&b, KN_CH_INPUT, si->sent ? KN_INFO : KN_WARN,
+                     "input_summary");
+        kn_lctx_str(&b, "script", si->script);
+        kn_lctx_str(&b, "source", si->source ? si->source : "none");
+        kn_lctx_u64(&b, "events", (unsigned long long)si->n);
+        kn_lctx_u64(&b, "fired", (unsigned long long)si->next);
+        kn_lctx_bool(&b, "live", si->live);
+        kn_lctx_u64(&b, "live_keys", (unsigned long long)si->live_keys);
+        kn_lctx_u64(&b, "anti_afk_ms", si->afk_ms);
+        kn_lctx_u64(&b, "afk_pulses", (unsigned long long)si->afk_pulses);
+        kn_lctx_u64(&b, "sent", (unsigned long long)si->sent);
+        kn_lctx_u64(&b, "sent_key", (unsigned long long)si->sent_key);
+        kn_lctx_u64(&b, "sent_btn", (unsigned long long)si->sent_btn);
+        kn_lctx_u64(&b, "sent_abs", (unsigned long long)si->sent_abs);
+        kn_lctx_u64(&b, "sent_rel", (unsigned long long)si->sent_rel);
+        kn_lctx_u64(&b, "sent_wheel", (unsigned long long)si->sent_wheel);
+        kn_lctx_u64(&b, "gated", (unsigned long long)si->gated);
+        kn_lctx_u64(&b, "build_fail", (unsigned long long)si->build_fail);
+        kn_lctx_u64(&b, "push_fail", (unsigned long long)si->push_fail);
+        kn_lctx_u64(&b, "late_skips", (unsigned long long)si->skipped_late);
+        kn_lctx_u64(&b, "unmapped_chars",
+                    (unsigned long long)si->live_unmapped);
+        if (!si->sent)
+            kn_lctx_str(&b, "note",
+                        "input was armed but nothing flew: gated>0 means the "
+                        "activation chain never latched enable-input(true); "
+                        "gated==0 means the media loop never ticked");
+        kn_log_emit(&b);
+    }
 }
 
 /* ---- round XXXIII (R3-C): the SCTP layer inside the pump thread ----
@@ -4652,6 +5598,8 @@ static int run_session(const char *token, const char *device_id,
                        long expect_frames, long play_wait_ms,
                        long play_settle_ms, long jiggle_ms,
                        const char *au_dir, const char *audio_out,
+                       const char *video_out, int release_session,
+                       const sess_input_cfg *icfg,
                        long draw_index, const char *log_dir)
 {
     static uint8_t cm_rxb[64 * 1024];
@@ -4663,6 +5611,7 @@ static int run_session(const char *token, const char *device_id,
      * delivered file ended up a hybrid of both draws with one scrambled
      * page. Draw 0 (no lottery) keeps the operator's path verbatim. */
     static char audio_path[4096];   /* > any real path (Win7 MAX_PATH 260) */
+    static char video_path[4096];   /* round L (F17): the per-draw stream */
     static uint8_t ws_msg[KN_RTSP_MAX_RESPONSE + 8192];
     static uint8_t pkt[KN_SOCK_RECV_BUF];
     static dec_ctx c;
@@ -4732,6 +5681,10 @@ static int run_session(const char *token, const char *device_id,
     kn_sock_udp *ms = NULL;             /* the media-loop socket: bundle
                                            in unified mode, video otherwise */
     int ice_enabled = 0, play_attempts = 0, pump_th = 0;
+    int rtsp_inited = 0;              /* round L (F18): the TEARDOWN
+                                         guard — kn_rtsp_request must
+                                         never run on a client phase B
+                                         never initialised */
     int ka_on = 0;                        /* round XXVIII: the Mjolnir
                                              NATT keepalive (nvst.rs
                                              :8849-8905) */
@@ -4742,6 +5695,7 @@ static int run_session(const char *token, const char *device_id,
     unsigned long long ka_sent = 0;
     unsigned relearns = 0;                /* cm_control re-learn events */
     static sess_pump pump;
+    static sess_input si;                 /* round L (F19): real input */
     static sess_fb_outbox fb;           /* round XXXVI: main -> pump */
     sess_ice_stats ice_st;
     char ufrag[24], pwd[32], fp[128];
@@ -4812,6 +5766,129 @@ static int run_session(const char *token, const char *device_id,
         kn_log_shutdown();
         return 3;
     }
+
+    /* Round L (F17): the per-draw CONTINUOUS video stream. One file per
+     * draw ("video_d<N>.264"), every decoded AU appended in order, so the
+     * result is a normal Annex-B elementary stream a player can start on
+     * (it begins at the first keyframe). This is the answer to the
+     * operator's repeated ".264 — only the first file works": the
+     * single-AU dumps are not corrupt, they simply have no SPS/PPS of
+     * their own; the stream file does. Draw 0 (no lottery) keeps the
+     * operator's path verbatim, exactly like the audio path (F13/F16). */
+    c.draw_index = draw_index;
+    video_path[0] = '\0';
+    if (video_out && video_out[0]) {
+        int vtrunc = 0;
+        pump_set_str(video_path, sizeof video_path, video_out);
+        if (kn_drawpath_suffix_inplace(video_path, sizeof video_path,
+                                       draw_index, &vtrunc) != 0 && vtrunc) {
+            kn_lctx b;
+            kn_lctx_init(&b, KN_CH_MEDIA, KN_WARN, "video_path_suffix");
+            kn_lctx_str(&b, "path", video_path);
+            kn_lctx_i64(&b, "draw_index", (long long)draw_index);
+            kn_lctx_str(&b, "note", "per-draw suffix did not fit; keeping "
+                                    "the un-suffixed path");
+            kn_log_emit(&b);
+        }
+        c.video_fp = fopen(video_path, "wb");
+        if (!c.video_fp) {
+            kn_lctx b;
+            kn_lctx_init(&b, KN_CH_MEDIA, KN_WARN, "video_stream_open_fail");
+            kn_lctx_str(&b, "path", video_path);
+            kn_lctx_str(&b, "reason", "fopen failed (permissions/path)");
+            kn_log_emit(&b);
+            video_path[0] = '\0';
+        } else {
+            printf("{\"mode\":\"session\",\"event\":\"video_stream_begin\","
+                   "\"path\":\"%s\",\"draw\":%ld}\n", video_path, draw_index);
+            fflush(stdout);
+            {
+                kn_lctx b;
+                kn_lctx_init(&b, KN_CH_MEDIA, KN_INFO, "video_stream_begin");
+                kn_lctx_str(&b, "path", video_path);
+                kn_lctx_i64(&b, "draw_index", (long long)draw_index);
+                kn_lctx_str(&b, "requested", video_out);
+                kn_log_emit(&b);
+            }
+        }
+    }
+
+    /* Round L (F19): arm the real-input driver. Everything is loaded and
+     * validated HERE, before the queue, so a bad script fails the draw
+     * immediately with a line number instead of silently typing nothing
+     * twenty minutes into a session. The script's t=0 is the first
+     * media-loop tick (si_tick latches it), not process start, so the same
+     * file replays identically on every draw however long the queue took. */
+    si_init(&si);
+    if (icfg) {
+        if (icfg->script && icfg->script[0]) {
+            unsigned gap = icfg->text_gap_ms ? icfg->text_gap_ms : 30u;
+            if (si_load(&si, icfg->script, gap) != 0) {
+                printf("{\"mode\":\"session\",\"error\":\"input_script\","
+                       "\"path\":\"%s\",\"line\":%u,\"detail\":\"%s\"}\n",
+                       icfg->script, si.err_line, si.err);
+                fflush(stdout);
+                kn_log_on_failure("session.input", "E_INPUT_SCRIPT",
+                                  "the --input-script file was rejected",
+                                  "fix the reported line; --input-check=FILE "
+                                  "validates a script without flying a "
+                                  "session");
+                if (c.video_fp) { fclose(c.video_fp); c.video_fp = NULL; }
+                kn_log_shutdown();
+                return 2;
+            }
+            printf("{\"mode\":\"session\",\"event\":\"input_script_loaded\","
+                   "\"path\":\"%s\",\"events\":%llu,\"span_ms\":%ld,"
+                   "\"lines\":%llu,\"comments\":%llu,\"text_gap_ms\":%u,"
+                   "\"unmapped_chars\":%llu}\n",
+                   si.script, (unsigned long long)si.n, si.span_ms,
+                   si.lines, si.comments, gap,
+                   (unsigned long long)si.live_unmapped);
+            fflush(stdout);
+            {
+                kn_lctx b;
+                kn_lctx_init(&b, KN_CH_INPUT, KN_INFO, "input_script_loaded");
+                kn_lctx_str(&b, "path", si.script);
+                kn_lctx_u64(&b, "events", (unsigned long long)si.n);
+                kn_lctx_i64(&b, "span_ms", si.span_ms);
+                kn_lctx_u64(&b, "unmapped_chars", si.live_unmapped);
+                kn_log_emit(&b);
+            }
+            if (!si.n) {
+                printf("{\"mode\":\"session\",\"event\":\"input_script_empty\","
+                       "\"note\":\"the file parsed but held no events\"}\n");
+                fflush(stdout);
+            }
+            si.source = "script";
+        }
+        if (icfg->live) {
+            /* Raw mode is only available on a real console: when stdout or
+             * stdin is redirected (the operator flies with "> logs\run.log")
+             * say so honestly instead of pretending to read keys. */
+            if (si_console_raw(1) != 0) {
+                printf("{\"mode\":\"session\",\"event\":\"input_live\","
+                       "\"armed\":0,\"reason\":\"no_console\","
+                       "\"note\":\"stdin is redirected or not a TTY; live "
+                       "forwarding needs a real console\"}\n");
+                fflush(stdout);
+                si.live = 0;
+            } else {
+                si.live = 1;
+                si.raw_on = 1;
+                si.source = si.have_script ? "script+live" : "live";
+                printf("{\"mode\":\"session\",\"event\":\"input_live\","
+                       "\"armed\":1,\"note\":\"keystrokes typed HERE are "
+                       "forwarded to the rig\"}\n");
+                fflush(stdout);
+            }
+        }
+        if (icfg->afk_ms) {
+            si.afk_ms = icfg->afk_ms;
+            if (!si.have_script && !si.live) si.source = "anti_afk";
+        }
+    }
+    if (!si.have_script && !si.live && !si.afk_ms)
+        si.source = "none";
 
     /* ---------------- phase A: CloudMatch ---------------- */
     memset(&st, 0, sizeof st);
@@ -5191,6 +6268,7 @@ static int run_session(const char *token, const char *device_id,
     (void)kn_rtsp_client_init(&rtc, rio, rtsp_buf, sizeof rtsp_buf,
                               KN_RTSP_TIMEOUT_MS, sess_now, NULL,
                               sess_sleep, NULL);
+    rtsp_inited = 1;   /* round L (F18): teardown may now TEARDOWN */
 
     common[0].name = "X-GS-Version";   common[0].value = "14.2";
     common[1].name = "Host";           common[1].value = authbuf;
@@ -5613,30 +6691,34 @@ static int run_session(const char *token, const char *device_id,
          * round XLIX (F13): a lottery draw gets its OWN file
          * ("<stem>_d<draw><ext>") so a multi-draw run delivers every
          * draw's audio instead of the last one silently overwriting the
-         * others. Built with the bounded-fill idiom (pump_set_str), not
-         * snprintf("%s"), so -Wformat-truncation has nothing to prove. */
+         * others.
+         * round L (F16): the derivation moved to kn_drawpath.c. The XLIX
+         * inline version took `dot = strrchr(audio_path, '.')` — a pointer
+         * INTO the destination — and then memcpy'd the extension forward:
+         * an overlapping copy (UB) that ASan flagged on the real rig and
+         * that produced run 31's "audio_d1_d1us" (doubled suffix AND the
+         * extension destroyed — the delivered files have none).
+         * kn_drawpath_suffix()
+         * copies stem/suffix/extension through locals and uses memmove, so
+         * the in-place idiom is defined behaviour. Pinned by
+         * test_kndrawpath (1051 checks) against an independent builder. */
         audio_path[0] = '\0';
         if (audio_out && audio_out[0]) {
+            int audio_trunc = 0;
             pump_set_str(audio_path, sizeof audio_path, audio_out);
-            if (draw_index > 0) {
-                const char *dot = strrchr(audio_path, '.');
-                size_t stem = (dot && dot > audio_path)
-                                  ? (size_t)(dot - audio_path)
-                                  : strlen(audio_path);
-                char tail[32];
-                int tn = snprintf(tail, sizeof tail, "_d%ld", draw_index);
-                if (tn > 0 && (size_t)tn < sizeof tail &&
-                    stem + (size_t)tn + (dot ? strlen(dot) : 0) + 1u
-                        <= sizeof audio_path) {
-                    memcpy(audio_path + stem, tail, (size_t)tn);
-                    if (dot)
-                        memcpy(audio_path + stem + (size_t)tn, dot,
-                               strlen(dot) + 1u);
-                    else
-                        audio_path[stem + (size_t)tn] = '\0';
-                }
-                /* else: honestly keep the un-suffixed path (cannot
-                 * happen — the caller bounds the path length) */
+            if (kn_drawpath_suffix_inplace(audio_path, sizeof audio_path,
+                                           draw_index, &audio_trunc) != 0 &&
+                audio_trunc) {
+                /* Cannot happen (the caller bounds the path length and the
+                 * buffer is 4096): say so loudly instead of silently
+                 * capturing two draws into one file. */
+                kn_lctx b;
+                kn_lctx_init(&b, KN_CH_MEDIA, KN_WARN, "audio_path_suffix");
+                kn_lctx_str(&b, "path", audio_path);
+                kn_lctx_i64(&b, "draw_index", (long long)draw_index);
+                kn_lctx_str(&b, "note", "per-draw suffix did not fit; "
+                                        "keeping the un-suffixed path");
+                kn_log_emit(&b);
             }
         }
         pump.audio_path = audio_path[0] ? audio_path : NULL;
@@ -6327,6 +7409,16 @@ static int run_session(const char *token, const char *device_id,
                     c.jiggle_dx = -c.jiggle_dx;
                     c.next_jiggle_ms = now_ms + jiggle_interval;
                 }
+                /* Round L (F19): the real-input tick. The script timeline,
+                 * the live console and the anti-AFK pulse all fire from
+                 * here, through the SAME gate the jiggle uses — nothing
+                 * flies before the activation chain's enable-input(true)
+                 * (pump.input_active), because input ahead of the chain is
+                 * the one thing the reference client never does. Costs one
+                 * integer compare per pass when nothing is armed. */
+                if (si.have_script || si.live || si.afk_ms)
+                    (void)si_tick(&si, c.fb, pump.origin_us, now_ms,
+                                  pump_persist && pump.input_active);
                 if (have_rr && (c.rtcp_fb_open || unified_mode)) {
                     uint64_t nf = 0, nl = 0;
                     int guard = 0;
@@ -6841,15 +7933,138 @@ teardown:
      * audio FILE* into the next draw, which is what scrambled run 30's
      * audio.opus at the draw1→draw2 boundary). */
     sess_audio_file_close(&pump, &ice_st);
-    {
+
+    /* Round L (F19): the input evidence, then give the console back. The
+     * report comes first so a Ctrl-C draw still states what flew. */
+    si_report(&si);
+    if (si.raw_on) { si_console_raw(0); si.raw_on = 0; }
+
+    /* Round L (F17): close the per-draw video stream and report it. Every
+     * exit path funnels through this label, so a draw can never leak an
+     * open FILE* into the next one (the same guarantee F12 gives audio).
+     * The size is read back with ftell so the event line states what is
+     * actually ON DISK, not what we intended to write. */
+    if (c.video_fp) {
+        long vsz = -1;
+        fflush(c.video_fp);
+        vsz = ftell(c.video_fp);
+        fclose(c.video_fp);
+        c.video_fp = NULL;
+        printf("{\"mode\":\"session\",\"event\":\"video_stream_end\","
+               "\"path\":\"%s\",\"draw\":%ld,\"aus\":%llu,\"bytes\":%llu,"
+               "\"file_bytes\":%ld,\"write_errors\":%llu}\n",
+               video_path, draw_index,
+               (unsigned long long)(c.video_aus % 10000000000ull),
+               (unsigned long long)(c.video_bytes % 10000000000ull),
+               vsz,
+               (unsigned long long)(c.video_write_errors % 10000000000ull));
+        fflush(stdout);
+        {
+            kn_lctx b;
+            kn_lctx_init(&b, KN_CH_MEDIA,
+                         (c.video_write_errors || c.video_aus == 0) ? KN_WARN
+                                                                    : KN_INFO,
+                         "video_stream_end");
+            kn_lctx_str(&b, "path", video_path);
+            kn_lctx_i64(&b, "draw_index", (long long)draw_index);
+            kn_lctx_u64(&b, "aus", c.video_aus);
+            kn_lctx_u64(&b, "bytes", c.video_bytes);
+            kn_lctx_i64(&b, "file_bytes", (long long)vsz);
+            kn_lctx_u64(&b, "write_errors", c.video_write_errors);
+            kn_log_emit(&b);
+        }
+    }
+
+    /* Round L (F18): the release. XLIX's TEARDOWN was fire-and-forget —
+     * no event line, and run 31 proved it never reaches the wire on a
+     * dead channel, so the cloud keeps the seat and the NEXT create hits
+     * 403 SESSION_LIMIT (run 31's 20/40/80 s backoff ×3 is that). Now:
+     *   (a) the TEARDOWN is LOGGED with its real rc/status, always — that
+     *       is the evidence that settles "did we release the seat";
+     *   (b) with --session-release (default OFF) it is followed by the
+     *       CloudMatch DELETE v2/session/{id} — the reference's stop_at
+     *       (:789-800), the call that actually frees the seat. 2xx and
+     *       404 both mean "gone" (validate_delete_response, :2728).
+     * Guarded by rtsp_inited: an early failure must not call
+     * kn_rtsp_request on a client that was never initialised. */
+    if (rtsp_inited) {
         kn_rtsp_header th[4];
         kn_rtsp_response tresp;
+        int trc;
+        memset(&tresp, 0, sizeof tresp);
         th[0] = common[0]; th[1] = common[1]; th[2] = common[2];
         th[3].name = "Session";
         th[3].value = desc.session[0] ? desc.session : sess.session_id;
         rtc.timeout_ms = 1000;
-        (void)kn_rtsp_request(&rtc, "TEARDOWN", sess.rtsps_endpoint, th, 4,
+        trc = kn_rtsp_request(&rtc, "TEARDOWN", sess.rtsps_endpoint, th, 4,
                               NULL, 0, 1, &tresp);
+        printf("{\"mode\":\"session\",\"event\":\"rtsp_teardown\",\"rc\":%d,"
+               "\"status\":%d,\"release_armed\":%d}\n", trc,
+               trc == KN_RTSP_OK ? tresp.status : 0, release_session);
+        fflush(stdout);
+        {
+            kn_lctx b;
+            kn_lctx_init(&b, KN_CH_RTSP,
+                         trc == KN_RTSP_OK ? KN_INFO : KN_WARN,
+                         "rtsp_teardown");
+            kn_lctx_i64(&b, "rc", trc);
+            kn_lctx_i64(&b, "status", trc == KN_RTSP_OK ? tresp.status : 0);
+            kn_lctx_bool(&b, "release_armed", release_session);
+            kn_lctx_str(&b, "session_id", sess.session_id);
+            if (trc != KN_RTSP_OK)
+                kn_lctx_str(&b, "note", "TEARDOWN did not complete — the seat "
+                                        "may still be held; --session-release "
+                                        "adds the CloudMatch DELETE");
+            kn_log_emit(&b);
+        }
+    } else {
+        printf("{\"mode\":\"session\",\"event\":\"rtsp_teardown\","
+               "\"skipped\":\"rtsp_not_initialised\"}\n");
+        fflush(stdout);
+    }
+    if (release_session) {
+        if (sess.session_id[0]) {
+            int c_rc = KN_HTTP_ERR_IO, c_status = 0, gone;
+            /* the poll loop closes its own stream: open a fresh one, the
+             * same idiom as the queue-abort cancel above */
+            if (cm_tls) { kn_net_tls_stream_close(cm_tls); cm_tls = NULL; }
+            cm_tls = kn_net_tls_stream_open(poll_host, poll_port, 15000,
+                                            err, sizeof err);
+            if (cm_tls) {
+                cm_io_ctx.s = cm_tls;
+                c_rc = kn_cm_cancel(hio, poll_host, "/", &st,
+                                    sess.session_id, 20000, sess_now, NULL,
+                                    cm_rxb, sizeof cm_rxb, cm_json,
+                                    sizeof cm_json, &c_status);
+                kn_net_tls_stream_close(cm_tls);
+                cm_tls = NULL;
+            }
+            gone = (c_rc == KN_HTTP_OK &&
+                    ((c_status >= 200 && c_status < 300) || c_status == 404));
+            printf("{\"mode\":\"session\",\"event\":\"cm_release\",\"rc\":%d,"
+                   "\"http_status\":%d,\"gone\":%d}\n", c_rc, c_status, gone);
+            fflush(stdout);
+            {
+                kn_lctx b;
+                kn_lctx_init(&b, KN_CH_HTTP, gone ? KN_INFO : KN_WARN,
+                             "cm_release");
+                kn_lctx_str(&b, "method", "DELETE");
+                kn_lctx_str(&b, "host", poll_host);
+                kn_lctx_str(&b, "session_id", sess.session_id);
+                kn_lctx_i64(&b, "rc", c_rc);
+                kn_lctx_i64(&b, "http_status", c_status);
+                kn_lctx_bool(&b, "gone", gone);
+                if (!gone)
+                    kn_lctx_str(&b, "note", "the seat may still be held; the "
+                                            "next create can hit 403 "
+                                            "SESSION_LIMIT (run 31)");
+                kn_log_emit(&b);
+            }
+        } else {
+            printf("{\"mode\":\"session\",\"event\":\"cm_release\","
+                   "\"skipped\":\"no_session_id\"}\n");
+            fflush(stdout);
+        }
     }
     kn_ws_send_close(&wsc, 1000);
     if (cert) { kn_cert_free(cert); cert = NULL; }   /* after kn_dtls */
@@ -6862,6 +8077,79 @@ teardown:
                           "401/403 = token, 503 = service, timeouts = rig");
     kn_log_shutdown();
     return exit_code;
+}
+
+/* Round L (F19): --input-check=FILE — parse an input script and report it,
+ * WITHOUT flying a session. Two reasons this exists:
+ *   1. the operator can validate the login script on the rig before
+ *      spending a queue slot on it (a rejected script is a wasted draw);
+ *   2. it gives the host a way to prove the parser byte-for-byte — the
+ *      sandbox has no GFN account, so this is the tier-1 leg for F19.
+ * Prints one JSON line per event (capped) + a summary line; exit 0 when the
+ * file parses, 2 when it does not (with the line number and reason). */
+#define KN_INPUT_CHECK_DUMP 200u
+
+static int run_input_check(const char *path, unsigned text_gap_ms)
+{
+    static sess_input si;
+    size_t i;
+    unsigned dumped = 0;
+
+    si_init(&si);
+    if (!path || !path[0]) {
+        printf("{\"mode\":\"input_check\",\"error\":\"no_path\"}\n");
+        fflush(stdout);
+        return 2;
+    }
+    if (si_load(&si, path, text_gap_ms ? text_gap_ms : 30u) != 0) {
+        printf("{\"mode\":\"input_check\",\"error\":\"parse\",\"path\":\"%s\","
+               "\"line\":%u,\"detail\":\"%s\"}\n", path, si.err_line, si.err);
+        fflush(stdout);
+        return 2;
+    }
+    for (i = 0; i < si.n && dumped < KN_INPUT_CHECK_DUMP; ++i, ++dumped) {
+        const sess_input_ev *e = &si.ev[i];
+        static const char *kn[] = { "key", "btn", "mouse", "mrel", "wheel" };
+        printf("{\"mode\":\"input_check\",\"event\":\"ev\",\"i\":%u,\"t_ms\":%ld,"
+               "\"kind\":\"%s\"",
+               (unsigned)i, e->t_ms,
+               (e->kind >= 0 && e->kind <= 4) ? kn[e->kind] : "?");
+        switch (e->kind) {
+        case SI_KEY:
+            printf(",\"vk\":\"0x%02X\",\"mods\":\"0x%X\",\"down\":%d",
+                   (unsigned)e->vk, (unsigned)e->mods, e->down);
+            break;
+        case SI_BTN:
+            printf(",\"button\":%u,\"down\":%d", e->btn, e->down);
+            break;
+        case SI_ABS:
+            printf(",\"x\":%ld,\"y\":%ld,\"w\":%u,\"h\":%u",
+                   (long)e->a, (long)e->b, (unsigned)e->w, (unsigned)e->h);
+            break;
+        case SI_REL:
+        case SI_WHEEL:
+            printf(",\"dx\":%ld,\"dy\":%ld", (long)e->a, (long)e->b);
+            break;
+        default: break;
+        }
+        printf(",\"sid\":%d}\n",
+               e->kind == SI_ABS || e->kind == SI_REL ? 6 : 0);
+    }
+    printf("{\"mode\":\"input_check\",\"event\":\"summary\",\"path\":\"%s\","
+           "\"events\":%llu,\"dumped\":%u,\"span_ms\":%ld,\"lines\":%llu,"
+           "\"comments\":%llu,\"blanks\":%llu,\"text_gap_ms\":%u,"
+           "\"unmapped_chars\":%llu,\"note\":\"%s\"}\n",
+           path, (unsigned long long)si.n, dumped, si.span_ms,
+           si.lines, si.comments, si.blanks,
+           text_gap_ms ? text_gap_ms : 30u,
+           (unsigned long long)si.live_unmapped,
+           si.live_unmapped
+               ? "some characters are outside the US VK table and were "
+                 "SKIPPED (see unmapped_chars) - a password with Polish "
+                 "diacritics will not type correctly"
+               : "");
+    fflush(stdout);
+    return 0;
 }
 
 static int print_version(void)
@@ -6887,6 +8175,7 @@ int main(int argc, char **argv)
     const char *loopback = NULL;          /* "" = default source discovery */
     const char *replay = NULL;
     const char *replay_au_dir = NULL;
+    const char *replay_video_out = NULL;   /* round L (F17) */
     const char *replay_srtp = NULL;
     long replay_vps = 0;
     int loopback_seconds = 600;           /* G1 default: 10 minutes */
@@ -6896,6 +8185,14 @@ int main(int argc, char **argv)
     const char *sess_title = "KarnyNow session", *sess_cm_host = NULL;
     const char *sess_au_dir = NULL;
     const char *sess_audio_out = NULL;   /* round XLVIII (F11) */
+    const char *sess_video_out = NULL;   /* round L (F17) */
+    int sess_release = 0;                /* round L (F18): default OFF */
+    sess_input_cfg sicfg;                /* round L (F19): real input */
+    const char *sess_input_script = NULL;
+    const char *input_check = NULL;      /* --input-check=FILE: parse only */
+    int sess_input_live = 0;
+    long sess_afk_ms = 0;                /* --input-anti-afk[=MS] */
+    long sess_text_gap_ms = 30;          /* --input-text-gap=MS */
     long long sess_app = 0;
     /* queue default 600 s (round XXIII): the R7 runs showed real queues
      * 160+ deep; 180 s risked aborting a legitimate wait (the abort now
@@ -6938,6 +8235,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--replay-capture=", 17) == 0) replay = a + 17;
         else if (strncmp(a, "--replay-au-dir=", 16) == 0)
             replay_au_dir = a + 16;
+        else if (strncmp(a, "--replay-video-out=", 19) == 0)
+            replay_video_out = a + 19;   /* round L (F17) */
         else if (strncmp(a, "--replay-srtp=", 14) == 0) replay_srtp = a + 14;
         else if (strncmp(a, "--replay-vps=", 13) == 0) {
             replay_vps = strtol(a + 13, NULL, 10);
@@ -6993,6 +8292,24 @@ int main(int argc, char **argv)
             sess_au_dir = a + 17;
         else if (strncmp(a, "--session-audio-out=", 20) == 0)
             sess_audio_out = a + 20;   /* round XLVIII (F11) */
+        else if (strncmp(a, "--session-video-out=", 20) == 0)
+            sess_video_out = a + 20;   /* round L (F17) */
+        else if (strcmp(a, "--session-release") == 0)
+            sess_release = 1;          /* round L (F18): opt-in */
+        else if (strcmp(a, "--no-session-release") == 0)
+            sess_release = 0;          /* round L (F18): explicit off */
+        else if (strncmp(a, "--input-script=", 15) == 0)
+            sess_input_script = a + 15;   /* round L (F19) */
+        else if (strcmp(a, "--input-live") == 0)
+            sess_input_live = 1;          /* round L (F19) */
+        else if (strcmp(a, "--input-anti-afk") == 0)
+            sess_afk_ms = 60000;          /* round L (F19): 1 min default */
+        else if (strncmp(a, "--input-anti-afk=", 17) == 0)
+            sess_afk_ms = strtol(a + 17, NULL, 10);
+        else if (strncmp(a, "--input-text-gap=", 17) == 0)
+            sess_text_gap_ms = strtol(a + 17, NULL, 10);
+        else if (strncmp(a, "--input-check=", 14) == 0)
+            input_check = a + 14;         /* round L (F19): offline parse */
         else if (strncmp(a, "--session-jiggle=", 17) == 0)
             sess_jiggle_ms = strtol(a + 17, NULL, 10);
         else if (strncmp(a, "--lottery=", 10) == 0)
@@ -7026,8 +8343,9 @@ int main(int argc, char **argv)
      * stdout as a SINGLE JSON document and an extra leading line breaks
      * that contract (the native gate's json.load validators). --version
      * already prints the full build.json for the deep identity. */
-    if (!list && !version && !(selftest && selftest[0]) && !diagnostics) {
-        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLIX\"}\n",
+    if (!list && !version && !(selftest && selftest[0]) && !diagnostics &&
+        !(input_check && input_check[0])) {
+        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"L\"}\n",
                __DATE__, __TIME__);
         fflush(stdout);
     }
@@ -7035,8 +8353,11 @@ int main(int argc, char **argv)
     if (list) return print_registry();
     if (version) return print_version();
     if (selftest && selftest[0]) return run_selftests(selftest, log_dir);
+    if (input_check && input_check[0])
+        return run_input_check(input_check, (unsigned)sess_text_gap_ms);
     if (replay && replay[0])
-        return run_replay(replay, replay_au_dir, replay_srtp, replay_vps,
+        return run_replay(replay, replay_au_dir, replay_video_out,
+                          replay_srtp, replay_vps,
                           log_dir);
     if (loopback) return run_loopback(loopback, loopback_seconds, no_audio,
                                       log_dir);
@@ -7059,6 +8380,22 @@ int main(int argc, char **argv)
             usage();
             return 2;
         }
+        /* Round L (F19): the input knobs, validated up front. The ranges
+         * are the wire's own: modifiers are 4 bits, a button id is 1..5,
+         * an i16 delta is +/-32767, and the anti-AFK interval below 1 s
+         * would be a keydown storm (the reference pulses on the order of
+         * a minute). */
+        memset(&sicfg, 0, sizeof sicfg);
+        if (sess_text_gap_ms < 0 || sess_text_gap_ms > 10000 ||
+            sess_afk_ms < 0 || sess_afk_ms > 3600000 ||
+            (sess_afk_ms > 0 && sess_afk_ms < 1000)) {
+            usage();
+            return 2;
+        }
+        sicfg.script = sess_input_script;
+        sicfg.live = sess_input_live;
+        sicfg.afk_ms = (unsigned)sess_afk_ms;
+        sicfg.text_gap_ms = (unsigned)sess_text_gap_ms;
         if (lottery_n == 1)
             return run_session(sess_token, sess_device, sess_app,
                                sess_title,
@@ -7067,7 +8404,8 @@ int main(int argc, char **argv)
                                sess_seconds, sess_queue_timeout, sess_keep,
                                sess_expect, sess_play_wait, sess_play_settle,
                                sess_jiggle_ms, sess_au_dir,
-                               sess_audio_out, 0L, log_dir);
+                               sess_audio_out, sess_video_out,
+                               sess_release, &sicfg, 0L, log_dir);
         /* Round XLIII (F5): lottery driver. run_session() is re-callable
          * by construction — every stateful static is re-initialised at
          * entry (memset &c, memset &pump + sess_fb_init) and destroyed
@@ -7127,7 +8465,8 @@ int main(int argc, char **argv)
                                   sess_queue_timeout, sess_keep,
                                   sess_expect, sess_play_wait,
                                   sess_play_settle, draw_jiggle,
-                                  sess_au_dir, sess_audio_out, draw,
+                                  sess_au_dir, sess_audio_out,
+                                  sess_video_out, sess_release, &sicfg, draw,
                                   log_dir);
                 done = draw;
                 printf("{\"mode\":\"session\",\"event\":\"lottery_draw\","

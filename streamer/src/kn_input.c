@@ -149,6 +149,12 @@ int kn_input_state_change(uint16_t code, uint32_t state, uint32_t frame,
 
 /* remote_input_packet(input_type, body) — nvst_input.rs:989-995:
  * BE u32 (4 + body length), type LE u32, body. */
+static int kn_in_streq(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
 static size_t kn_in_remote_packet(uint32_t input_type, const uint8_t *body,
                                   size_t blen, uint8_t *out, size_t out_len)
 {
@@ -157,6 +163,47 @@ static size_t kn_in_remote_packet(uint32_t input_type, const uint8_t *body,
     kn_in_put_le32(out + 4, input_type);
     if (blen) memcpy(out + 8, body, blen);
     return 8 + blen;
+}
+
+/* Round L (F19) — the shared 0x0206 remote-input envelope, factored out
+ * of haptics/mouse-relative so the four new discrete builders cannot
+ * drift from the two golden-pinned ones. nvst_input.rs:956-987:
+ *   inner   = remote_input_packet(type, body)
+ *   padded  = max(24, ceil(len(inner)/8)*8), zero-filled
+ *   stamps  = 1 + (type in {KEY_DOWN, KEY_UP, MOUSE_ABSOLUTE}) copies of
+ *             the timestamp as LE u64 (BE nowhere in this envelope)
+ *   payload = remote_input_packet(0x0e, padded || stamps)
+ *   command = TLV(0x0206, payload)
+ * Every body this project builds is <= 14 B, so inner <= 22 B and the pad
+ * is always to exactly 24 — hence 44 B (one stamp) or 52 B (two). */
+static int kn_in_remote_input(uint32_t input_type, const uint8_t *body,
+                              size_t blen, uint64_t timestamp_us,
+                              uint8_t *out, size_t out_len)
+{
+    uint8_t inner[8 + 16];
+    uint8_t padded[24 + 16];
+    uint8_t payload[8 + sizeof padded];
+    size_t n, len;
+    unsigned stamps;
+
+    if (!body && blen) return -1;
+    if (blen > 16u) return -1;
+    n = kn_in_remote_packet(input_type, body, blen, inner, sizeof inner);
+    if (!n || n > 24u) return -1;
+    memset(padded, 0, sizeof padded);
+    memcpy(padded, inner, n);
+    len = 24u;
+    stamps = (input_type == (uint32_t)KN_INPUT_TYPE_KEY_DOWN ||
+              input_type == (uint32_t)KN_INPUT_TYPE_KEY_UP ||
+              input_type == (uint32_t)KN_INPUT_TYPE_MOUSE_ABSOLUTE) ? 2u : 1u;
+    while (stamps--) {
+        kn_in_put_le64(padded + len, timestamp_us);
+        len += 8u;
+    }
+    n = kn_in_remote_packet(0x0eu, padded, len, payload, sizeof payload);
+    if (!n) return -1;
+    return kn_input_command(KN_INPUT_CMD_REMOTE_INPUT, payload, n, out,
+                            out_len);
 }
 
 int kn_input_haptics(uint64_t timestamp_us, int enabled,
@@ -173,26 +220,13 @@ int kn_input_haptics(uint64_t timestamp_us, int enabled,
      *   command = TLV(0x0206, payload)                           -> 44 B
      * Route: ControlReliable (sid 0) — 13 is not MOUSE_*. */
     uint8_t haptics_body[2];
-    uint8_t inner[8 + sizeof haptics_body];
-    uint8_t body[32];
-    uint8_t payload[8 + sizeof body];
-    size_t inner_len, body_len, payload_len;
 
-    haptics_body[0] = enabled ? 1u : 0u;
+    haptics_body[0] = enabled ? 1u : 0u;      /* u16 LE, unlike the F19
+                                                 bodies which are BE */
     haptics_body[1] = 0u;
-    inner_len = kn_in_remote_packet(13u, haptics_body, sizeof haptics_body,
-                                    inner, sizeof inner);
-    if (!inner_len || inner_len > 24u) return -1;
-    memset(body, 0, sizeof body);
-    memcpy(body, inner, inner_len);           /* pad-to-24 with zeros */
-    body_len = 24u;
-    kn_in_put_le64(body + body_len, timestamp_us);   /* LE here (not BE) */
-    body_len += 8u;
-    payload_len = kn_in_remote_packet(0x0eu, body, body_len, payload,
-                                      sizeof payload);
-    if (!payload_len) return -1;
-    return kn_input_command(KN_INPUT_CMD_REMOTE_INPUT, payload, payload_len,
-                            out, out_len);
+    return kn_in_remote_input(KN_INPUT_TYPE_HAPTICS, haptics_body,
+                              sizeof haptics_body, timestamp_us, out,
+                              out_len);
 }
 
 int kn_input_mouse_relative(int16_t dx, int16_t dy, uint64_t timestamp_us,
@@ -216,28 +250,196 @@ int kn_input_mouse_relative(int16_t dx, int16_t dy, uint64_t timestamp_us,
      * ts=0x01861330 — pinned in test_kninput AND tools/input_reference.py
      * (two implementations). */
     uint8_t motion_body[6];
-    uint8_t inner[8 + sizeof motion_body];
-    uint8_t body[32];
-    uint8_t payload[8 + sizeof body];
-    size_t inner_len, body_len, payload_len;
 
     kn_in_put_be16(motion_body + 0, (uint16_t)dx);
     kn_in_put_be16(motion_body + 2, (uint16_t)dy);
     motion_body[4] = 0u;
     motion_body[5] = 0u;
-    inner_len = kn_in_remote_packet(7u, motion_body, sizeof motion_body,
-                                    inner, sizeof inner);
-    if (!inner_len || inner_len > 24u) return -1;
-    memset(body, 0, sizeof body);
-    memcpy(body, inner, inner_len);           /* pad-to-24 with zeros */
-    body_len = 24u;
-    kn_in_put_le64(body + body_len, timestamp_us);   /* LE here (not BE) */
-    body_len += 8u;
-    payload_len = kn_in_remote_packet(0x0eu, body, body_len, payload,
-                                      sizeof payload);
-    if (!payload_len) return -1;
-    return kn_input_command(KN_INPUT_CMD_REMOTE_INPUT, payload, payload_len,
-                            out, out_len);
+    return kn_in_remote_input(KN_INPUT_TYPE_MOUSE_RELATIVE, motion_body,
+                              sizeof motion_body, timestamp_us, out,
+                              out_len);
+}
+
+/* ------------------------------------------------- discrete input (F19)
+ * Round L. Provenance for every byte is in kn_input.h; the two
+ * implementations rule is satisfied by tools/input_reference.py, which
+ * self-proves against the reference's OWN Rust goldens
+ * (nvst_input.rs:1868-1911) before emitting kn_input_kat_vectors.h. */
+
+int kn_input_key(uint16_t vk, uint16_t modifiers, int pressed,
+                 uint64_t timestamp_us, uint8_t *out, size_t out_len)
+{
+    /* nvst_input.rs:699-725: key BE u16 | modifiers BE u16 | 10 zeros. */
+    uint8_t body[14];
+
+    kn_in_put_be16(body + 0, vk);
+    kn_in_put_be16(body + 2, modifiers);
+    memset(body + 4, 0, 10);
+    return kn_in_remote_input(pressed ? (uint32_t)KN_INPUT_TYPE_KEY_DOWN
+                                      : (uint32_t)KN_INPUT_TYPE_KEY_UP,
+                              body, sizeof body, timestamp_us, out, out_len);
+}
+
+int kn_input_mouse_button(unsigned button, int pressed,
+                          uint64_t timestamp_us,
+                          uint8_t *out, size_t out_len)
+{
+    /* nvst_input.rs:760-768: [button, 0]. Ids are the Raw-Input order. */
+    uint8_t body[2];
+
+    if (button < 1u || button > 5u) return -1;
+    body[0] = (uint8_t)button;
+    body[1] = 0u;
+    return kn_in_remote_input(pressed ? (uint32_t)KN_INPUT_TYPE_BUTTON_DOWN
+                                      : (uint32_t)KN_INPUT_TYPE_BUTTON_UP,
+                              body, sizeof body, timestamp_us, out, out_len);
+}
+
+int kn_input_mouse_absolute(uint16_t x, uint16_t y, uint16_t width,
+                            uint16_t height, uint64_t timestamp_us,
+                            uint8_t *out, size_t out_len)
+{
+    /* nvst_input.rs:742-758 over the producer's 26-byte native event
+     * (opennow-streamer-core/src/lib.rs:2939-2955): x,y BE u16, the
+     * constant 08 00 in place of the event's zero u16, then the viewport
+     * w,h BE u16. Pixels inside w x h — NOT the /65535 normalization of
+     * the server->client cursor notification. */
+    uint8_t body[10];
+
+    if (!width || !height) return -1;
+    kn_in_put_be16(body + 0, x);
+    kn_in_put_be16(body + 2, y);
+    body[4] = 0x08u;
+    body[5] = 0x00u;
+    kn_in_put_be16(body + 6, width);
+    kn_in_put_be16(body + 8, height);
+    return kn_in_remote_input(KN_INPUT_TYPE_MOUSE_ABSOLUTE, body,
+                              sizeof body, timestamp_us, out, out_len);
+}
+
+int kn_input_wheel(int16_t delta_x, int16_t delta_y, uint64_t timestamp_us,
+                   uint8_t *out, size_t out_len)
+{
+    /* nvst_input.rs:769-782: dx BE i16 | dy BE i16 | 00 00. */
+    uint8_t body[6];
+
+    kn_in_put_be16(body + 0, (uint16_t)delta_x);
+    kn_in_put_be16(body + 2, (uint16_t)delta_y);
+    body[4] = 0u;
+    body[5] = 0u;
+    return kn_in_remote_input(KN_INPUT_TYPE_WHEEL, body, sizeof body,
+                              timestamp_us, out, out_len);
+}
+
+int kn_input_route_sid(uint32_t input_type)
+{
+    /* nvst_input.rs:969 (route) + :72-100 (NVST_CHANNEL_PROFILE):
+     * ControlPartial = sid 6, ControlReliable = sid 0. */
+    switch (input_type) {
+    case (uint32_t)KN_INPUT_TYPE_MOUSE_RELATIVE:
+    case (uint32_t)KN_INPUT_TYPE_MOUSE_ABSOLUTE:
+        return 6;
+    case (uint32_t)KN_INPUT_TYPE_KEY_DOWN:
+    case (uint32_t)KN_INPUT_TYPE_KEY_UP:
+    case (uint32_t)KN_INPUT_TYPE_BUTTON_DOWN:
+    case (uint32_t)KN_INPUT_TYPE_BUTTON_UP:
+    case (uint32_t)KN_INPUT_TYPE_WHEEL:
+    case (uint32_t)KN_INPUT_TYPE_HAPTICS:
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+int kn_input_vk_from_name(const char *name)
+{
+    /* media.rs:323-357 shortcut_virtual_key, plus the four modifier VKs
+     * (0x10/0x11/0x12/0x5B) as an extension — a script has to be able to
+     * hold a modifier down as a key, which the reference never needs
+     * because it parses chords instead. */
+    static const struct { const char *n; int vk; } tbl[] = {
+        { "enter", 0x0D }, { "return", 0x0D }, { "escape", 0x1B },
+        { "esc", 0x1B }, { "backspace", 0x08 }, { "tab", 0x09 },
+        { "space", 0x20 }, { "left", 0x25 }, { "up", 0x26 },
+        { "right", 0x27 }, { "down", 0x28 }, { "insert", 0x2D },
+        { "delete", 0x2E }, { "del", 0x2E }, { "home", 0x24 },
+        { "end", 0x23 }, { "pageup", 0x21 }, { "pgup", 0x21 },
+        { "pagedown", 0x22 }, { "pgdown", 0x22 }, { "printscreen", 0x2A },
+        { "print", 0x2A }, { "pause", 0x13 },
+        { "shift", 0x10 }, { "ctrl", 0x11 }, { "control", 0x11 },
+        { "alt", 0x12 }, { "win", 0x5B }, { "meta", 0x5B },
+        { "cmd", 0x5B }, { "super", 0x5B }
+    };
+    char low[24];
+    size_t i, n = 0;
+
+    if (!name || !name[0]) return -1;
+    while (name[n] && n + 1 < sizeof low) {
+        char c = name[n];
+        low[n] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+        n++;
+    }
+    if (name[n]) return -1;                  /* too long to be a key name */
+    low[n] = '\0';
+    if (n == 1u) {
+        char c = low[0];
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+            return (int)(unsigned char)(c >= 'a' && c <= 'z'
+                                            ? (char)(c - 'a' + 'A') : c);
+        return -1;
+    }
+    if (low[0] == 'f') {                     /* f1..f24 -> 0x70 + n */
+        int num = 0;
+        for (i = 1; i < n; ++i) {
+            if (low[i] < '0' || low[i] > '9') { num = -1; break; }
+            num = num * 10 + (low[i] - '0');
+            if (num > 24) { num = -1; break; }
+        }
+        if (num >= 1 && num <= 24) return 0x6F + num;
+        if (num == -1) return -1;
+    }
+    for (i = 0; i < sizeof tbl / sizeof tbl[0]; ++i)
+        if (kn_in_streq(low, tbl[i].n)) return tbl[i].vk;
+    return -1;
+}
+
+int kn_input_vk_from_ascii(int ch, uint16_t *vk, uint16_t *mods)
+{
+    /* The US-layout table (VK_OEM_* family; the same codes
+     * docs/keyboard-mapping.md lists as the wire VKs). A session whose
+     * remote layout is not US will disagree on the punctuation rows —
+     * documented, and the reason `type` reports what it could not map. */
+    static const struct { char c; uint16_t vk; uint16_t m; } pun[] = {
+        { '!', 0x31, KN_INPUT_MOD_SHIFT }, { '@', 0x32, KN_INPUT_MOD_SHIFT },
+        { '#', 0x33, KN_INPUT_MOD_SHIFT }, { '$', 0x34, KN_INPUT_MOD_SHIFT },
+        { '%', 0x35, KN_INPUT_MOD_SHIFT }, { '^', 0x36, KN_INPUT_MOD_SHIFT },
+        { '&', 0x37, KN_INPUT_MOD_SHIFT }, { '*', 0x38, KN_INPUT_MOD_SHIFT },
+        { '(', 0x39, KN_INPUT_MOD_SHIFT }, { ')', 0x30, KN_INPUT_MOD_SHIFT },
+        { '_', 0xBD, KN_INPUT_MOD_SHIFT }, { '+', 0xBB, KN_INPUT_MOD_SHIFT },
+        { '{', 0xDB, KN_INPUT_MOD_SHIFT }, { '}', 0xDD, KN_INPUT_MOD_SHIFT },
+        { '|', 0xDC, KN_INPUT_MOD_SHIFT }, { ':', 0xBA, KN_INPUT_MOD_SHIFT },
+        { '"', 0xDE, KN_INPUT_MOD_SHIFT }, { '<', 0xBC, KN_INPUT_MOD_SHIFT },
+        { '>', 0xBE, KN_INPUT_MOD_SHIFT }, { '?', 0xBF, KN_INPUT_MOD_SHIFT },
+        { '~', 0xC0, KN_INPUT_MOD_SHIFT },
+        { '-', 0xBD, 0 }, { '=', 0xBB, 0 }, { '[', 0xDB, 0 },
+        { ']', 0xDD, 0 }, { '\\', 0xDC, 0 }, { ';', 0xBA, 0 },
+        { '\'', 0xDE, 0 }, { ',', 0xBC, 0 }, { '.', 0xBE, 0 },
+        { '/', 0xBF, 0 }, { '`', 0xC0, 0 },
+        { '\n', 0x0D, 0 }, { '\t', 0x09, 0 }, { '\r', 0x0D, 0 }
+    };
+    size_t i;
+
+    if (!vk || !mods) return -1;
+    if (ch >= 'a' && ch <= 'z') { *vk = (uint16_t)(ch - 'a' + 'A'); *mods = 0;
+                                  return 0; }
+    if (ch >= 'A' && ch <= 'Z') { *vk = (uint16_t)ch;
+                                  *mods = KN_INPUT_MOD_SHIFT; return 0; }
+    if (ch >= '0' && ch <= '9') { *vk = (uint16_t)ch; *mods = 0; return 0; }
+    if (ch == ' ') { *vk = 0x20u; *mods = 0; return 0; }
+    for (i = 0; i < sizeof pun / sizeof pun[0]; ++i)
+        if (pun[i].c == (char)ch) { *vk = pun[i].vk; *mods = pun[i].m;
+                                    return 0; }
+    return -1;
 }
 
 int kn_input_activation_chain(

@@ -54,6 +54,7 @@ add_library(kncore STATIC
   streamer/src/kn_dtls.c
   streamer/src/kn_sctp.c
   streamer/src/kn_input.c
+  streamer/src/kn_drawpath.c
   streamer/src/kn_bw.c
   streamer/src/kn_ogg.c
   streamer/src/kn_arx.c
@@ -203,7 +204,7 @@ target_compile_definitions(kncore PRIVATE
   KN_DIAG_BUILD_EXTRA="${_kn_ffmpeg}")
 
 enable_testing()
-foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert kndtls knsctp kninput knbw knogg knarx)
+foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert kndtls knsctp kninput kndrawpath knbw knogg knarx)
   add_executable(test_${t} streamer/tests/test_${t}.c)
   target_link_libraries(test_${t} PRIVATE kncore)
   # tests include the generated KAT vector headers, which live in src/
@@ -293,3 +294,13 @@ endif()
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/logs")
 add_test(NAME knvstd_selftest_fec COMMAND knvstd --selftest=fec.vectors --log-dir=logs/ctest)
 add_test(NAME knvstd_selftest_list COMMAND knvstd --list-selftests)
+# round L (F19): the input-script parser, proven offline. The fixture is a
+# real login-shaped timeline (Tab between fields, type lines, Enter);
+# --input-check exits 2 on any parse error, so this is a hard gate.
+add_test(NAME knvstd_input_check
+         COMMAND knvstd
+                 --input-check=${CMAKE_CURRENT_SOURCE_DIR}/streamer/tests/fixtures/input_login_example.txt)
+add_test(NAME knvstd_input_check_rejects
+         COMMAND knvstd
+                 --input-check=${CMAKE_CURRENT_SOURCE_DIR}/streamer/tests/fixtures/input_bad.txt)
+set_tests_properties(knvstd_input_check_rejects PROPERTIES WILL_FAIL TRUE)

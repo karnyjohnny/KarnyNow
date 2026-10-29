@@ -22,6 +22,7 @@ KNCORE="streamer/src/knlog.c streamer/src/knring.c streamer/src/knfec.c \
     streamer/src/kn_json.c streamer/src/kn_http.c streamer/src/kn_cm.c \
     streamer/src/kn_cert.c streamer/src/kn_dtls.c \
     streamer/src/kn_sctp.c streamer/src/kn_input.c \
+    streamer/src/kn_drawpath.c \
     streamer/src/kn_bw.c \
     streamer/src/kn_ogg.c streamer/src/kn_arx.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
@@ -65,6 +66,9 @@ $CC $CFLAGS streamer/src/kn_sctp.c streamer/tests/test_knsctp.c \
     -o build/test_knsctp
 $CC $CFLAGS streamer/src/kn_input.c streamer/tests/test_kninput.c \
     -o build/test_kninput
+# round L (F16): the per-draw capture-naming rule (pure string code)
+$CC $CFLAGS streamer/src/kn_drawpath.c streamer/tests/test_kndrawpath.c \
+    -o build/test_kndrawpath
 # round XXXVIII: the estimator + server-control decoder are pure
 # computation (no sockets, no clock of their own), so this suite is
 # byte-identical on the host and on the Win7 target.
@@ -156,6 +160,10 @@ echo "== run test_kninput (pure wire-format code: identical in every build) =="
 rc21=0
 ./build/test_kninput || rc21=$?
 
+echo "== run test_kndrawpath (the F16 per-draw naming rule: pure string code) =="
+rc25=0
+./build/test_kndrawpath || rc25=$?
+
 echo "== run test_knbw (estimator + server-control KAT vectors: identical in every build) =="
 rc22=0
 ./build/test_knbw || rc22=$?
@@ -206,10 +214,11 @@ if [ $rc1 -eq 0 ] && [ $rc2 -eq 0 ] && [ $rc3 -eq 0 ] && [ $rc4 -eq 0 ] && \
    [ $rc12 -eq 0 ] && [ $rc13 -eq 0 ] && [ $rc14 -eq 0 ] && \
    [ $rc15 -eq 0 ] && [ $rc16 -eq 0 ] && [ $rc17 -eq 0 ] && [ $rc18 -eq 0 ] && \
    [ $rc19 -eq 0 ] && [ $rc20 -eq 0 ] && [ $rc21 -eq 0 ] && \
-   [ $rc22 -eq 0 ] && [ $rc23 -eq 0 ] && [ $rc24 -eq 0 ]; then
+   [ $rc22 -eq 0 ] && [ $rc23 -eq 0 ] && [ $rc24 -eq 0 ] && \
+   [ $rc25 -eq 0 ]; then
     echo "NATIVE TESTS PASS"
 else
-    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19 knsctp=$rc20 kninput=$rc21 knbw=$rc22 knogg=$rc23 knarx=$rc24)"
+    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19 knsctp=$rc20 kninput=$rc21 knbw=$rc22 knogg=$rc23 knarx=$rc24 kndrawpath=$rc25)"
     exit 1
 fi
 

@@ -1,0 +1,80 @@
+# KarnyNow input script fixture - the login timeline shape (round L, F19).
+#
+# This file is BOTH documentation and a gate: `knvstd --input-check=FILE`
+# parses it (ctest: knvstd_input_check) and every command form the parser
+# accepts appears at least once below, so a parser regression fails the build.
+#
+# FORMAT
+#   <t_ms> <command> <args...>        '#' or ';' starts a comment
+#   t_ms is relative to the FIRST MEDIA TICK of the draw (the moment input is
+#   armed), not to process start - so the same file replays identically on
+#   every lottery draw however long the queue took.
+#
+# COMMANDS
+#   key   <vk|name|char> <down|up> [mods]   vk = 0x41 | 65 | A | enter | f13
+#   type  <text to end of line>             one down/up pair per character
+#   mouse <x> <y> <w> <h>                   absolute PIXELS in a w x h view
+#   mrel  <dx> <dy>                         relative motion (rides sid 6)
+#   btn   <1..5|left|middle|right|x1|x2> <down|up>
+#   wheel <dx> <dy>                         one notch is typically +/-120
+#
+# THE GATE: nothing here flies before the activation chain latches
+# enable-input(true) (run 31 proved the chain itself is live: 8/8 messages,
+# 0 failures). Events that are due while the gate is shut are counted as
+# `gated` and retried, never dropped.
+#
+# SECURITY: a real script holds a real password, so it stays on the rig.
+# Nothing in this fixture is a credential - REPLACE the two `type` lines
+# before flying, and never commit the filled-in version.
+
+# ---- 1. wake the prompt and move focus into the e-mail field -----------
+0     key tab down
+30    key tab up
+
+# ---- 2. the account name (placeholder - edit on the rig) --------------
+400   type your.account@example.com
+
+# ---- 3. Tab to the password field, then the password placeholder ------
+1800  key tab down
+1830  key tab up
+2000  type REPLACE_WITH_THE_REAL_PASSWORD
+
+# ---- 4. Enter submits -------------------------------------------------
+3400  key enter down
+3430  key enter up
+
+# ---- 5. a named key with modifiers (AltGr = right Alt + Ctrl+Alt on the
+#         reference's table; here a plain Ctrl+A select-all as the example)
+5000  key a down ctrl
+5030  key a up ctrl
+
+# ---- 6. every remaining command form, so the parser is fully exercised -
+# a click at 640x360 inside a 1280x720 viewport (the CM create body's
+# resolution), a relative nudge, a wheel notch, and the two extra buttons.
+6000  mouse 640 360 1280 720
+6200  btn left down
+6260  btn left up
+6400  mrel -4 0
+6440  mrel 4 0
+6600  wheel 0 120
+6800  wheel 0 -120
+7000  btn right down
+7060  btn right up
+7200  btn middle down
+7260  btn middle up
+7400  btn x1 down
+7460  btn x1 up
+
+# ---- 7. the anti-AFK pulse, spelled out exactly as the reference sends it
+#         (VK 0x7C = F13, no modifiers) - --input-anti-afk does this on a
+#         timer instead, this is how you place one by hand.
+9000  key 0x7C down none
+9030  key f13 up
+
+# ---- 8. arrow navigation (a login prompt is driven with these) --------
+10000 key up down
+10030 key up up
+10100 key down down
+10130 key down up
+10200 key esc down
+10230 key esc up

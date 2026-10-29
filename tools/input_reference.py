@@ -47,11 +47,51 @@ COMMAND_WINDOW_STATE = 0x0320
 COMMAND_SYSTEM_STATE = 0x0321
 
 # nvst_input.rs:44-56 (native input types)
+INPUT_HEARTBEAT = 2
 INPUT_KEY_DOWN = 3
 INPUT_KEY_UP = 4
 INPUT_MOUSE_ABSOLUTE = 5
 INPUT_MOUSE_RELATIVE = 7
+INPUT_MOUSE_BUTTON_DOWN = 8
+INPUT_MOUSE_BUTTON_UP = 9
+INPUT_MOUSE_WHEEL = 10
+INPUT_GAMEPAD = 12
 INPUT_HAPTICS_ENABLED = 13
+INPUT_LOCK_KEYS_SYNC = 19
+INPUT_TEXT = 23
+
+# Round L (F19) — the modifier bitmask of ShortcutChord::parse
+# (opennow-streamer-platform/src/media.rs:292-319) and the Windows
+# virtual-key semantics of CapturedInput::Key { virtual_key, modifiers }
+# (media.rs:617-621). docs/keyboard-mapping.md is the oracle that the
+# wire `key` field is a Windows VK (its "Wire VK" column: 0xbd, 0xbb,
+# 0xdb, 0xc0 ... = VK_OEM_*), big-endian u16 on the wire.
+MODIFIER_SHIFT = 0x01
+MODIFIER_CTRL = 0x02
+MODIFIER_ALT = 0x04
+MODIFIER_META = 0x08
+
+# The reference's anti-AFK pulse is VK 0x7C (F13) down+up with no
+# modifiers — opennow-streamer-core/src/lib.rs:1604-1648 anti_afk_pulse.
+VK_ANTI_AFK = 0x7C
+
+# media.rs:323-357 shortcut_virtual_key — the name table this project
+# mirrors for its input script (letters/digits = ASCII uppercase,
+# F1..F24 = 0x70 + n, plus the named keys below).
+VK_NAMES = {
+    "enter": 0x0D, "return": 0x0D, "escape": 0x1B, "esc": 0x1B,
+    "backspace": 0x08, "tab": 0x09, "space": 0x20,
+    "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
+    "insert": 0x2D, "delete": 0x2E, "del": 0x2E, "home": 0x24,
+    "end": 0x23, "pageup": 0x21, "pgup": 0x21, "pagedown": 0x22,
+    "pgdown": 0x22, "printscreen": 0x2A, "print": 0x2A, "pause": 0x13,
+}
+
+# Raw-Input button ids: windows_raw_input.rs:326-332 BUTTON_FLAGS
+# (left 1, middle 2, right 3, x1 4, x2 5).
+MOUSE_BUTTON_LEFT = 1
+MOUSE_BUTTON_MIDDLE = 2
+MOUSE_BUTTON_RIGHT = 3
 
 # the descriptor body template, nvst_input.rs:1358-1371 (39 bytes; the
 # bitmap overwrites body[9..11])
@@ -165,6 +205,90 @@ def mouse_relative(dx: int, dy: int, timestamp_us: int) -> bytes:
     return remote_input_message(inner, timestamp_us)
 
 
+def route_sid(input_type: int) -> int:
+    """nvst_input.rs:969 + NVST_CHANNEL_PROFILE (:72-100): MOUSE_RELATIVE
+    and MOUSE_ABSOLUTE ride ControlPartial (sid 6, unordered, PR-SCTP TTL
+    300 ms); every other discrete input rides ControlReliable (sid 0,
+    ordered). Returns -1 for a type this project does not build."""
+    if input_type in (INPUT_MOUSE_RELATIVE, INPUT_MOUSE_ABSOLUTE):
+        return 6
+    if input_type in (INPUT_KEY_DOWN, INPUT_KEY_UP, INPUT_MOUSE_BUTTON_DOWN,
+                      INPUT_MOUSE_BUTTON_UP, INPUT_MOUSE_WHEEL,
+                      INPUT_HAPTICS_ENABLED):
+        return 0
+    return -1
+
+
+def key_event(virtual_key: int, modifiers: int, pressed: bool,
+              timestamp_us: int) -> bytes:
+    """Round L (F19). INPUT_KEY_DOWN(3)/KEY_UP(4) — the encode arm at
+    nvst_input.rs:699-725 fed through remote_input_message (:956-987):
+      body    = key BE u16 | modifiers BE u16 | 10 zero bytes        -> 14 B
+      inner   = remote_input_packet(3|4, body)                       -> 22 B
+      padded  = max(24, ceil(22/8)*8 = 24) = 24                      -> 24 B
+      timestamps: 3/4 ARE in the timestamp_count set, so 1 + 1 = 2
+                  -> append ts LE u64 TWICE                          -> 40 B
+      payload = remote_input_packet(0x0e, body)                      -> 48 B
+      command = TLV(0x0206, payload)                                 -> 52 B
+    Route: ControlReliable (sid 0). Rust golden:
+    nvst_input.rs:1868-1891 (vk 0x41, modifiers 1, ts 0x015b15b1)."""
+    body = struct.pack(">HH", virtual_key, modifiers) + b"\x00" * 10
+    inner = remote_input_packet(INPUT_KEY_DOWN if pressed else INPUT_KEY_UP,
+                                body)
+    return remote_input_message(inner, timestamp_us)
+
+
+def mouse_button(button: int, pressed: bool, timestamp_us: int) -> bytes:
+    """INPUT_MOUSE_BUTTON_DOWN(8)/UP(9) — nvst_input.rs:760-768: the body
+    is [button, 0]. Total 44 B, route ControlReliable (sid 0). Button ids
+    are the Raw-Input order (windows_raw_input.rs:326-332): left 1,
+    middle 2, right 3, x1 4, x2 5."""
+    inner = remote_input_packet(INPUT_MOUSE_BUTTON_DOWN if pressed
+                                else INPUT_MOUSE_BUTTON_UP,
+                                bytes([button & 0xFF, 0]))
+    return remote_input_message(inner, timestamp_us)
+
+
+def mouse_absolute(x: int, y: int, width: int, height: int,
+                   timestamp_us: int) -> bytes:
+    """INPUT_MOUSE_ABSOLUTE(5) — nvst_input.rs:742-758. The producer side
+    (opennow-streamer-core/src/lib.rs:2939-2955) builds a 26-byte native
+    event {type, x BE u16, y BE u16, 0 BE u16, width BE u16, height BE
+    u16, 0 BE u32, ts BE u64}; the transport copies [4..8] (x,y),
+    substitutes the constant 0x08 0x00 for the zero u16, then copies
+    [10..14] (width,height):
+      body    = x BE u16 | y BE u16 | 08 00 | w BE u16 | h BE u16    -> 10 B
+      inner   = remote_input_packet(5, body)                         -> 18 B
+      padded  = max(24, ceil(18/8)*8 = 24) = 24                      -> 24 B
+      timestamps: 5 IS in the set -> 2 -> ts LE u64 twice            -> 40 B
+      payload = remote_input_packet(0x0e, body)                      -> 48 B
+      command = TLV(0x0206, payload)                                 -> 52 B
+    Route: ControlPartial (sid 6). Coordinates are PIXELS inside the
+    width x height viewport (the FFI rejects width == 0 || height == 0,
+    opennow-streamer-ffi/src/lib.rs:1088-1108); the /65535 normalization
+    in docs/streamer-comparison/mouse-input.md is the SERVER->client
+    cursor notification, not this direction."""
+    if width == 0 or height == 0:
+        raise ValueError("viewport must be non-zero (reference FFI rule)")
+    body = (struct.pack(">HH", x, y) + b"\x08\x00"
+            + struct.pack(">HH", width, height))
+    return remote_input_message(remote_input_packet(INPUT_MOUSE_ABSOLUTE,
+                                                    body), timestamp_us)
+
+
+def mouse_wheel(delta_x: int, delta_y: int, timestamp_us: int) -> bytes:
+    """INPUT_MOUSE_WHEEL(10) — nvst_input.rs:769-782: body = dx BE i16 |
+    dy BE i16 | 00 00 (the producer packs usButtonData as i16, typically
+    +/-120 per notch; there is no RI_MOUSE_HWHEEL on Windows, so delta_x
+    stays 0 there). Total 44 B, route ControlReliable (sid 0) — the
+    reference's mouse-input doc: "Buttons and wheel use reliable
+    control", only motion rides sid 6."""
+    inner = remote_input_packet(INPUT_MOUSE_WHEEL,
+                                struct.pack(">hh", delta_x, delta_y)
+                                + b"\x00\x00")
+    return remote_input_message(inner, timestamp_us)
+
+
 def haptics_state(enabled: bool, timestamp_us: int) -> bytes:
     """nvst_input.rs:1339-1344."""
     inner = remote_input_packet(INPUT_HAPTICS_ENABLED,
@@ -267,6 +391,78 @@ CURSOR_VECTORS = [
 ]
 
 
+def _discrete_table() -> list[tuple]:
+    """Round L (F19): every discrete-input message this project can build,
+    with its arguments, its expected route and its expected bytes. The C
+    port rebuilds each row from (type, pressed, a, b, c, d, ts_us) and
+    must produce the SAME bytes — that is the two-implementations rule
+    applied to the keyboard/mouse plane. Two rows are the reference
+    client's own Rust goldens (nvst_input.rs:1868-1911)."""
+    ts = GOLDEN_TS_US
+    rows = [
+        ("key-down A (vk 0x41, no mods)", "key", (0x41, 0, True, ts)),
+        ("key-up A (vk 0x41, no mods)", "key", (0x41, 0, False, ts)),
+        ("key-down shift+A — RUST GOLDEN", "key",
+         (0x41, MODIFIER_SHIFT, True, 0x015B15B1)),
+        ("key-down F13 (vk 0x7C) anti-AFK pulse", "key",
+         (VK_ANTI_AFK, 0, True, ts)),
+        ("key-up F13 (vk 0x7C) anti-AFK pulse", "key", (VK_ANTI_AFK, 0,
+                                                        False, ts)),
+        ("key-down ENTER (vk 0x0D)", "key", (0x0D, 0, True, ts)),
+        ("key-up ENTER (vk 0x0D)", "key", (0x0D, 0, False, ts)),
+        ("key-down TAB ctrl+alt (mods 0x06)", "key",
+         (0x09, MODIFIER_CTRL | MODIFIER_ALT, True, ts)),
+        ("key-down 5 with all four mods (0x0F)", "key",
+         (0x35, MODIFIER_SHIFT | MODIFIER_CTRL | MODIFIER_ALT | MODIFIER_META,
+          True, ts)),
+        ("mouse button 1 (left) down", "button", (1, True, ts)),
+        ("mouse button 1 (left) up", "button", (1, False, ts)),
+        ("mouse button 3 (right) down", "button", (3, True, ts)),
+        ("mouse button 2 (middle) down", "button", (2, True, ts)),
+        ("mouse button 5 (x2) up", "button", (5, False, ts)),
+        ("mouse absolute centre 640,360 in 1280x720", "abs",
+         (640, 360, 1280, 720, ts)),
+        ("mouse absolute origin 0,0 in 1280x720", "abs", (0, 0, 1280, 720,
+                                                         ts)),
+        ("mouse absolute 1279,719 in 1280x720", "abs", (1279, 719, 1280,
+                                                        720, ts)),
+        ("mouse relative dx=dy=24 — RUST GOLDEN", "rel", (24, 24,
+                                                          0x01861330)),
+        ("mouse relative -5,+3", "rel", (-5, 3, ts)),
+        ("wheel one notch up (0,+120)", "wheel", (0, 120, ts)),
+        ("wheel one notch down (0,-120)", "wheel", (0, -120, ts)),
+    ]
+    out = []
+    for what, kind, args in rows:
+        if kind == "key":
+            vk, mods, pressed, t = args
+            msg = key_event(vk, mods, pressed, t)
+            typ = INPUT_KEY_DOWN if pressed else INPUT_KEY_UP
+            a, b, c, d, pr = vk, mods, 0, 0, 1 if pressed else 0
+        elif kind == "button":
+            button, pressed, t = args
+            msg = mouse_button(button, pressed, t)
+            typ = INPUT_MOUSE_BUTTON_DOWN if pressed else INPUT_MOUSE_BUTTON_UP
+            a, b, c, d, pr = button, 0, 0, 0, 1 if pressed else 0
+        elif kind == "abs":
+            x, y, w, h, t = args
+            msg = mouse_absolute(x, y, w, h, t)
+            typ, a, b, c, d, pr = INPUT_MOUSE_ABSOLUTE, x, y, w, h, 0
+        elif kind == "rel":
+            dx, dy, t = args
+            msg = mouse_relative(dx, dy, t)
+            typ, a, b, c, d, pr = INPUT_MOUSE_RELATIVE, dx, dy, 0, 0, 0
+        else:
+            dx, dy, t = args
+            msg = mouse_wheel(dx, dy, t)
+            typ, a, b, c, d, pr = INPUT_MOUSE_WHEEL, dx, dy, 0, 0, 0
+        out.append((what, typ, pr, a, b, c, d, t, route_sid(typ), msg))
+    return out
+
+
+DISCRETE_VECTORS = _discrete_table()
+
+
 def self_prove() -> None:
     """Fail loudly before emitting anything (the vectors-are-trusted rule)."""
     assert control_keepalive(0).hex() == "0002040000000000", "keepalive golden"
@@ -305,6 +501,76 @@ def self_prove() -> None:
     ext = mouse_relative(-32768, 32767, 1)
     assert ext[20:24] == b"\x80\x00\x7f\xff", "i16 extremes"
 
+    # round L (F19) — the reference's OWN byte-exact KEY-DOWN golden from
+    # the same test (nvst_input.rs:1868-1891): vk 0x41, modifiers 1
+    # (shift), ts 0x015b15b1 us -> 52 bytes on ControlReliable.
+    rust_key = key_event(0x41, MODIFIER_SHIFT, True, 0x015B15B1)
+    assert rust_key.hex() == (
+        "060230000000002c0e0000000000001203000000004100010000000000000000"
+        "00000000b1155b0100000000b1155b0100000000"
+    ), "rust key-down golden"
+    assert len(rust_key) == 52, "key total length"          # 4 + 48
+    assert route_sid(INPUT_KEY_DOWN) == 0, "keys ride ControlReliable"
+    # wire offsets the C port must match: key BE u16 at [20..22],
+    # modifiers BE u16 at [22..24], TWO ts LE u64 copies at [36..52)
+    assert rust_key[20:22] == b"\x00\x41", "vk BE u16"
+    assert rust_key[22:24] == b"\x00\x01", "modifiers BE u16"
+    assert rust_key[36:44] == struct.pack("<Q", 0x015B15B1), "ts copy 1"
+    assert rust_key[44:52] == struct.pack("<Q", 0x015B15B1), "ts copy 2"
+    up = key_event(0x41, 0, False, 0x015B15B1)
+    assert up[16:20] == b"\x04\x00\x00\x00", "KEY_UP type is 4 (LE u32)"
+    assert len(up) == 52 and up[22:24] == b"\x00\x00", "key-up modifiers"
+
+    # the other three discrete builders: lengths, routes, field offsets
+    btn = mouse_button(MOUSE_BUTTON_LEFT, True, 0x0102030405060708)
+    assert len(btn) == 44, "mouse button total length"
+    assert btn[16:20] == b"\x08\x00\x00\x00", "BUTTON_DOWN type is 8"
+    assert btn[20] == MOUSE_BUTTON_LEFT and btn[21] == 0, "button id byte"
+    assert btn[36:44] == struct.pack("<Q", 0x0102030405060708), "button ts"
+    assert route_sid(INPUT_MOUSE_BUTTON_DOWN) == 0, "buttons ride sid 0"
+    assert mouse_button(3, False, 1)[16:20] == b"\x09\x00\x00\x00", "UP is 9"
+
+    absm = mouse_absolute(640, 360, 1280, 720, 0x015B15B1)
+    assert len(absm) == 52, "absolute mouse total length"
+    assert absm[16:20] == b"\x05\x00\x00\x00", "ABSOLUTE type is 5"
+    assert absm[20:24] == b"\x02\x80\x01\x68", "x,y BE u16 (640,360)"
+    assert absm[24:26] == b"\x08\x00", "the constant 0x0800"
+    assert absm[26:30] == b"\x05\x00\x02\xd0", "viewport BE u16 (1280,720)"
+    assert absm[36:44] == absm[44:52] == struct.pack("<Q", 0x015B15B1), \
+        "absolute ts x2"
+    assert route_sid(INPUT_MOUSE_ABSOLUTE) == 6, "absolute rides sid 6"
+    try:
+        mouse_absolute(1, 1, 0, 720, 1)
+        raise AssertionError("zero viewport must be rejected")
+    except ValueError:
+        pass
+
+    wh = mouse_wheel(0, -120, 0x0102030405060708)
+    assert len(wh) == 44, "wheel total length"
+    assert wh[16:20] == b"\x0a\x00\x00\x00", "WHEEL type is 10"
+    assert wh[20:24] == b"\x00\x00\xff\x88", "dx,dy BE i16 (0,-120)"
+    assert route_sid(INPUT_MOUSE_WHEEL) == 0, "wheel rides sid 0"
+    assert route_sid(INPUT_GAMEPAD) == -1, "gamepad has no route here"
+
+    # the anti-AFK pulse the reference sends (lib.rs:1604-1648): VK 0x7C
+    # (F13) down then up, no modifiers.
+    pulse = key_event(VK_ANTI_AFK, 0, True, 7) + key_event(VK_ANTI_AFK, 0,
+                                                           False, 7)
+    assert len(pulse) == 104 and pulse[20:22] == b"\x00\x7c", "F13 pulse"
+
+    # every discrete vector: TLV code 0x0206, a sane length, and the
+    # route the reference's encoded_channel() would pick.
+    for what, typ, _pr, _a, _b, _c, _d, _t, sid, msg in DISCRETE_VECTORS:
+        assert struct.unpack_from("<H", msg, 0)[0] == COMMAND_REMOTE_INPUT, \
+            f"{what}: code"
+        assert len(msg) in (44, 52), f"{what}: length {len(msg)}"
+        assert struct.unpack_from("<H", msg, 2)[0] == len(msg) - 4, \
+            f"{what}: TLV length field"
+        assert sid == route_sid(typ), f"{what}: route"
+        assert struct.unpack_from("<I", msg, 16)[0] == typ, f"{what}: type"
+    goldens = [v for v in DISCRETE_VECTORS if "RUST GOLDEN" in v[0]]
+    assert len(goldens) == 2, "both Rust goldens are in the table"
+
     for hexed, want in VERSION_VECTORS:
         got = input_protocol_version(bytes.fromhex(hexed))
         assert got == want, f"version({hexed}) = {got}, want {want}"
@@ -325,8 +591,9 @@ def self_prove() -> None:
 
     names = sorted(set(COMMAND_NAMES.values()))
     assert len(names) == len(COMMAND_NAMES), "duplicate command name"
-    print(f"self-proof OK: 8/8 activation goldens + 1/1 relative-mouse "
-          f"golden byte-exact at ts={GOLDEN_TS_US}, "
+    print(f"self-proof OK: 8/8 activation goldens + 2/2 discrete-input "
+          f"(relative-mouse, key-down) Rust goldens byte-exact, "
+          f"{len(DISCRETE_VECTORS)} discrete vectors, "
           f"{len(VERSION_VECTORS)} parser vectors, "
           f"{len(CURSOR_VECTORS)} cursor vectors, "
           f"{len(COMMAND_NAMES)} named commands")
@@ -362,6 +629,29 @@ extern const kn_input_cmd_kat kn_input_kat_activation[8];
 /* Standalone single-message goldens. */
 extern const kn_input_cmd_kat kn_input_kat_singles[];
 extern const size_t kn_input_kat_singles_n;
+
+/* Round L (F19): the discrete keyboard/mouse plane. Each row carries the
+ * builder arguments, the expected route (sid) and the expected bytes, so
+ * the C port must REBUILD the same message from the same arguments.
+ *   type 3/4  key:      a = virtual key (Windows VK), b = modifiers
+ *   type 8/9  button:   a = button id (1 left, 2 middle, 3 right, 4/5)
+ *   type 5    absolute: a = x, b = y, c = viewport w, d = viewport h
+ *   type 7    relative: a = dx, b = dy
+ *   type 10   wheel:    a = dx, b = dy
+ * Two rows are the reference client's OWN Rust goldens
+ * (nvst_input.rs:1868-1911); their `what` says RUST GOLDEN. */
+typedef struct {{
+    uint32_t        type;
+    int             pressed;
+    int             a, b, c, d;
+    uint64_t        ts_us;
+    int             sid;
+    const uint8_t  *bytes;
+    size_t          len;
+    const char     *what;
+}} kn_input_discrete_kat;
+extern const kn_input_discrete_kat kn_input_kat_discrete[];
+extern const size_t kn_input_kat_discrete_n;
 
 /* input_protocol_version() vectors: input bytes -> expected version
  * (-1 == the reference's None). */
@@ -445,6 +735,19 @@ def emit(path: str) -> None:
     out.append("};\n")
     out.append("const size_t kn_input_kat_singles_n =\n"
                f"    sizeof kn_input_kat_singles / sizeof kn_input_kat_singles[0];\n\n")
+
+    for i, row in enumerate(DISCRETE_VECTORS):
+        out.append(_c_bytes(f"kat_dis_{i}", row[9]))
+    out.append("\n/* Round L (F19) discrete keyboard/mouse vectors. */\n")
+    out.append("const kn_input_discrete_kat kn_input_kat_discrete[] = {\n")
+    for i, (what, typ, pr, a, b, c, d, t, sid, msg) in enumerate(
+            DISCRETE_VECTORS):
+        out.append("    {{ {typ}u, {pr}, {a}, {b}, {c}, {d}, {t}ULL,".format(typ=typ, pr=pr, a=a, b=b, c=c, d=d, t=t) + "\n")
+        out.append("      {sid}, kat_dis_{i}, sizeof kat_dis_{i}, \"{what}\" }},\n".format(sid=sid, i=i, what=what))
+    out.append("};\n")
+    out.append("const size_t kn_input_kat_discrete_n =\n"
+               "    sizeof kn_input_kat_discrete /"
+               " sizeof kn_input_kat_discrete[0];\n\n")
 
     for i, (hexed, _) in enumerate(VERSION_VECTORS):
         out.append(_c_bytes(f"kat_ver_{i}", bytes.fromhex(hexed)))

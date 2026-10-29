@@ -382,7 +382,7 @@ def main():
     # build/. Retry missing targets explicitly before any binary is launched.
     required_bins = ["test_knfec", "test_knring", "test_knaudio", "test_kngs",
                      "test_knselftest", "knvstd", "test_kndiag", "test_knlog",
-                     "test_knsrtp"]
+                     "test_knsrtp", "test_kndrawpath"]
     missing = [name for name in required_bins if not os.path.isfile(exe(name))]
     if missing and configure_ok:
         log("\nmissing build outputs: %s" % ", ".join(name + ".exe" for name in missing))
@@ -418,7 +418,12 @@ def main():
               "test_kndiag", "test_knselftest", "test_kngs", "test_knaudio",
               "test_knrx", "test_knsock", "test_knws", "test_knrtsp",
               "test_kncm", "test_kncert", "test_kndtls", "test_knsctp",
-              "test_kninput", "test_knbw", "test_knogg", "test_knarx"]
+              "test_kninput", "test_knbw", "test_knogg", "test_knarx",
+              # round L (F16): the per-draw capture-path naming rule. It is
+              # pure string code, so it runs identically on the target and
+              # in the sandbox — but it MUST be in this list or the target
+              # never executes it (cmake builds it either way).
+              "test_kndrawpath"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out

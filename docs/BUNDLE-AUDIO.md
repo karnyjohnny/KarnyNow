@@ -163,16 +163,35 @@ Configs 16-31 are CELT NB/WB/SWB/FB × 2.5/5/10/20 ms
 `0xF8` as its default 20 ms packet; a mis-derived table shifts every
 granulepos.
 
-## 6. knvstd wiring (`knvstd_main.c`, stamp XLIX)
+## 6. knvstd wiring (`knvstd_main.c`, stamp L)
 
 - **CLI**: `--session-audio-out=F.opus` (help text updated; no file →
   counters still run, no capture). Threaded through `run_session(…,
   audio_out, draw_index, log_dir)`; both call sites (single =
   `draw_index` 0, lottery = the draw number). **XLIX/F13**: a lottery
   draw writes its OWN file `<stem>_d<draw><ext>` (`audio.opus` +
-  `--lottery=4` → `audio_d1.opus … audio_d4.opus`), built with the
-  bounded-fill idiom (`pump_set_str` + `memcpy`) — never
-  `snprintf("%s")`, which `-Wformat-truncation=2` cannot prove.
+  `--lottery=4` → `audio_d1.opus … audio_d4.opus`).
+  **L/F16 — the rule now lives in `kn_drawpath.c`, not inline.** The XLIX
+  derivation took `dot = strrchr(audio_path, '.')` — a pointer INTO the
+  destination buffer — and then `memcpy`'d the extension forward: an
+  overlapping copy (undefined behaviour; ASan `memcpy-param-overlap` on
+  the rig). Run 31 delivered the proof on disk: **`audio_d1_d1us`,
+  `audio_d2_d2us`, `audio_d3_d3us`, `audio_d4_d4us`** — suffix doubled
+  AND the `.opus` tail overwritten by the copy's NUL, so the files had
+  **no extension at all** (their byte sizes match the four `audio_close`
+  counters exactly, so only the NAME was wrong; rename one to `.opus` and
+  it is a normal OggOpus stream). `kn_drawpath_suffix_inplace()` copies
+  stem/suffix/extension through LOCAL buffers and uses `memmove` for
+  every write, so the in-place idiom the caller actually uses is defined
+  behaviour. Pinned by `test_kndrawpath` (**1051 checks**, the 21st
+  suite) three ways: the run-31 strings verbatim, a SECOND independent
+  `snprintf` builder across a path × draw matrix, and honest degradation
+  (a too-small buffer keeps the ORIGINAL path and sets `truncated`). The
+  SAME call now names the F17 video stream (`video_d<N>.264`) and the
+  draw-numbered AU dumps, so all three capture files follow one tested
+  rule. Path building still never uses `snprintf("%s")` —
+  `-Wformat-truncation=2` cannot prove it, and the paranoid knvstd leg in
+  `build_native_tests.sh` re-checks that class every round.
 - **Arm** (inside the `dtls_ready` event, right after `srtp_prof`):
   `kn_dtls_srtp_export` → `kn_arx_init/set_srtp(server half)` →
   `fopen` + `kn_ogg_mux_init/begin` → one stdout event + one knlog
@@ -249,6 +268,7 @@ anything in the band with `red_packets+packets` ≈ const is fine);
 |---|---|---|
 | all counters healthy (as above) but the decoded PCM is a constant ±3 LSB noise floor | the rig encoded **silence** — the app never produced audio (launcher-parked, muted, or the game never started) | **read the video and the 0x010a burst first**: AU sizes ~1 KB/frame + no game process = nothing to hear. Not an audio-path bug; do not "fix" kn_arx. Re-run with a draw that reaches gameplay |
 | `audio_close` missing from stdout while `audio_arm file:1` is present | the teardown close never ran (the XLVIII `!pump_persist` gate — **fixed by F12/XLIX**) | pre-XLIX builds: the file has no EOS page and, under `--lottery`, the next draw reopens the same path with the previous `FILE*` leaked open (run 30's 2 505-byte scrambled page at the draw boundary). XLIX+: one `audio_close` per draw, one `audio_d<N>.opus` per draw |
+| the delivered file is named `audio_d1_d1us` (suffix doubled, NO extension) while its size matches `audio_close.bytes` | the pre-L F13 derivation `memcpy`'d OVERLAPPING memory (`strrchr` into the destination buffer) — **fixed by F16/`kn_drawpath`** | the audio itself is intact: rename to `audio_d1.opus` and it decodes normally. Never re-inline the derivation — call `kn_drawpath_suffix_inplace()` |
 | first 1–2 audio packets of a stream carry TOC `0x7F`/`0x70` (CELT-NB configs) instead of `0xEC` | the rig encoder's warm-up frames | benign; `kn_opus_packet_samples48k` handles every config — but a future decoder must not assume a constant config across the stream |
 
 ## 8. Decision ledger (F11)
@@ -343,3 +363,67 @@ seq_loss` all 0, and — the actual prize — a **non-silent** decode
 (per-10 s RMS well above ~1 LSB) in whichever draw reaches gameplay.
 Read the arms against each other: if the jiggle-ON draws outlive ≈600 s
 and the OFF draws do not, the idle-policy hypothesis is confirmed.
+
+## 10. Run 31 — RESULT (round L): F12 PROVEN, F13 CAUGHT BROKEN BY ITS OWN FILES, CONTENT STILL SILENT
+
+Full analysis: `docs/RTSP.md` §38; the round delta: `docs/INTEGRATION.md`
+rev 41. The short version for this stage:
+
+**The four draws (`--lottery=4 --session-audio-out=audio.opus`, Watch Dogs:
+Legion, all `recovery_exhausted`):**
+
+| draw | media (`au_clock.rtp_ms`) | `audio_close` pages | bytes (== the delivered file size) | packets | `red_packets` | `srtp_fail` | `seq_loss` | `write_errors` |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 16.19 s | 82 | 199 510 | 3 814 | 3 814 | 0 | 0 | 0 |
+| 2 | 13.96 s | 73 | 176 601 | 3 376 | 3 376 | 0 | 0 | 0 |
+| 3 | 35.96 s | 164 | 406 292 | 7 771 | 7 771 | 0 | **1** | 0 |
+| 4 | 122.23 s | 525 | 1 309 966 | 25 062 | 25 062 | 0 | 0 | 0 |
+
+- **F12 is PROVEN LIVE**: exactly one `audio_close` per armed draw (4 of
+  4), each with its EOS page, each `bytes=` matching the file actually on
+  disk. Run 30's failure mode did not repeat — no leaked `FILE*` across a
+  lottery gap, no scrambled page at a draw boundary.
+- **F13 delivered per-draw files — with a mangled NAME**: `audio_d1_d1us`,
+  `audio_d2_d2us`, `audio_d3_d3us`, `audio_d4_d4us` (no `.opus` at all).
+  Cause and fix in §6 above (F16/`kn_drawpath`). The payloads were never
+  affected: size == `audio_close.bytes` on all four, `write_errors` 0.
+- **`seq_loss` 1 on draw 3 is the first non-zero loss this stage has ever
+  seen** — and it is benign by construction: every packet arrives as RFC
+  2198 RED with one redundancy block (`red_packets == packets` ×4), so the
+  previous packet's payload covered the gap. No page was dropped
+  (`ogg.dropped_packets` 0, `write_errors` 0). D-a1's arrival-order emit
+  is doing exactly what it was designed to do.
+- **Content: STILL DIGITAL SILENCE, and round L finally explains why.**
+  All 64 `sctl_010a` notifications name only Ubisoft Connect
+  (`UplayWebCore.exe` ×26, `UplayService.exe` ×16, `upc.exe` ×4) — **zero
+  game processes on any draw**. The rig sat at the Ubisoft login prompt:
+  the GFN browser client auto-logs-in by **typing the credentials into the
+  stream**, and our client sent no keystrokes (the activation chain flew
+  perfectly — `sent:8 failed:0 version:3 ready:1` ×4 — and not one
+  discrete input message followed it). So the silence is not an audio bug
+  and not a launcher-park coincidence: **the audio stage cannot capture
+  content until the client can type.** That is F19 (`--input-script`,
+  `--input-live`, `--input-anti-afk`), shipped this round.
+- **The ≈600 s idle-policy A/B: NO RESULT.** Media ran 14–122 s; nothing
+  reached the region the A/B was designed to probe. The interleaved
+  instrument (F14/F15) is proven and stays available for a run that draws
+  survivors.
+
+**What run 32 must show for this stage** (the login run —
+`--input-script=login.txt --session-audio-out=audio.opus
+--session-video-out=video.264 --session-release`):
+
+1. the file is named **`audio_d1.opus`** (F16 proven on target — a
+   `audio_d1_d1us`-style name means the target built a pre-L tree);
+2. `audio_close` once, `srtp_fail`/`write_errors` 0;
+3. **a non-silent decode** — per-10 s RMS well above the ~1 LSB floor —
+   in whichever part of the draw reaches gameplay, which is the first
+   content-bearing capture this project has ever had;
+4. corroboration from the other stages: a GAME process in the `0x010a`
+   burst (anything that is not `upc.exe`/`UplayService.exe`/
+   `UplayWebCore.exe`), AU sizes well above the ~1 KB/frame static-screen
+   signature, and `input_summary` with `sent > 0`.
+
+If (3) is still silence while (4) shows a game process, THEN it is an
+audio-stage question again (mixer/mute/PT) and the reaction matrix in
+§7/§7.1 is the place to start. Until then, do not touch `kn_arx`.

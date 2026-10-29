@@ -222,6 +222,7 @@ class Rig:
         self.args = args
         self.session_id = "FAKE-SESS-0001"
         self.plays = 0
+        self.deletes = 0        # round L (F18): DELETE v2/session/{id} count
         self.announce_seen = None
         # round XXV: the PLAY state machine the real rig showed at R7
         # run 6 (PLAY 455 until the client's hole-punch burst arrives)
@@ -280,7 +281,12 @@ class Rig:
                     http_respond(conn, 200, self.session_payload())
                 elif req.startswith("DELETE /v2/session/"):
                     # round XXIII: the reference's stop_at answers 2xx/404;
-                    # 204 with no body (validate_delete_response shape)
+                    # 204 with no body (validate_delete_response shape).
+                    # round L (F18): COUNTED, because --session-release now
+                    # sends this at teardown and the e2e asserts it arrived
+                    # (run 31's orphaned seats came from a DELETE that was
+                    # never sent at all).
+                    self.deletes += 1
                     conn.sendall(b"HTTP/1.1 204 No Content\r\n\r\n")
                 else:
                     http_respond(conn, 404, {"error": "unknown"})
@@ -461,6 +467,7 @@ class Rig:
         # emit the evidence line (the harness reads stdout after exit)
         print(json.dumps({"mode": "fake-rig", "event": "done",
                           "plays": self.plays,
+                          "deletes": self.deletes,
                           "ice_req": self.ice_req,
                           "ice_resp": self.ice_resp,
                           "play_455": self.play_455,

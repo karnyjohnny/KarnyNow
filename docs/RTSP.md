@@ -3893,3 +3893,281 @@ draws — trap 15), `run31.log`, the T10 pair, and **all four
 `audio_d*.opus` files**. Expected new evidence per draw: a
 `lottery_arm` line, an `audio_close` line, and one self-contained
 `audio_d<N>.opus` with an EOS page.
+
+---
+
+## 38. Round L — R7 run 31: **FOUR DRAWS, FOUR `recovery_exhausted` — AND THE LOGIN WALL IS NAMED FROM THE RIG'S OWN NOTIFICATIONS: 46/46 PROCESS EVENTS ARE UBISOFT CONNECT, ZERO GAME PROCESSES. THE CLIENT ANSWERS WITH REAL INPUT (F19), A CONTINUOUS VIDEO DUMP (F17), THE SEAT RELEASE (F18) AND THE FIX FOR ITS OWN MANGLED AUDIO FILENAMES (F16).**
+
+Run 31 flew the operator's chosen design verbatim — the interleaved A/B
+that answers the ≈600 s question and the audio-content question in one
+sitting:
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=100361011 \
+  --session-seconds=900 --lottery=4 --lottery-gap=60 --session-jiggle=100 \
+  --lottery-stop-on-keeper=0 --session-audio-out=audio.opus > logs\run31.log
+```
+
+### 38.1 Run 31 by the numbers: every XLIX instrument worked, and the ≈600 s question got NO RESULT
+
+| draw | arm (`lottery_arm`) | wall | media (`au_clock.rtp_ms`) | AUs | datagrams | gaps | decode errors | stop_reason | rc |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | `jiggle_ms:100` (ON) | 25.8 s | **16.19 s** | 487 | 1776 | 0 | 0 | `recovery_exhausted` | 1 |
+| 2 | `jiggle_ms:0` (OFF) | 24.4 s | **13.96 s** | 420 | 1485 | 0 | 0 | `recovery_exhausted` | 1 |
+| 3 | `jiggle_ms:100` (ON) | 46.1 s | **35.96 s** | 1080 | 3614 | 0 | 0 | `recovery_exhausted` | 1 |
+| 4 | `jiggle_ms:0` (OFF) | 132.3 s | **122.23 s** | 3668 | 11263 | 0 | 0 | `recovery_exhausted` | 1 |
+
+`lottery_summary {"draws":4,"of":4,"last_rc":1}` — **F15 proven** (all four
+draws flown despite nothing surviving), **F14 proven** (four `lottery_arm`
+lines, alternating 100/0/100/0 exactly as specified), **F12 proven**
+(four `audio_close` lines, one per draw, each with its EOS page). Video
+itself was flawless: **5655 AUs total, 18 138 datagrams, 0 gaps, 0 decode
+errors**, and the rate is exact — 487 AUs / 16.19 s = 30.1 fps, 3668 /
+122.23 s = 30.0 fps. Datagrams per AU ≈ 3.1–3.6, i.e. the same
+low-bitrate static-scene signature as run 30.
+
+**The A/B result: NONE.** No draw reached even 123 s of media, so the
+≈600 s cut (withdrawn as a ceiling in §37.4, re-opened as a suspected
+idle/no-input policy) was never in reach. The interleaved design is
+sound and stays available; it needs draws that survive, and survival is
+still the rig-side lottery (band draws 14–122 s here).
+
+Audio, again: four files, **40 023 packets** (3814 + 3376 + 7771 +
+25 062), `red_packets == packets` on every draw, `srtp_fail` 0 ×4,
+`seq_loss` 0/0/**1**/0, `write_errors` 0 ×4 — the extraction stage is
+again perfect and again **digital silence** (−91 dB class, run 30's
+measurement), for run 30's reason: there was nothing to record.
+
+### 38.2 THE FINDING: the rig never started a game process — 46/46 process notifications are Ubisoft Connect
+
+All 64 `sctl_010a` notifications were decoded (F2's 2400-hex cap means
+none was truncated). Their `processName` tally across the four draws:
+
+| processName | count | drsProfileName the rig attached |
+|---|---|---|
+| `UplayWebCore.exe` | 26 | `Ubisoft Connect` |
+| `UplayService.exe` | 16 | — (parent `upc.exe`) |
+| `upc.exe` | 4 | **`Ultimate Paintball Challenge`** (`shortName:"uplay"`, `cmsId:18761111`) |
+| **any game binary** | **0** | — |
+
+So: we asked CloudMatch for **Watch Dogs: Legion (100361011)**, the rig
+launched **Ubisoft Connect** and — parent/child chain
+`nvcontainer.exe → upc.exe → UplayService.exe / UplayWebCore.exe` — went
+no further. **No game process ever appeared in any of the four draws.**
+That is the whole explanation for both run-31 non-results: no game ⇒ no
+gameplay audio (silence) and no game ⇒ a static launcher screen at
+~3 datagrams/AU until the rig froze it.
+
+Note the classification: `upc.exe` is labelled `drsProfileName:
+"Ultimate Paintball Challenge"` — a *different* wrong answer than run
+24's `"EA Desktop"` on an Arknights session. The DRS profile lookup is
+wrong in both directions, so `drsProfileName` must never be used as
+evidence of what launched; `processName` is the trustworthy field.
+
+### 38.3 The operator's retraction (binding): the GFN *browser* types the credentials into the stream
+
+XLIX recorded "Legion launches itself and makes sound" from a browser
+control. The operator retracted it after seeing run 31's
+`au_00001_k.264`: the stream shows **the Ubisoft launcher's login
+dialog** (e-mail + password). Their explanation, which matches the
+process evidence exactly: play.geforcenow.com's web client performs
+**auto-login by sending the credentials into the stream as input**, so
+in the browser everything works immediately; our client, which sent
+**zero discrete input messages in four draws**, is handed the login
+prompt and sits there until the rig freezes the session.
+
+A grep of the reference client confirms there is nothing to copy: the
+OpenNOW sparse clone contains **no credential/login handling anywhere in
+the streamer protocol** — auto-login is a web-tier feature. Therefore the
+only route past that wall is the one the browser takes: **type**. That is
+F19.
+
+### 38.4 Two of our own bugs, each caught by its own evidence line
+
+**(a) F13's per-draw audio filename was mangled on the rig.** The four
+delivered files are literally named:
+
+```
+audio_d1_d1us   audio_d2_d2us   audio_d3_d3us   audio_d4_d4us
+```
+
+— not `audio_d1.opus`. The XLIX derivation took
+`dot = strrchr(audio_path, '.')`, i.e. a pointer INTO the destination
+buffer, then `memcpy`'d the suffix over the dot and `memcpy`'d the
+"extension" forward from that same buffer: an **overlapping copy**
+(undefined behaviour, ASan `memcpy-param-overlap` on the rig). Byte-level
+replay of the bug: `"audio.opus"` → write `_d1` at index 5 →
+`"audio_d1us"` → copy `strlen(dot)+1 = 6` bytes from index 5 to index 8
+→ `"audio_d1" + "_d1us"` = the observed name, extension gone. The audio
+*content* was fine (file sizes 199 510 / 176 601 / 406 292 / 1 309 966
+match the four `audio_close` byte counts exactly, so F12+F13 did deliver
+four separate self-contained streams — Windows just could not tell they
+were Opus). ⇒ **F16**.
+
+**(b) No TEARDOWN ever reached the wire — and nothing logged it.** The
+string `teardown` does not appear once in run 31's logs. The teardown
+call was fire-and-forget on a channel that was already dead, so all four
+draws **orphaned their seats**, and the log shows the consequence twice:
+`cm_create_backoff {"status":403,"attempt":1..3,"wait_ms":20000/40000/
+80000}` — two draws spent 140 s each waiting out seats the previous draw
+never released. ⇒ **F18**.
+
+### 38.5 The `.264` question, answered with ffprobe evidence instead of assurance
+
+The operator asked several times whether "only the first `.264` works"
+had been fixed. It had not been in scope; round L answers it, and the
+answer is **not corruption**. A single-AU dump is one access unit with no
+parameter sets of its own, so no decoder can start on it — container
+semantics. Measured on the host with the SHIPPING binary
+(`logs/f17_video_proof_L.txt`, three commands, reproducible):
+
+| file | bytes | ffprobe `-count_frames` | `ffmpeg -i … -f null -` |
+|---|---|---|---|
+| `aus/au_00001_k.264` (the keyframe) | 4795 | **1 frame** | clean |
+| `aus/au_00002_p.264` | 550 | — | **Invalid data found when processing input** |
+| `aus/au_00030_p.264` | 728 | — | **Invalid data found when processing input** |
+| `video.264` (**F17 continuous stream**) | 42944 | **60 frames** | clean |
+
+Both dumps come from the same replay of the same capture
+(`tools/make_rx_capture.py`, 60 frames), written by the same function
+(`knv_dump_au`), so the difference is purely what each file contains.
+⇒ **F17**: one continuous Annex-B file per draw, plus draw-numbered
+single-AU names (run 31's four draws shared one `--session-au-dir`, so
+draw 2's `au_00001_k.264` had silently replaced draw 1's).
+
+### 38.6 Round L ships (F16–F19; `docs/INTEGRATION.md` rev 41)
+
+- **F16 — `kn_drawpath.{h,c}` + `test_kndrawpath` (the 21st suite, 1051
+  checks).** One pure, alias-free function for the per-draw naming rule:
+  `kn_drawpath_suffix(src, draw, dst, dstsz, &truncated)` (in-place-safe
+  by construction — locals for the suffix and the extension, `memmove`
+  for every write), plus `…_inplace` and `…_suffix_str`. Rule: draw 0 →
+  the operator's path verbatim; draw N>0 → `<stem>_d<N><ext>`; the
+  extension is the last dot in the **final path component** (a dot in a
+  directory name is not an extension; `/` and `\` both honoured); no room
+  → keep the ORIGINAL path and set `truncated` (never a half-written
+  name), and the caller logs `audio_path_suffix` / `video_path_suffix`.
+  Pinned three ways: the run-31 strings verbatim, an **independent second
+  builder** in the test compared over a 14-path × 9-draw matrix, and the
+  exact-fit/one-byte-short boundary. ASan/UBSan clean at -O1 and -O2.
+- **F17 — the continuous per-draw video stream + draw-numbered AU names.**
+  `--session-video-out=F.264` (per draw ⇒ `video_d<N>.264`), every decoded
+  AU appended in order by the one shared writer `knv_dump_au`, with
+  `video_stream_begin` / `video_stream_end` event lines whose `file_bytes`
+  is read back with `ftell` (the line states what is ON DISK). The same
+  writer and the same flag family exist in replay mode
+  (`--replay-video-out=F.264`) so the mechanism is provable with no rig,
+  no account and no queue — that is how §38.5 was measured. Single-AU
+  dumps become `au_d<N>_%05u_%c.264` for N>0 (unchanged for draw 0).
+- **F18 — `--session-release` (default OFF; `--no-session-release`
+  explicit).** The RTSP TEARDOWN is now ALWAYS logged with its real
+  rc/status (`rtsp_teardown`, WARN + an explanatory note when it did not
+  complete), and with the flag it is followed by the CloudMatch **DELETE
+  `v2/session/{id}`** — the reference's `stop_at` (:789-800) — logged as
+  `cm_release` with `gone` = 2xx-or-404 (`validate_delete_response`,
+  :2728). A new `rtsp_inited` latch guards the call: before this round an
+  early failure path could reach `kn_rtsp_request` with a client phase B
+  had never initialised (latent crash). The release leg is now an e2e
+  gate: `tools/fake_rig.py` COUNTS deletes and reports `"deletes":1`, and
+  the harness asserts `kn_cm_cancel` → transport OK → 204 → `gone`
+  (43 → **48 checks**).
+- **F19 — real input: five byte-exact wire builders + three sources + one
+  gate.** See §38.7 for the wire contract and `docs/INPUT.md` §9 for the
+  operator-facing format. `--input-script=FILE` (timeline playback),
+  `--input-live` (console forwarding), `--input-anti-afk[=MS]` (the
+  reference's VK 0x7C F13 pulse), `--input-text-gap=MS`, and
+  `--input-check=FILE` (parse + dump without a session; exit 2 with the
+  line number — two permanent ctest legs).
+
+### 38.7 The F19 wire contract (confirmed against the reference's own goldens)
+
+Envelope: `remote_input_packet(type, body)` = BE u32 (4+len) ‖ LE u32 type
+‖ body; `remote_input_message` pads the body to max(24, ceil/8×8),
+appends the LE u64 timestamp (×1, or ×2 for types 3/4/5) and wraps it in
+TLV `0x0206` around `remote_input_packet(0x0e, padded)`.
+
+| type | code | body | total | route |
+|---|---|---|---|---|
+| KEY_DOWN / KEY_UP | 3 / 4 | vk BE u16, modifiers BE u16, 10×0 | **52 B** | sid 0 (ControlReliable) |
+| MOUSE_ABSOLUTE | 5 | x BE u16, y BE u16, `08 00`, w BE u16, h BE u16 | **52 B** | sid 6 (ControlPartial) |
+| MOUSE_RELATIVE | 7 | dx BE i16, dy BE i16, 0, 0 | **44 B** | sid 6 (ControlPartial) |
+| BUTTON_DOWN / BUTTON_UP | 8 / 9 | button u8, 0 | **44 B** | sid 0 |
+| WHEEL | 10 | dx BE i16, dy BE i16, 0, 0 | **44 B** | sid 0 |
+
+Field offsets inside the built message (all five types): code `[0..2]`,
+length `[2..4]`, payload BE length `[4..8]`, `0x0e` LE `[8..12]`, inner BE
+length `[12..16]`, inner type LE `[16..20]`, **inner body starts at
+`[20]`**. Key: vk `[20..22]`, mods `[22..24]`. Button: id `[20]`.
+Absolute: x,y `[20..24]`, the `08 00` marker `[24..26]`, viewport
+`[26..30]`. Relative/wheel: dx,dy `[20..24]`. Timestamps live at
+`[36..44]` (all types) and `[44..52]` (types 3/4/5 only) — **not** at
+32/40, which is the trap that cost an afternoon.
+
+Modifiers: shift `0x01`, ctrl `0x02`, alt `0x04`, meta/win `0x08`
+(AltGr = right Alt + the ctrl+alt bits, per `docs/keyboard-mapping.md`).
+Buttons: 1 left, 2 middle, 3 right, 4 x1, 5 x2. A wheel notch is ±120.
+Absolute coordinates are **PIXELS inside the w×h viewport** (not
+normalized 0..65535), and a zero viewport is rejected by the reference
+FFI (`opennow-streamer-ffi:1088-1108`). Anti-AFK: VK `0x7C` (F13)
+down+up, modifiers 0 (`opennow-streamer-core:1604-1648`).
+
+Two Rust goldens are transcribed verbatim into
+`tools/input_reference.py` (which self-proves 8/8 activation messages and
+both goldens before emitting `kn_input_kat_vectors.h`) and rebuilt
+byte-exact by `test_kninput`:
+
+```
+KEY_DOWN vk=0x41 mods=1 ts=0x015b15b1
+060230000000002c0e000000000000120300000000410001000000000000000000000000b1155b0100000000b1155b0100000000
+MOUSE_RELATIVE dx=dy=24 ts=0x01861330
+06022800000000240e0000000000000a07000000001800180000000000000000000000003013860100000000
+```
+
+**The gate**: nothing flies before the activation chain latches
+`enable-input(true)` (`pump.input_active` — the same latch the jiggle
+uses), because input ahead of the chain is the one thing the reference
+never does. Gated events are counted (`gated`) and retried on a later
+tick, never dropped; events more than 5 s late are skipped and counted
+(`late_skips`) so a post-recovery tick cannot dump a whole timeline at
+once. Every message is built by `kn_input.c` and routed by
+`kn_input_route_sid`, timestamps riding `pump.origin_us` (the chain's own
+epoch). Run 31 proves the gate's precondition is healthy: `input_activation
+{"sent":8,"failed":0,"version":3,"ready":1}` on all four draws.
+
+### 38.8 Sandbox gates at L (see INTEGRATION rev 41 §verification)
+
+`build_native_tests.sh` **NATIVE TESTS PASS**, zero warnings (new
+`test_kndrawpath` **1051**, `test_kninput` **794** — was 548) ·
+`cross_check.sh` PASS ×2 arches `-Werror` clean (`logs/cross_L.log`) ·
+ctest **25/25 ×2 backends** (was 22/22) · T10 POSIX dry **ALL PASS 74**
+(target **84**: `test_kndrawpath` joined T10's own `suites` list and
+`required_bins` this round — cmake builds every suite, but T10 runs only
+the ones it names, so without that edit the F16 suite would never have
+executed on the target; `logs/t10_L2.log`) · T13 **63** (net-mb) / **51** (bare, one
+by-design gcm256 SKIP) · `sandbox_session_e2e` **48/48** (was 43) ·
+summary skeleton **113 == 113** against run 31's real stdout (F16–F19 add
+no summary keys, deliberately) · ASan/UBSan green on both new/changed
+suites and on a fully sanitized `knvstd` running `--input-check` ×2 plus
+the F17 replay dumps (only UBSan note: vendored
+`crypto-algorithms-sha1/sha1.c:26`) · stamp **L**.
+
+### 38.9 Run 32 — THE LOGIN RUN
+
+One draw, 420 s, typed login, video on, release on:
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=100361011 \
+  --session-seconds=420 --input-script=login.txt \
+  --session-video-out=video.264 --session-audio-out=audio.opus \
+  --session-release > logs\run32.log
+```
+
+`login.txt` is written **on the rig** (the template + the
+`--input-check=login.txt` validation step are in START-HERE §4 Step 4/5 —
+`unmapped_chars` must be 0, otherwise a Polish diacritic in the password
+would be silently mistyped and the run is worthless). The deliverable that
+matters most is **`video.264`**: it is the first run whose outcome the
+operator can WATCH, and it answers the only question that matters — did
+the game start? Expected new evidence lines: `input_script_loaded`,
+`input_first_send`, `input_summary` (WARN if armed but silent),
+`video_stream_begin/end`, `rtsp_teardown`, `cm_release`.

@@ -69,6 +69,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS -c streamer/src/kn_dtls.c  -o build/cross/kn_dtls_$arch.o
     $CC $CFLAGS -c streamer/src/kn_sctp.c  -o build/cross/kn_sctp_$arch.o
     $CC $CFLAGS -c streamer/src/kn_input.c -o build/cross/kn_input_$arch.o
+    $CC $CFLAGS -c streamer/src/kn_drawpath.c -o build/cross/kn_drawpath_$arch.o
     # round XXXVIII (D-t10): the bandwidth estimator + server-control
     # decoder are pure computation — they must survive the target flags
     $CC $CFLAGS -c streamer/src/kn_bw.c    -o build/cross/kn_bw_$arch.o
@@ -164,6 +165,8 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         $LDFLAGS -o build/cross/test_knsctp_$arch.exe
     $CC $CFLAGS streamer/src/kn_input.c streamer/tests/test_kninput.c \
         $LDFLAGS -o build/cross/test_kninput_$arch.exe
+    $CC $CFLAGS streamer/src/kn_drawpath.c streamer/tests/test_kndrawpath.c \
+        $LDFLAGS -o build/cross/test_kndrawpath_$arch.exe
     $CC $CFLAGS streamer/src/kn_bw.c streamer/tests/test_knbw.c \
         $LDFLAGS -o build/cross/test_knbw_$arch.exe
     $CC $CFLAGS streamer/src/kn_aes.c streamer/src/kn_sha1.c streamer/src/knsrtp.c \
@@ -181,6 +184,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_json.c streamer/src/kn_http.c streamer/src/kn_cm.c \
         streamer/src/kn_cert.c streamer/src/kn_dtls.c \
         streamer/src/kn_sctp.c streamer/src/kn_input.c \
+        streamer/src/kn_drawpath.c \
         streamer/src/kn_bw.c \
         streamer/src/kn_ogg.c streamer/src/kn_arx.c \
         third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"

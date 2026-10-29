@@ -794,6 +794,254 @@ static void t_mouse_relative_golden(void)
           "relative mouse NULL out refused");
 }
 
+/* ------------------------------------------------- round L (F19)
+ * The discrete keyboard/mouse plane. Every generated row is REBUILT here
+ * from its arguments and must come out byte-identical to
+ * tools/input_reference.py — which self-proves against the reference
+ * client's OWN Rust goldens (nvst_input.rs:1868-1911) before emitting
+ * the table. Two of the rows ARE those goldens. */
+static void t_discrete_goldens(void)
+{
+    size_t i, rebuilt = 0;
+
+    CHECK(kn_input_kat_discrete_n == 21u, "21 discrete-input goldens");
+    for (i = 0; i < kn_input_kat_discrete_n; ++i) {
+        const kn_input_discrete_kat *k = &kn_input_kat_discrete[i];
+        uint8_t buf[KN_INPUT_CMD_MAX];
+        int n = -12345;
+
+        memset(buf, 0xA5, sizeof buf);
+        switch (k->type) {
+        case KN_INPUT_TYPE_KEY_DOWN:
+        case KN_INPUT_TYPE_KEY_UP:
+            n = kn_input_key((uint16_t)k->a, (uint16_t)k->b, k->pressed,
+                             k->ts_us, buf, sizeof buf);
+            break;
+        case KN_INPUT_TYPE_BUTTON_DOWN:
+        case KN_INPUT_TYPE_BUTTON_UP:
+            n = kn_input_mouse_button((unsigned)k->a, k->pressed, k->ts_us,
+                                      buf, sizeof buf);
+            break;
+        case KN_INPUT_TYPE_MOUSE_ABSOLUTE:
+            n = kn_input_mouse_absolute((uint16_t)k->a, (uint16_t)k->b,
+                                        (uint16_t)k->c, (uint16_t)k->d,
+                                        k->ts_us, buf, sizeof buf);
+            break;
+        case KN_INPUT_TYPE_MOUSE_RELATIVE:
+            n = kn_input_mouse_relative((int16_t)k->a, (int16_t)k->b,
+                                        k->ts_us, buf, sizeof buf);
+            break;
+        case KN_INPUT_TYPE_WHEEL:
+            n = kn_input_wheel((int16_t)k->a, (int16_t)k->b, k->ts_us,
+                               buf, sizeof buf);
+            break;
+        default:
+            CHECK(0, "unknown discrete type in the generated table");
+            break;
+        }
+        CHECK(n > 0, k->what);
+        if (n <= 0) continue;
+        CHECK((size_t)n == k->len, k->what);
+        CHECK(t_hexeq(buf, (size_t)n, k->bytes, k->len), k->what);
+        CHECK(buf[0] == 0x06u && buf[1] == 0x02u, k->what);
+        CHECK((size_t)(buf[2] | (buf[3] << 8)) + 4u == (size_t)n, k->what);
+        CHECK((((uint32_t)buf[16] | ((uint32_t)buf[17] << 8) |
+                ((uint32_t)buf[18] << 16) | ((uint32_t)buf[19] << 24)))
+              == k->type, k->what);
+        CHECK(kn_input_route_sid(k->type) == k->sid, k->what);
+        CHECK((size_t)n == ((k->type == (uint32_t)KN_INPUT_TYPE_KEY_DOWN ||
+                             k->type == (uint32_t)KN_INPUT_TYPE_KEY_UP ||
+                             k->type == (uint32_t)KN_INPUT_TYPE_MOUSE_ABSOLUTE)
+                                ? 52u : 44u), k->what);
+        rebuilt++;
+    }
+    CHECK(rebuilt == kn_input_kat_discrete_n, "every row was rebuilt");
+}
+
+static void t_discrete_edges(void)
+{
+    uint8_t buf[64];
+
+    /* bounds: one byte short is a hard -2, exact length succeeds */
+    CHECK(kn_input_key(0x41u, 0u, 1, 1u, buf, 51) == -2, "key needs 52");
+    CHECK(kn_input_key(0x41u, 0u, 1, 1u, buf, 52) == 52, "key is 52 B");
+    CHECK(kn_input_mouse_absolute(1u, 1u, 640u, 480u, 1u, buf, 51) == -2,
+          "absolute needs 52");
+    CHECK(kn_input_mouse_absolute(1u, 1u, 640u, 480u, 1u, buf, 52) == 52,
+          "absolute is 52 B");
+    CHECK(kn_input_mouse_button(1u, 1, 1u, buf, 43) == -2, "button needs 44");
+    CHECK(kn_input_mouse_button(1u, 1, 1u, buf, 44) == 44, "button is 44 B");
+    CHECK(kn_input_wheel(0, 120, 1u, buf, 43) == -2, "wheel needs 44");
+    CHECK(kn_input_wheel(0, 120, 1u, buf, 44) == 44, "wheel is 44 B");
+
+    /* argument validation (the reference FFI's own rules) */
+    CHECK(kn_input_mouse_button(0u, 1, 1u, buf, sizeof buf) == -1,
+          "button 0 rejected");
+    CHECK(kn_input_mouse_button(6u, 1, 1u, buf, sizeof buf) == -1,
+          "button 6 rejected");
+    CHECK(kn_input_mouse_absolute(1u, 1u, 0u, 720u, 1u, buf, sizeof buf)
+          == -1, "zero-width viewport rejected");
+    CHECK(kn_input_mouse_absolute(1u, 1u, 1280u, 0u, 1u, buf, sizeof buf)
+          == -1, "zero-height viewport rejected");
+    CHECK(kn_input_key(0x41u, 0u, 1, 1u, NULL, 52) == -1, "key NULL out");
+
+    /* the route table (nvst_input.rs:969 + NVST_CHANNEL_PROFILE) */
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_MOUSE_RELATIVE) == 6,
+          "relative motion rides sid 6");
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_MOUSE_ABSOLUTE) == 6,
+          "absolute motion rides sid 6");
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_KEY_DOWN) == 0, "keys ride sid 0");
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_KEY_UP) == 0, "key-ups ride sid 0");
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_BUTTON_DOWN) == 0,
+          "buttons ride sid 0");
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_BUTTON_UP) == 0,
+          "button-ups ride sid 0");
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_WHEEL) == 0, "wheel rides sid 0");
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_HAPTICS) == 0,
+          "haptics rides sid 0");
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_GAMEPAD) == -1,
+          "gamepad has no route here (InputPartial)");
+    CHECK(kn_input_route_sid(KN_INPUT_TYPE_TEXT) == -1,
+          "text is not built yet -> no route");
+    CHECK(kn_input_route_sid(9999u) == -1, "unknown type has no route");
+
+    /* the reference's anti-AFK pulse: VK 0x7C (F13) down then up
+     * (opennow-streamer-core/src/lib.rs:1604-1648) */
+    {
+        uint8_t a[52], b[52];
+        int na = kn_input_key(KN_INPUT_VK_ANTI_AFK, 0u, 1, 7u, a, sizeof a);
+        int nb = kn_input_key(KN_INPUT_VK_ANTI_AFK, 0u, 0, 7u, b, sizeof b);
+
+        CHECK(na == 52 && nb == 52, "the F13 pulse pair builds");
+        CHECK(a[20] == 0x00u && a[21] == 0x7Cu, "the pulse vk is F13 (0x7C)");
+        CHECK(a[16] == 3u && b[16] == 4u, "the pulse is KEY_DOWN then KEY_UP");
+        CHECK(memcmp(a + 20, b + 20, 52 - 20) == 0,
+              "the pair differs only in the type field");
+    }
+
+    /* timestamp placement: LE u64 at [36..44) for every builder, and a
+     * SECOND copy at [44..52) for keys and absolute motion only */
+    {
+        uint8_t k[52], m[44], ab[52];
+        const uint64_t ts = 0x0102030405060708ULL;
+
+        (void)kn_input_key(0x41u, 0u, 1, ts, k, sizeof k);
+        (void)kn_input_wheel(0, 120, ts, m, sizeof m);
+        (void)kn_input_mouse_absolute(1u, 2u, 3u, 4u, ts, ab, sizeof ab);
+        CHECK(memcmp(k + 36, m + 36, 8) == 0, "ts copy 1 is LE u64 at [36..44)");
+        CHECK(memcmp(k + 44, m + 36, 8) == 0, "keys carry a SECOND ts copy");
+        CHECK(memcmp(ab + 44, m + 36, 8) == 0, "absolute carries a second too");
+        CHECK(m[36] == 0x08u && m[43] == 0x01u, "the stamp is little-endian");
+    }
+
+    /* the padding between the inner body and the first stamp stays zero */
+    {
+        uint8_t b[44];
+        size_t i;
+        int zeros = 1;
+
+        (void)kn_input_mouse_button(1u, 1, 1u, b, sizeof b);
+        for (i = 22; i < 36; ++i)
+            if (b[i]) zeros = 0;
+        CHECK(zeros, "button payload is zero-padded to 24 before the stamp");
+    }
+}
+
+static void t_vk_tables(void)
+{
+    uint16_t vk = 0u, mods = 0xFFFFu;
+
+    /* single characters -> their uppercase code (media.rs:324-330) */
+    CHECK(kn_input_vk_from_name("a") == 0x41, "name 'a' -> VK 0x41");
+    CHECK(kn_input_vk_from_name("Z") == 0x5A, "name 'Z' -> VK 0x5A");
+    CHECK(kn_input_vk_from_name("5") == 0x35, "name '5' -> VK 0x35");
+    /* f1..f24 -> 0x70 + n (media.rs:331-338) */
+    CHECK(kn_input_vk_from_name("f1") == 0x70, "f1 -> 0x70");
+    CHECK(kn_input_vk_from_name("F13") == 0x7C,
+          "F13 -> 0x7C (the anti-AFK vk), case-insensitive");
+    CHECK(kn_input_vk_from_name("f24") == 0x87, "f24 -> 0x87");
+    CHECK(kn_input_vk_from_name("f25") == -1, "f25 is out of range");
+    CHECK(kn_input_vk_from_name("f0") == -1, "f0 is out of range");
+    CHECK(kn_input_vk_from_name("fox") == -1, "'fox' is not an f-key");
+    /* the named keys of the reference table */
+    CHECK(kn_input_vk_from_name("enter") == 0x0D, "enter");
+    CHECK(kn_input_vk_from_name("Return") == 0x0D, "return (mixed case)");
+    CHECK(kn_input_vk_from_name("esc") == 0x1B, "esc");
+    CHECK(kn_input_vk_from_name("escape") == 0x1B, "escape");
+    CHECK(kn_input_vk_from_name("tab") == 0x09, "tab");
+    CHECK(kn_input_vk_from_name("space") == 0x20, "space");
+    CHECK(kn_input_vk_from_name("backspace") == 0x08, "backspace");
+    CHECK(kn_input_vk_from_name("left") == 0x25 &&
+          kn_input_vk_from_name("up") == 0x26 &&
+          kn_input_vk_from_name("right") == 0x27 &&
+          kn_input_vk_from_name("down") == 0x28, "arrows 0x25..0x28");
+    CHECK(kn_input_vk_from_name("pgup") == 0x21 &&
+          kn_input_vk_from_name("pageup") == 0x21 &&
+          kn_input_vk_from_name("pgdown") == 0x22 &&
+          kn_input_vk_from_name("pagedown") == 0x22, "page up/down");
+    CHECK(kn_input_vk_from_name("del") == 0x2E &&
+          kn_input_vk_from_name("delete") == 0x2E &&
+          kn_input_vk_from_name("insert") == 0x2D, "del/insert");
+    CHECK(kn_input_vk_from_name("home") == 0x24 &&
+          kn_input_vk_from_name("end") == 0x23, "home/end");
+    CHECK(kn_input_vk_from_name("printscreen") == 0x2A &&
+          kn_input_vk_from_name("pause") == 0x13, "printscreen/pause");
+    /* the four modifier VKs — this project's extension over the
+     * reference's chord table, so a script can HOLD a modifier down */
+    CHECK(kn_input_vk_from_name("shift") == 0x10 &&
+          kn_input_vk_from_name("ctrl") == 0x11 &&
+          kn_input_vk_from_name("control") == 0x11 &&
+          kn_input_vk_from_name("alt") == 0x12 &&
+          kn_input_vk_from_name("win") == 0x5B &&
+          kn_input_vk_from_name("meta") == 0x5B, "modifier VKs");
+    /* rejects */
+    CHECK(kn_input_vk_from_name("") == -1, "empty name rejected");
+    CHECK(kn_input_vk_from_name(NULL) == -1, "NULL name rejected");
+    CHECK(kn_input_vk_from_name("!") == -1, "punctuation is not a key name");
+    CHECK(kn_input_vk_from_name("enter2") == -1, "unknown name rejected");
+    CHECK(kn_input_vk_from_name("this-name-is-far-too-long") == -1,
+          "over-long name rejected");
+
+    /* ASCII -> (vk, modifiers), the `type` command's table */
+    CHECK(kn_input_vk_from_ascii('a', &vk, &mods) == 0 && vk == 0x41u &&
+          mods == 0u, "ascii 'a' needs no modifier");
+    CHECK(kn_input_vk_from_ascii('A', &vk, &mods) == 0 && vk == 0x41u &&
+          mods == KN_INPUT_MOD_SHIFT, "ascii 'A' is shift+0x41");
+    CHECK(kn_input_vk_from_ascii('7', &vk, &mods) == 0 && vk == 0x37u &&
+          mods == 0u, "ascii digit");
+    CHECK(kn_input_vk_from_ascii(' ', &vk, &mods) == 0 && vk == 0x20u &&
+          mods == 0u, "ascii space");
+    CHECK(kn_input_vk_from_ascii('@', &vk, &mods) == 0 && vk == 0x32u &&
+          mods == KN_INPUT_MOD_SHIFT, "ascii '@' is shift+2");
+    CHECK(kn_input_vk_from_ascii('.', &vk, &mods) == 0 && vk == 0xBEu &&
+          mods == 0u, "ascii '.' is VK_OEM_PERIOD");
+    CHECK(kn_input_vk_from_ascii('_', &vk, &mods) == 0 && vk == 0xBDu &&
+          mods == KN_INPUT_MOD_SHIFT, "ascii '_' is shift+VK_OEM_MINUS");
+    CHECK(kn_input_vk_from_ascii('\\', &vk, &mods) == 0 && vk == 0xDCu &&
+          mods == 0u, "ascii backslash is VK_OEM_5");
+    CHECK(kn_input_vk_from_ascii('"', &vk, &mods) == 0 && vk == 0xDEu &&
+          mods == KN_INPUT_MOD_SHIFT, "ascii quote is shift+VK_OEM_7");
+    CHECK(kn_input_vk_from_ascii('\n', &vk, &mods) == 0 && vk == 0x0Du,
+          "a newline maps to ENTER");
+    CHECK(kn_input_vk_from_ascii('\t', &vk, &mods) == 0 && vk == 0x09u,
+          "a tab character maps to TAB");
+    CHECK(kn_input_vk_from_ascii(0x105, &vk, &mods) == -1,
+          "a Polish diacritic is honestly NOT covered");
+    CHECK(kn_input_vk_from_ascii(0, &vk, &mods) == -1, "NUL rejected");
+    CHECK(kn_input_vk_from_ascii('a', NULL, &mods) == -1, "NULL vk rejected");
+    CHECK(kn_input_vk_from_ascii('a', &vk, NULL) == -1, "NULL mods rejected");
+    {   /* the login-screen case: a whole address maps cleanly */
+        const char *txt = "user.name+tag@mail.com";
+        size_t i, ok = 0;
+
+        for (i = 0; txt[i]; ++i)
+            if (kn_input_vk_from_ascii((unsigned char)txt[i], &vk, &mods)
+                == 0)
+                ok++;
+        CHECK(ok == strlen(txt), "every character of an e-mail address maps");
+    }
+}
+
 int main(void)
 {
     printf("== test_kninput: the NVST control/input plane ==\n");
@@ -801,6 +1049,9 @@ int main(void)
     t_activation_chain();
     t_singles();
     t_mouse_relative_golden();
+    t_discrete_goldens();
+    t_discrete_edges();
+    t_vk_tables();
     t_builder_edges();
     t_versions();
     t_scan();

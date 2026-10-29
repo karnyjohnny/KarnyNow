@@ -1,3 +1,348 @@
+# INTEGRATION NOTES — Round L delta, rev 41 (**RUN 31 = THE RETRACTION ROUND, AND IT IS OUR OWN CAPTURE THAT PROVES THE OPERATOR RIGHT.** Four interleaved A/B draws on Watch Dogs: Legion (100361011) — `--session-seconds=900 --lottery=4 --lottery-gap=60 --session-jiggle=100 --lottery-stop-on-keeper=0 --session-audio-out=audio.opus` — and **every draw died `recovery_exhausted`, rc 1 ×4**, `lottery_summary {"draws":4,"of":4,"last_rc":1}`: wall 25.8 / 24.4 / 46.1 / 132.3 s = media (`au_clock.rtp_ms`) **16.19 / 13.96 / 35.96 / 122.23 s**, drift −465 / −5 / −7 / −6 ms, **487 / 420 / 1080 / 3668 AUs**, **1776 / 1485 / 3614 / 11263 datagrams = `authenticated` exactly**, gaps 0, decode_errors 0, frames_failed 0, `recovery.attempts` 1. **SO THE JIGGLE A/B HAS NO RESULT**: draws 1/3 flew the jiggle (`feedback.jiggle` 230 / 439) and 2/4 were OFF, all four died the same way, and the longest draw reached a fifth of the ≈600 s region the A/B was designed to probe — survival is still the rig-side lottery and the interleaved design stays available for a run that draws keepers. **THE LOGIN WALL, MEASURED FROM OUR OWN TRAFFIC:** all **64** `sctl_010a` notifications were decoded (F2's 2400-hex cap truncated none) and their **46** `processName` entries are **Ubisoft Connect and nothing else** — `UplayWebCore.exe` ×26, `UplayService.exe` ×16, `upc.exe` ×4, **ZERO game binaries on any of the four draws** (`drsProfileName` "Ubisoft Connect" ×26 / "Ultimate Paintball Challenge" ×4 — the known misclassification, `shortName:"uplay"`, `cmsId:18761111`, chain `nvcontainer.exe → upc.exe → UplayService/UplayWebCore`). That is the operator's retraction of the XLIX "Legion launches with our client" claim, confirmed from the capture: play.geforcenow.com's web client **types the credentials INTO THE STREAM**, so the browser is at the game in seconds while our client — which sent not one keystroke — is handed the launcher's login dialog (`au_00001_k.264` *is* that dialog), and the audio is silent for run 30's reason: nothing that makes sound ever ran. **THE ORPHANED SEATS, MEASURED:** the string `TEARDOWN` appears **ZERO times in any run-31 log** (XLIX's teardown was fire-and-forget with no event line, so there was no way to tell), and draws **2, 3 and 4** each walked the full CloudMatch 403 SESSION_LIMIT ladder — `cm_create_backoff` attempt 1/2/3 = **20 s / 40 s / 80 s** — i.e. **140 s of dead queue time on three of four draws (≈7 min of the run) because the previous draw never gave its seat back.** **F13 CAUGHT BY ITS OWN DELIVERABLES:** the four audio files arrived as `audio_d1_d1us`, `audio_d2_d2us`, `audio_d3_d3us`, `audio_d4_d4us` — **no `.opus` extension at all** — sized 199 510 / 176 601 / 406 292 / 1 309 966 B, matching the four `audio_close` `bytes=` counters exactly (F12 fired on every draw: pages 82/73/164/525, `srtp_fail` 0 ×4, `write_errors` 0 ×4, `seq_loss` 0/0/**1**/0, 40 023 packets total with `red_packets == packets`), so **the payloads are intact and only the NAME was mangled**: `strrchr()` returned a pointer INTO the destination buffer and the following `memcpy()` was an overlapping copy (UB, ASan `memcpy-param-overlap` on the rig). **THE ".264 — ONLY THE FIRST FILE WORKS" QUESTION, ANSWERED WITH THE SHIPPING BINARY** (`logs/f17_video_proof_L.txt`): the single-AU dumps are not corrupt — `au_00001_k.264` is the keyframe and carries its own SPS/PPS so ffmpeg decodes it, while every later file is one P-frame with no parameter sets, which no decoder can start on (`Invalid data found when processing input`); the second cause is that run 31 flew four draws into ONE `--session-au-dir`, so draw 2's `au_00001_k.264` silently replaced draw 1's. **THE INPUT CHANNEL IS LIVE:** `input_activation {"sent":8,"failed":0,"bytes":170,"version":3,"attempt":1,"ready":1}` on all four draws — and not one discrete input message after it. Ships **F16** (`streamer/src/kn_drawpath.c` + `kn/kn_drawpath.h`: the per-draw naming rule as ONE pure, alias-free, in-place-safe module — locals for suffix and extension, `memmove` for every write — now used by the audio path, the video path and the AU names; `test_kndrawpath` **1051 checks**, the 21st suite, pinned three ways: the run-31 case verbatim, a SECOND independent `snprintf` builder across a path × draw matrix, and honest degradation on a too-small buffer), **F17** (`--session-video-out=F.264` / `--replay-video-out=F.264` — ONE **continuous** per-draw Annex-B stream `video_d<N>.264` with every decoded AU appended in order, PLUS draw-numbered single-AU names `au_d<N>_%05u_%c.264`, both legs through the new shared writer `knv_dump_au()` so live and replay can never drift; host proof: the repo's 60-frame clip → `video.264` 42 944 B, ffprobe/ffmpeg **60 frames OK** where `au_00002_p.264` fails), **F18** (the TEARDOWN is now **ALWAYS logged with its real rc/status** — `rtsp_teardown` — and `--session-release` (default **OFF**) follows it with the CloudMatch `DELETE v2/session/{id}` over a **freshly opened** TLS stream, 2xx or 404 = gone, `cm_release` line + knlog with a "the seat may still be held" note when it is not) and **F19** (**REAL INPUT**: `--input-script=FILE` timeline replay, `--input-live` console forwarding, `--input-anti-afk[=MS]` = the reference's own VK 0x7C pulse, `--input-text-gap=MS`, and `--input-check=FILE` — parse and report a script with **no session at all**, rc 2 on any parse error; five discrete builders in `kn_input.c` — key, mouse button, mouse absolute, mouse relative, wheel — byte-exact against the Rust goldens at `nvst_input.rs:1868-1911`, `test_kninput` **548 → 794 checks**, `tools/input_reference.py` self-proving before it emits: *"8/8 activation goldens + 2/2 discrete-input (relative-mouse, key-down) Rust goldens byte-exact, 21 discrete vectors, 7 parser vectors, 7 cursor vectors, 17 named commands"*). Everything flies through the gate the jiggle already uses (nothing before the activation chain's `enable-input(true)`), keys/buttons/wheel route to **sid 0** (ControlReliable) and mouse motion to **sid 6** (ControlPartial, 300 ms PR-SCTP), timestamps ride `pump.origin_us`. **No summary-key change** — the skeleton canon is still **113 == 113**, re-validated against run 31's REAL stdout — and no change to any wire format that already flew. Stamp **L**. Target T10 expectation moves **82 → 84** (this round caught that cmake *builds* every suite while T10 *runs* only the ones its own list names: `test_kndrawpath` is now in `suites` AND `required_bins`). Run 32 = **the login run**: `--input-script=login.txt --session-video-out=video.264 --session-audio-out=audio.opus --session-release`.)
+
+## Rev 41 changed files (round L)
+
+- **NEW** `streamer/include/kn/kn_drawpath.h` + **NEW** `streamer/src/kn_drawpath.c`
+  (114 lines) — F16. Three entry points, no global state, no allocation:
+  `kn_drawpath_suffix(src, draw_index, dst, dstsz, &truncated)` (returns
+  `dst`, always NUL-terminates, `dst` may BE `src`'s buffer),
+  `kn_drawpath_suffix_inplace(buf, bufsz, draw_index, &truncated)` (the
+  form both call sites use; 0 = fit, −1 = did not fit and the ORIGINAL
+  path was kept) and `kn_drawpath_suffix_str(draw_index, dst, dstsz)`
+  (renders only `_d<N>`, for callers building several names from one
+  suffix; `KN_DRAWSUF_MAX` 24). The rule: draw 0 → the operator's path
+  verbatim; draw N>0 → `<stem>_d<N><ext>`; no extension → `<path>_d<N>`;
+  a dot in a DIRECTORY component only → treated as no extension; no room
+  → the original path + `*truncated = 1` (never a half-written name).
+- **NEW** `streamer/tests/test_kndrawpath.c` (297 lines, **1051 checks**) —
+  the 21st native suite / one of the 25 ctest entries. Three independent
+  proofs: (1) the run-31 case verbatim (`audio.opus` + draws 0..3, the
+  in-place form, plus `strstr(b, "_d1_d1") == NULL` as the explicit
+  anti-overlap assertion and the Win7 `C:\kn\logs\audio.opus` shape);
+  (2) a SECOND IMPLEMENTATION — the test rebuilds every expected name
+  with a plain `snprintf` into a scratch buffer and compares
+  byte-for-byte across a matrix of paths × extensions × separators ×
+  draw numbers; (3) honest degradation — a genuinely too-small buffer
+  keeps the original path and sets `truncated`, and the exact-fit
+  boundary is `dstsz == len+1` (an exactly-fitting buffer does NOT set
+  `truncated`; that is documented behaviour, not a bug).
+- `streamer/src/kn_input.c` (+272) / `streamer/include/kn/kn_input.h`
+  (+105) — F19's wire layer. Five discrete builders
+  (`kn_input_key`, `kn_input_mouse_button`, `kn_input_mouse_absolute`,
+  `kn_input_mouse_relative`, `kn_input_wheel`), the router
+  `kn_input_route_sid(type)` (sid 0 reliable / sid 6 partial), the name
+  helpers `kn_input_vk_from_name()` / `kn_input_vk_from_ascii()` (which
+  also emits the IMPLIED modifier bits — `key A down` means
+  `MOD_SHIFT` on a US layout), and the constants `KN_INPUT_MOD_*`,
+  `KN_INPUT_BTN_*` (1..5), `KN_INPUT_VK_ANTI_AFK` (0x7C). Frame sizes
+  are the reference's: 52 B for key/mouse-absolute, 44 B for
+  relative/button/wheel.
+- `streamer/src/kn_input_kat_vectors.h` — **GENERATED** by
+  `tools/input_reference.py` (do not hand-edit): new
+  `kn_input_discrete_kat` struct + `kn_input_kat_discrete[]` (**21
+  vectors**, each carrying `type/pressed/a,b,c,d/ts_us/sid/bytes/len` and
+  a `what` that says `RUST GOLDEN` where it is one).
+- `streamer/tests/test_kninput.c` (+251) → **794 checks** (was 548): the
+  discrete builders against those vectors, the router table, the
+  VK/ASCII/modifier parser, the offset contract (code [0..2], len
+  [2..4], payload len [4..8], 0x0e [8..12], inner len [12..16], type
+  [16..20], body [20+]; key vk [20..22] mods [22..24]; absolute x,y
+  [20..24], 0x0800 [24..26], viewport [26..30]; timestamps at
+  **[36..44] and [44..52]**, NOT [32..40]).
+- **NEW** `streamer/tests/fixtures/input_login_example.txt` (the
+  login-shaped timeline the ctest gate parses: **137 events**, span
+  10 230 ms, 80 lines = 41 comments + 8 blanks + 31 commands, every
+  command form and the implied-modifier rule) and **NEW**
+  `streamer/tests/fixtures/input_bad.txt` (rejected at **line 9**,
+  `unknown command 'teleport'`, rc 2 — line numbers count comments and
+  blanks, so they match the operator's editor).
+- `streamer/src/knvstd_main.c` (8495 lines, stamp **L**) — the wiring for
+  all four fixes, and the only production file touched besides
+  `kn_input.c`/`kn_drawpath.c`:
+  - **F17** NEW `knv_dump_au(au_dir, draw_index, video_fp, fi, kf, bytes,
+    len, &v_aus, &v_bytes)` — the ONE place a decoded AU reaches disk,
+    shared by the live leg (`dec_drain_queue`) and the offline replay leg
+    (`rp_frame_cb`); returns a bitmask (bit0 single-AU write failed, bit1
+    stream write failed) and is best-effort by design (a dump failure
+    must never take a session down — the counters are the evidence).
+    `rp_ctx` gained `draw_index`, `video_fp`, `video_aus/video_bytes/
+    video_write_errors`; new flags `--session-video-out=F.264` and
+    `--replay-video-out=F.264`; events `video_stream_begin` and
+    `video_stream_end {path,draw,aus,bytes,file_bytes,write_errors}`
+    (the size is read back with `ftell`, so the line states what is ON
+    DISK). The close sits on the common teardown path, so a draw can
+    never leak an open `FILE*` into the next one — the same guarantee
+    F12 gives audio.
+  - **F16** the audio-path derivation now calls
+    `kn_drawpath_suffix_inplace()` (the XLIX inline `strrchr` + `memcpy`
+    is GONE) and the video path uses the same call, so both capture
+    files follow one tested rule; a `truncated` result logs
+    `audio_path_suffix` / `video_path_suffix` (WARN) and keeps the
+    un-suffixed name rather than capturing two draws into one file.
+  - **F18** NEW `int rtsp_inited` (set at phase B, right after
+    `kn_rtsp_client_init`): the teardown TEARDOWN is now unconditional
+    but GUARDED, always prints `rtsp_teardown {rc,status,release_armed}`
+    (`status` only when `trc == KN_RTSP_OK`; `kn_rtsp_response.status` is
+    an `int`), and emits a knlog WARN + an explicit "the seat may still
+    be held; --session-release adds the CloudMatch DELETE" note when it
+    did not complete. With `--session-release` it then opens a FRESH TLS
+    stream (the poll loop closes its own, so `cm_tls` is NULL at
+    teardown — same idiom as the queue-abort cancel) and calls
+    `kn_cm_cancel()`; `gone = 2xx || 404` (`validate_delete_response`);
+    `cm_release {rc,http_status,gone}` on stdout + knlog.
+  - **F19** the driver block (~750 lines): `sess_input` /
+    `sess_input_ev` / `sess_input_cfg` (the four knobs travel as ONE
+    value so `run_session`'s signature does not grow past eighteen
+    parameters), `si_init/si_add/si_expand_text/si_load/si_send/si_tick/
+    si_report`, the console layer `si_console_raw/peek/get/key`
+    (`conio.h` on Win32, `termios` raw mode elsewhere, always restored
+    before exit), the five flags, and the `--input-check=FILE` mode
+    (`{"mode":"input_check",…}` lines: one `ev` per event + a `summary`,
+    rc 2 on a parse error). `si_tick()` runs from the media loop next to
+    the jiggle and takes the SAME gate
+    (`pump_persist && pump.input_active`); a due-but-gated event is
+    COUNTED (`gated`) and retried later, an event more than **5 s** late
+    is `skipped_late` (a stall is not a schedule — never dump a whole
+    timeline into a session that just recovered), and the live console
+    is capped at **16 keys per tick** so a paste cannot starve the loop.
+    Events: `input_script_loaded`, `input_script_empty`, `input_live`,
+    `input_first_send`, `input_anti_afk` (first pulse only), and
+    `input_summary` per draw — which is WARN when input was armed but
+    `sent == 0`, because that is the run-31 shape and the single most
+    diagnostic fact a draw can report.
+  - `usage()` grew past the ISO C99 4095-char literal limit and is now
+    several `printf()` calls (`-Werror=overlength-strings`).
+- `tools/input_reference.py` (+307) — the independent (Python) half of
+  the two-implementations rule for the discrete messages. Running it
+  **self-proves against the Rust goldens first** and only then
+  regenerates `kn_input_kat_vectors.h`; a golden mismatch aborts the
+  emission.
+- `tools/fake_rig.py` (+9) — counts `DELETE /v2/session/…` (`self.deletes`,
+  reported in the rig's `done` line) so the F18 release leg is asserted
+  end to end, not just logged.
+- `tools/sandbox_session_e2e.c` (+26) → **48 checks** (was 43): the
+  release leg drives `kn_cm_cancel` against the rig and asserts
+  `deletes: 1`.
+- `tools/build_native_tests.sh` (+13), `tools/cross_check.sh` (+4),
+  `CMakeLists.txt` (+13) — `kn_drawpath.c` in KCORE / the per-file cross
+  legs / the cmake source list; `test_kndrawpath` in the native run list
+  (rc25 in the FAIL tally), the cross link line and the `foreach` that
+  makes ctest entries; TWO new ctests, `knvstd_input_check` (the good
+  fixture) and `knvstd_input_check_rejects` (`WILL_FAIL TRUE`, the bad
+  one) → **ctest 22/22 → 25/25**.
+- `tests/T10_build_and_test.py` — `test_kndrawpath` added to BOTH the
+  `suites` run list and `required_bins`. **This round's own catch:**
+  cmake builds every suite in the `foreach`, but T10 executes only the
+  suites its own list names, so a new suite can be built, shipped and
+  never run on the target. Sandbox dry **72 → 74**; target expectation
+  **82 → 84**.
+- Docs: `START-HERE.md` (round-L sections, the run-31 row, the changed
+  file list, the repository map), `docs/RTSP.md` **§38** (38.1–38.9: the
+  run-31 numbers, the login-wall finding, the retraction, the F13/F17
+  evidence, what shipped, the F19 wire contract, the gates, run 32),
+  `docs/INPUT.md` **§10** (+ the §8 file table), `docs/BUNDLE-AUDIO.md`
+  (§6 stamp + the run-31 result), `docs/BOOTSTRAP.md` §12 status marker,
+  this file.
+
+## Rev 41 traps (new this round)
+
+1. **A new suite must be added to `tests/T10_build_and_test.py`'s
+   `suites` list, not just to `CMakeLists.txt`.** cmake builds it, ctest
+   runs it in the sandbox, and T10 on the target still never executes it
+   — the failure is silent (T10 reports ALL PASS). Add it to
+   `required_bins` too, so a stale build tree retries the target
+   explicitly instead of failing on a missing file.
+2. **`kn_drawpath_suffix*` does NOT set `truncated` on an exact fit.**
+   `dstsz == strlen(result)+1` is success with `truncated == 0`; to test
+   the degradation leg use a genuinely too-small buffer. Symmetrically,
+   a too-small buffer keeps the ORIGINAL path (never a half-written
+   name) and returns −1 from the in-place form.
+3. **The single-AU `.264` dumps are container-hostile by nature.** Only a
+   keyframe AU carries SPS/PPS, so `au_00001_k.264` decodes and every
+   P-frame file reports `Invalid data found when processing input`. That
+   is NOT corruption and NOT a receiver bug — hand the operator the
+   continuous `video_d<N>.264` (F17) and keep the AU dumps for
+   forensics.
+4. **Absolute mouse coordinates are PIXELS in a `w × h` viewport**
+   (`opennow-streamer-ffi/src/lib.rs:1088-1110`), not normalized
+   0..65535. The frame carries the viewport at [26..30] and a fixed
+   `0x0800` at [24..26]; a script that guesses normalized values will
+   click somewhere in the top-left corner and look like a dead input
+   channel.
+5. **Input timestamps live at [36..44] and [44..52]** for types 3/4/5 —
+   NOT [32..40]. The inner body starts at [20]; everything before that is
+   the TLV/SCTP framing. Re-derive offsets from the goldens, never from
+   the frame length.
+6. **`--input-live` owns the console.** Raw mode is entered at arm time
+   and MUST be restored (`si_console_raw(0)`) on every exit path,
+   including the usage/rc-2 paths and Ctrl-C, or the operator's shell is
+   left without echo. Keystrokes are mapped as down+up pairs; an
+   unmappable byte counts as `unmapped`, never as a silent drop.
+7. **`si_parse_vk()` implies modifiers from case on a US layout**:
+   `key A down` sends VK 0x41 **with `MOD_SHIFT`**. A script written for
+   a non-US layout, or one that types an uppercase login by hand, will
+   send the wrong bytes. `--input-check=FILE` prints the resolved
+   `vk`/`mods` per event for exactly this reason — always run it before
+   a live draw.
+8. **Script line numbers in a parse error count comments and blanks.**
+   `input_bad.txt` fails at `line 9` because the fixture's first eight
+   lines are comments/blanks; the number must match what the operator
+   sees in their editor, so never renumber while skipping them.
+9. **F18's DELETE needs its own TLS stream.** At teardown `cm_tls` is
+   NULL (the poll loop opens and closes per round), so calling
+   `kn_cm_cancel` on the stale handle fails; open a fresh
+   `kn_net_tls_stream_open(poll_host, poll_port, …)` exactly like the
+   queue-abort cancel does, and close it afterwards.
+10. **`rtsp_inited` guards the teardown TEARDOWN.** `kn_rtsp_client_init`
+    happens at phase B; any early exit before it would call
+    `kn_rtsp_request` on an uninitialised client (crash). The guard
+    prints `{"event":"rtsp_teardown","skipped":"rtsp_not_initialised"}`
+    instead — keep it.
+11. **`-Werror=overlength-strings` is live in the paranoid knvstd leg**:
+    ISO C99 caps a string literal at 4095 chars and `usage()` is far
+    past that. Split into multiple `printf()` calls; do not "fix" it by
+    shortening the operator-facing help.
+12. **`-Wformat-truncation=2` applies only to the knvstd paranoid leg**
+    (`build_native_tests.sh`), not to the whole tree. A new `snprintf`
+    into a bounded buffer can pass everywhere else and still fail the
+    native gate — give the compiler a provable bound or use the
+    `pump_set_str` + explicit-length idiom.
+13. **`%05u` and `%c` inside doc/usage text are format specifiers.** In
+    `printf` chains they must be `%%05u`; in Markdown they are fine. The
+    AU name is `au_d<N>_%05u_%c.264` (`k`/`p`) — quote it, don't paste it
+    into a format string.
+14. **`karnynow-logs/.gitignore` excludes `*.264`.** Delivering run-32's
+    video evidence needs `git add -f`, or the operator's most important
+    file (does the game start?) silently stays out of the delivery.
+15. **The audio path is still split at the LAST DOT IN THE WHOLE STRING**
+    (F13's rule, now inside `kn_drawpath`): `--session-audio-out=C:\my.dir\audio`
+    (a directory with a dot, no extension) would suffix the directory.
+    Pass a plain `name.ext`. The trap survives the refactor because the
+    RULE was kept byte-compatible on purpose — the operator's existing
+    commands must produce the same names.
+
+## Rev 41 verification status (what ran WHERE)
+
+* Sandbox (this round, all four vendor trees staged: tiny-AES-c
+  `23856752f`, crypto-algorithms `cfbde484`, mbedTLS 3.6.0 `2ca6c285` +
+  framework `750634d3`, usrsctp `c625e219`), re-run after the LAST edit
+  (the `audio_d1_d1us` doc/comment corrections and the T10 suites-list
+  fix both landed after the first pass, so every gate below is against
+  the delivered tree):
+  - `tools/build_native_tests.sh` → **NATIVE TESTS PASS**, rc 0, **zero
+    warnings**, 21 suites: knlog 105, knring 34, knfec 125, knsrtp 77,
+    kndiag 109, knselftest 118, kngs 125, knrx 218, knaudio 22, knsock
+    102, knws 88, knrtsp 150, kncm 148, kncert 4, kndtls 6, knsctp 13,
+    **kninput 794**, **kndrawpath 1051**, knbw 387, knogg 163, knarx 62;
+    JSONL + ZIP validators green; knvstd stdout still a single JSON
+    document per mode (`logs/native_L.log`).
+  - `tools/cross_check.sh` → **CROSS-CHECK PASS ×2 arches** (x86_64 +
+    i686) under `-Wall -Wextra -Werror`, zero warnings, including the
+    new `kn_drawpath.c` per-file leg and the
+    `test_kndrawpath_{x86_64,i686}.exe` links (`logs/cross_L.log`).
+  - cmake + ninja + ctest → **25/25 PASS** on `-DKN_TLS_BACKEND=mbedtls`
+    (`build/net-mb`, `logs/ctest_mb_L.log`) and **25/25 PASS** on
+    `-DKN_TLS_BACKEND=schannel` (`build/net-sch`,
+    `logs/ctest_sch_L.log`), zero compiler warnings in either build
+    (`logs/cmake_mb_L.log`, `logs/cmake_sch_L.log`). The three new ctest
+    entries are `test_kndrawpath`, `knvstd_input_check` and
+    `knvstd_input_check_rejects` (WILL_FAIL).
+  - `sandbox_session_e2e` rebuilt from the L sources with the header
+    recipe under `-Wall -Wextra` (zero warnings) → **48 checks, 0
+    failures**, rc 0, with `deletes: 1` in the rig's `done` line — the
+    F18 DELETE is asserted on a real loopback socket, not just logged
+    (`logs/e2e_L.log`).
+  - `tests/T10_build_and_test.py` POSIX dry → **ALL PASS 74** (was 72),
+    zero compiler warnings, rc 0 (`logs/t10_L2.log`). T10 builds with
+    cmake, so its suite lines carry the REAL-backend counts, not the raw
+    recipe's: **test_kndrawpath 1051** and **test_kninput 794** (both new
+    this round) plus knrx **243**, kncert **10**, kndtls **39**, knsctp
+    **35**, knselftest 118, knogg 163, knarx 62 — the canonical
+    target/cmake expectations (RTSP §30's "knrx 243" canon). The raw
+    `build_native_tests.sh` recipe stubs the TLS/SCTP legs, which is why
+    its numbers (knrx 218, kncert 4, kndtls 6, knsctp 13) are lower; both
+    are correct and neither is a regression.
+  - `tests/T13_udp_e2e.py` → **ALL PASS 63** against
+    `build/net-mb/knvstd` (`logs/t13_mb_L.log`) AND **ALL PASS 63**
+    against the cmake `build/knvstd` (`logs/t13_L.log` — cmake
+    auto-detects the staged mbedTLS, so this binary is NOT backend-less),
+    and **ALL PASS 51** against the raw-recipe `build/knvstd-bare`
+    (`logs/t13_bare_L.log`), whose single SKIP is by design: with no TLS
+    backend there is no GCM key derivation, so the gcm256 leg cannot run
+    and a bare build is cm128-only. Operator-facing summaries:
+    `T13_skrot_mb_L.txt` (63), `T13_skrot_bare_L.txt` (51).
+  - `tools/check_summary_skeleton.py . ../karnynow-logs/run31_logs/run31.log`
+    → **PASS, skeleton 113 == live 113**, "only in skeleton: (none) /
+    only in live: (none)" — F16–F19 add and remove NO summary key
+    (deliberate: the per-draw evidence lives on the `input_summary`,
+    `video_stream_end`, `rtsp_teardown` and `cm_release` EVENT lines)
+    (`logs/skel_L.log`).
+  - **F17 host proof with the shipping binary**
+    (`logs/f17_video_proof_L.txt`): `tools/make_rx_capture.py` → the
+    repo's 60-frame 320×240 clip (65 records), replayed through the FULL
+    rx pipeline with both dump legs → `video_stream_end {aus:60,
+    bytes:42944, file_bytes:42944, write_errors:0}`; ffprobe/ffmpeg
+    verdict: `au_00001_k.264` (4795 B) **1 frame OK**,
+    `au_00002_p.264` / `au_00030_p.264` **Invalid data**, `video.264`
+    (42 944 B) **60 frames OK**.
+  - ASan/UBSan (`-fsanitize=address,undefined`, re-run on the FINAL
+    tree) clean on the new and changed code: `test_kndrawpath` 1051/0,
+    `test_kninput` 794/0, and a fully sanitized `knvstd` running
+    `--input-check` on BOTH fixtures (good → the 137-event summary, bad →
+    `line 9 unknown command 'teleport'` with **rc 2**) plus the F17
+    replay with BOTH dump legs (60 AU files + `video.264` 42 944 B,
+    `write_errors: 0`, rc 0). The only runtime note in the whole tree
+    remains the vendored `crypto-algorithms-sha1/sha1.c:26` (a left shift
+    in upstream code, unchanged, documented) (`logs/san_L.log`).
+  - knvstd CLI smoke: stamp **L** (`{"mode":"build",…,"round":"L"}`),
+    `--input-check` on the good fixture → 137 `ev` lines + `summary`,
+    rc 0; on the bad fixture → `{"error":"parse","line":9,"detail":
+    "unknown command 'teleport'"}`, **rc 2**; the F19 knob bounds
+    (`--input-text-gap` 0..10000, `--input-anti-afk` 0 or 1000..3600000)
+    reject out-of-range values with usage + rc 2.
+* Off-box evidence work on the delivered run-31 files (not a repo gate):
+  the four `summary` documents parsed field by field (wall/rtp/drift/AUs/
+  datagrams/gaps/decode_errors/recovery), the 64 `sctl_010a` payloads
+  hex-decoded and tallied by `processName`/`drsProfileName`, the
+  `audio_close` byte counts diffed against the delivered file sizes, the
+  `cm_create_backoff` ladder reconstructed per draw, and a repo-wide grep
+  proving `TEARDOWN` never appears in any run-31 log.
+* Not run in the sandbox (needs the target): the real TLS/`--session`
+  path, `--input-live` on a Win32 console (`conio.h`), the D3D9/winsock
+  T10 legs, and anything that requires a GFN account. The full set runs
+  on Win7 as T10 (expect **ALL PASS 84**) + T13 + **run 32**.
+
+## Rev 41 target expectations (Win7, run 32 — THE LOGIN RUN)
+
+* T10 → **ALL PASS 84**, zero warnings, `test_kndrawpath` 1051 and
+  `test_kninput` 794 among the suite lines; ctest **25/25** on both TLS
+  backends; build stamp **L** on the first line of every run log.
+* Run 32 (the operator types their login into a script ON THE RIG; no
+  credential ever enters the repo, a log line or a delivery):
+
+  ```
+  knvstd.exe --session --session-token=<TOKEN> --session-app=100361011 ^
+    --session-seconds=420 --input-script=login.txt ^
+    --session-video-out=video.264 --session-audio-out=audio.opus ^
+    --session-release > logs\run32.log
+  ```
+
+* What settles it, in order: (1) `input_summary` with `sent > 0` and
+  `gated` small — the client typed; (2) `video_d1.264` decoded with
+  ffprobe — did the launcher dialog give way to a game screen; (3) a game
+  process in the `sctl_010a` burst (anything that is not
+  `upc.exe`/`UplayService.exe`/`UplayWebCore.exe`); (4) `audio_d1.opus`
+  — correctly named this time — with real RMS instead of −91 dB;
+  (5) `rtsp_teardown` + `cm_release {gone:1}`, and NO
+  `cm_create_backoff` 403 ladder on the next create.
+* If the login does not take, the diagnosis is already instrumented:
+  `--input-check=login.txt` on the rig prints the resolved `vk`/`mods`
+  per event (trap 7 — US-layout implied modifiers), `unmapped` counts
+  characters the console could not translate, and `input_first_send`
+  proves the gate opened.
+
+---
+
 # INTEGRATION NOTES — Round XLIX delta, rev 40 (**RUN 30 = F11'S FIRST FLIGHT AND IT IS A ZERO-ERROR PROOF: `armed:1 srtp_derived:1 file:1` ×2 draws, `packets` 15 610 / **40 000** = `bundle_rtp_in` (nothing dropped), `srtp_fail/malformed/toc_invalid/pt_filtered/padded/replay_reject/seq_loss/seq_reorder/seq_dup` ALL ZERO, `red_packets` = `packets` with `red_blocks` = 2× and `red_invalid:0` (the rig sends every audio packet as RFC 2198 RED + one redundancy block), `last_ms−first_ms` = `packets × 20 ms` exactly, `ogg.dropped_packets/write_errors` 0, and the delivered 2 089 866-byte file is a valid OggOpus stream (ffprobe: Opus 48 kHz stereo 199.92 s 83 kb/s; 834 pages, contiguous `seq`, monotone `granulepos` = Σ TOC samples; 39 929/39 936 readable audio packets are TOC `0xEC` = CELT-FB 20 ms).** The RFC 5764 §4.2 exporter's SERVER half is thereby proven against live traffic — 40 000/40 000 HMAC-SHA1-80 authentications cannot pass with a wrong key half. **BUT THE AUDIO IS DIGITAL SILENCE** (decoded: mean −91.0 dB, max −80.8 dB, RMS 0.51 LSB in every 10 s bucket, all 19 146 240 samples |x|<8) **because no game ever ran**: the 0x010a burst carries only `upc.exe`/`UplayService.exe`/`UplayWebCore.exe` (Ubisoft Connect; `drsProfileName:"Ultimate Paintball Challenge"` misclassification again), the AU sizes are 0.8–1.2 KB/frame = a static launcher window for 75 s / 200 s, and the operator's browser control measured Legion's boot at **≈2 min 19 s from stream start to gameplay audio** — our draws died at 75 s and 197 s of media. **THE OPERATOR ALSO RETIRES §36's "~600 s SERVER CEILING"**: the pool is Warsaw (`np-waw-01.cloudmatchbeta`), the tier is Free, the browser gets a ONE-HOUR session and has never been cut at 10 minutes (matching run 25's `beforeEventMS:3599657`); the ≈600 s cut of runs 29/29g is therefore something our sessions do — prime suspect a server-side **idle/no-input policy** (every ≈600 s draw was launcher-parked with zero input flying). Run 30 also gives the cleanest freeze anatomy yet: video+audio abrupt to zero in one second while **SCTP `0x0101` heartbeats kept arriving for ~5 s** and the WSS stayed writable (`pings 41/101, pongs 0/0, dead:0`). Ships **F12** (`sess_audio_file_close` after `sess_pump_stop` — the XLVIII close was gated on `!pump_persist`, which is 1 for every live session, so `audio_close` NEVER fired: no EOS page, no `fclose`, and draw 1's FILE* leaked across the lottery gap → the 2 505-byte scrambled page at the draw1→draw2 boundary of run 30's file), **F13** (one audio file per draw, `<stem>_d<N><ext>`), **F14** (the interleaved jiggle A/B: with `--lottery=N>1` odd draws fly the jiggle, even draws are OFF, `lottery_arm` line per draw — trap 17 satisfied inside one run) and **F15** (`--lottery-stop-on-keeper=0|1`, default 1; an A/B needs 0). No wire-format, module-interface or KAT change → every count is unchanged (native battery green zero warnings at the XLVIII baselines, cross `-Werror` ×2 arches green with all four vendor trees staged, summary canon still **113 keys**). Stamp **XLIX**. Target T10 on XLVIII: **ALL PASS 82** (`audio.vectors` 188/0, knogg 163, knarx 62). Run 31 = `--session-seconds=900 --lottery=4 --lottery-gap=60 --session-jiggle=100 --lottery-stop-on-keeper=0 --session-audio-out=audio.opus` on Watch Dogs: Legion — four alternating ON/OFF draws, long enough to see both the ≈600 s cut and Legion's ≈139 s boot to audio.)
 
 ## Rev 40 changed files (round XLIX)
