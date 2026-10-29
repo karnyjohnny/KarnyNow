@@ -23,6 +23,7 @@ KNCORE="streamer/src/knlog.c streamer/src/knring.c streamer/src/knfec.c \
     streamer/src/kn_cert.c streamer/src/kn_dtls.c \
     streamer/src/kn_sctp.c streamer/src/kn_input.c \
     streamer/src/kn_bw.c \
+    streamer/src/kn_ogg.c streamer/src/kn_arx.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
 $CC $CFLAGS $KNCORE streamer/tests/test_knlog.c -o build/test_knlog -pthread -lm
 $CC $CFLAGS $KNCORE streamer/tests/test_knring.c -o build/test_knring -pthread -lm
@@ -30,6 +31,13 @@ $CC $CFLAGS streamer/src/knfec.c streamer/tests/test_knfec.c -o build/test_knfec
 $CC $CFLAGS streamer/src/kn_aes.c streamer/src/kn_sha1.c streamer/src/knsrtp.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c \
     streamer/tests/test_knsrtp.c -o build/test_knsrtp
+KNAUDIO_SRC="streamer/src/kn_ogg.c streamer/src/kn_arx.c \
+    streamer/src/knsrtp.c streamer/src/kn_aes.c streamer/src/kn_sha1.c \
+    third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
+$CC $CFLAGS -Istreamer/tests $KNAUDIO_SRC \
+    streamer/tests/test_knogg.c -o build/test_knogg
+$CC $CFLAGS -Istreamer/tests $KNAUDIO_SRC \
+    streamer/tests/test_knarx.c -o build/test_knarx
 $CC $CFLAGS $KNCORE streamer/tests/test_kndiag.c -o build/test_kndiag -pthread -lm
 $CC $CFLAGS $KNCORE streamer/tests/test_knselftest.c -o build/test_knselftest -pthread -lm
 $CC $CFLAGS streamer/src/kn_gs.c streamer/tests/test_kngs.c -o build/test_kngs
@@ -152,6 +160,14 @@ echo "== run test_knbw (estimator + server-control KAT vectors: identical in eve
 rc22=0
 ./build/test_knbw || rc22=$?
 
+echo "== run test_knogg (OggOpus muxer KAT vectors: identical in every build) =="
+rc23=0
+./build/test_knogg || rc23=$?
+
+echo "== run test_knarx (bundle-audio rx KAT vectors: identical in every build) =="
+rc24=0
+./build/test_knarx || rc24=$?
+
 echo "== knvstd smoke: --list-selftests + --selftest=fec.vectors =="
 rc9=0
 ./build/knvstd --list-selftests > logs/knvstd_list.json || rc9=$?
@@ -190,10 +206,10 @@ if [ $rc1 -eq 0 ] && [ $rc2 -eq 0 ] && [ $rc3 -eq 0 ] && [ $rc4 -eq 0 ] && \
    [ $rc12 -eq 0 ] && [ $rc13 -eq 0 ] && [ $rc14 -eq 0 ] && \
    [ $rc15 -eq 0 ] && [ $rc16 -eq 0 ] && [ $rc17 -eq 0 ] && [ $rc18 -eq 0 ] && \
    [ $rc19 -eq 0 ] && [ $rc20 -eq 0 ] && [ $rc21 -eq 0 ] && \
-   [ $rc22 -eq 0 ]; then
+   [ $rc22 -eq 0 ] && [ $rc23 -eq 0 ] && [ $rc24 -eq 0 ]; then
     echo "NATIVE TESTS PASS"
 else
-    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19 knsctp=$rc20 kninput=$rc21 knbw=$rc22)"
+    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19 knsctp=$rc20 kninput=$rc21 knbw=$rc22 knogg=$rc23 knarx=$rc24)"
     exit 1
 fi
 

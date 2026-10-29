@@ -26,10 +26,10 @@ investigation. The entry point for agents and contributors is
 ```
 README.md               this file
 START-HERE.md           living handoff: state, next steps, agreements, traps
-CMakeLists.txt          full build (knvstd + 18 test suites, 2 TLS backends)
+CMakeLists.txt          full build (knvstd + 20 test suites, 2 TLS backends)
 docs/                   per-layer design records (RTSP, RX, SRTP, FEC, GS,
-                        DTLS, SCTP, INPUT, NET, SOCK, D3D, AUDIO, LOGGING,
-                        AUTH) + BOOTSTRAP.md (the project map: mission, stage
+                        DTLS, SCTP, INPUT, NET, SOCK, D3D, AUDIO,
+                        BUNDLE-AUDIO, LOGGING, AUTH) + BOOTSTRAP.md (the project map: mission, stage
                         gates, logging spec, decision register) +
                         INTEGRATION.md (per-round delta notes)
 docs/archive/           frozen history: PROJECT-STATE.md (rounds I–XXXVIII
@@ -38,8 +38,8 @@ docs/reference/         vendored reference headers (OpenH264 API, mingw-w64
                         d3d9/dxva2) — reference material, not compiled
 docs/research/          early research notes
 streamer/include/kn/    public headers (one per module)
-streamer/src/           28 modules + knvstd_main.c (the production binary)
-streamer/tests/         18 native test suites + KAT vector headers
+streamer/src/           29 modules + knvstd_main.c (the production binary)
+streamer/tests/         20 native test suites + KAT vector headers
 streamer/assets/        synthetic test clips
 tests/                  T1…T13 harnesses (T10 = the target build gate);
                         requirements.txt for the Python harnesses
@@ -61,7 +61,7 @@ logs/                   ALL logs and test evidence — NOT committed.
 ### Windows 7 target (primary)
 
 ```bat
-python tests\T10_build_and_test.py    :: cmake+ninja build, 18 suites, self-tests
+python tests\T10_build_and_test.py    :: cmake+ninja build, 20 suites, self-tests
 python tests\T13_udp_e2e.py           :: local end-to-end path (no GFN account)
 ```
 

@@ -3372,3 +3372,243 @@ Read matrix:
 
 Every draw prints its own summary; `feedback.jiggle` MUST read 0 in
 run 27 (the off-switch proof), and no `input_jiggle` line may appear.
+
+---
+
+## 34. Round XLVI — R7 run 27: **THE JIGGLE A/B IS DECIDED — THE SYNTHETIC MOUSE JIGGLE IS A SURVIVAL DEPRESSANT.** Five jiggle-OFF draws on the SAME evening, the SAME app, five FRESH rigs (every draw landed on a different IP): **10.32 / 21.81 / 15.39 / 52.19 / 22.87 s** of media — four of five beyond the jiggle-ON maximum of 13.2 s, and draw 4 set the new project record: **52.19 s of continuous 30 fps video, 1546/1546 AUs decoded, 13 071/13 071 datagrams authenticated, ONE gap, zero decode errors, BWE 37.8 Mbps** — beating run 22's ~41 s (also a jiggle-off run). The five jiggle-ON draws (runs 23–26, same evening): 10.6 / 10.4 / 11.6 / 13.2 / 11.3 s — five of five inside the band. Read against the OFF population, P(all five ON draws ≤ 13.2 s) is ≈(1/5)⁵ ≈ 0.03 %: the XLI.1 jiggle was TRUNCATING every draw to the ~10–13 s band. **F9 flips the default to OFF** (`--session-jiggle=100` restores the legacy behaviour); the XLII "jiggle stays ON as a controlled constant" decision is reversed on evidence, and the "fidelity ladder" of runs 16→22 gets its final reinterpretation: the survival differences across eras were the jiggle penalty (and rig variance), never client fidelity. Run 27 also field-proved **F7** (every draw 2–5 hit the seat cooldown and queued after EXACTLY three escalating backoffs — 20+40+80 s, fourth create succeeding; no 429 at this ~3 min/draw cadence) and **F8** (zero `input_jiggle` lines, `feedback.jiggle:0` in all five summaries, activation chain flying 5/5 — the handshake is NOT the culprit; the synthetic MOTION is). Stamp **XLVI**. Run 28 = the keeper hunt: ten draws, default OFF.
+
+### 34.1 The A/B table (all same-app 107057914, all Oct 28 evening)
+
+| | jiggle ON (runs 23–26) | jiggle OFF (run 27) |
+|---|---|---|
+| draws | 5 | 5 |
+| media survival (s) | 10.6, 10.4, 11.6, 13.2, 11.3 | 10.3, 21.8, 15.4, **52.2**, 22.9 |
+| max | 13.2 | **52.2 (project record)** |
+| median | 11.6 | 21.8 |
+| draws > 13.2 s | **0 / 5** | **4 / 5** |
+| rigs | 2 known IPs (23/24 same, 25 new) | **5 distinct IPs, one per draw** |
+| decode integrity | 100 % (lossy draws included) | 100 % (gaps up to 7, fec up to 20) |
+
+Including the pre-jiggle activation era (runs 18: 30.5 s, 22: ~41 s —
+both OFF by construction), the OFF population is 7 draws with median
+22.9 s and max 52.2 s; the ON population is 5 draws, ALL ≤ 13.2 s.
+The band (~10–13 s) still occurs OFF (draw 1, which was also the
+lossiest: gaps 5, withheld 147, fec 10) — so the rig's early-death
+mode is not purely jiggle-induced — but the LONG draws only ever
+appear when no synthetic mouse motion flies.
+
+Mechanism candidates (unresolved, and no longer blocking): a
+server-side synthetic-input detector treating the 10 Hz ±1 px
+zero-drift square wave as a bot signature and killing the encoder;
+input-triggered work on the parked Qt portal (cursor render / focus
+churn) destabilising the rig's capture; a DRS-profile interaction
+(the "EA Desktop" misclassification, §31.3). The verdict is
+statistical and does not need the mechanism — but it does relocate
+the freeze question from "rig-side lottery we can only ride" to
+"client-controllable, at least in part".
+
+### 34.2 Run 27 per-draw detail
+
+| draw | rig (handoff) | backoffs before queue | media | AUs dec | gaps/fec/withheld | BWE kbps | notes |
+|---|---|---|---|---|---|---|---|
+| 1 | 77.111.250.39 | 0 (instant seat) | 10.32 s | 159/159 | 5 / 10 / 147 | 38 390 | the lossiest draw, died in-band |
+| 2 | 80.250.97.37 | 3 (20+40+80) | 21.81 s | 656/656 | 0 / 0 / 0 | 49 140 | pristine |
+| 3 | 80.84.170.153 | 3 | 15.39 s | 446/446 | 1 / 10 / 16 | 41 168 | |
+| 4 | 80.84.171.151 | 3 | **52.19 s** | **1546/1546** | 1 / 2 / 20 | 37 759 | **RECORD**; ctrl_in at rel_ms 40 005 with 53 msgs — the control plane ALIVE deep into a long draw (0x0101 heartbeats flowing); 1587 AU files on disk |
+| 5 | 80.84.174.149 | 3 | 22.87 s | 626/626 | 7 / 20 / 55 | 34 164 | |
+
+Every draw: `recovery_exhausted` (the rig still dies eventually — the
+lottery remains the stage-2 vehicle, now with far better odds);
+`jiggle:0`; NO `input_jiggle` line; activation chain intact
+(`input_activation` ×5, `version:3`, `ready:1`); `sctl_unknown` 0x020e
+×5 (one per draw — a stable, harmless unknown); **no
+SESSION_LENGTH_TIMER in any of the 5** (it has now appeared in 2 of
+the last 8 draws — genuinely intermittent; the one-hour-budget fact of
+§32.2 stands untouched). Target T10 on the XLV build: **ALL PASS 79**.
+
+### 34.3 F7's field proof — the seat cooldown is ~2–3 minutes
+
+Draws 2–5 each ran the IDENTICAL pattern: 30 s lottery gap → create
+403 → wait 20 s → 403 → wait 40 s → 403 → wait 80 s → **fourth
+create succeeds** (~170 s after the previous session's exit). Run
+26's draw 2 died under F4's flat 20 s × 3 (≈90 s — not enough); F7's
+escalation covers the real cooldown with one attempt to spare, and
+the ~3 min/draw cadence never tripped the 429 rate limiter (run 26
+tripped it at ~7 creates in 6 minutes). The 160 s fourth wait was
+never needed — the schedule's shape matches the field exactly.
+
+### 34.4 The survival record, final form (16 measured draws)
+
+| configuration | draws | media s |
+|---|---|---|
+| minimal client (no activation, no jiggle) — runs 16/17 | 2 | 10.2, 11.0 |
+| drip era (activation, loop pinned — runs 20/21) | 2 | ~1.3, ~1.2 (media-starved, not freezes) |
+| activation, NO jiggle — runs 18, 22, 27×5 | 7 | 30.5, ~41, 10.3, 21.8, 15.4, **52.2**, 22.9 |
+| activation + jiggle — runs 23–26 | 5 | 10.6, 10.4, 11.6, 13.2, 11.3 |
+
+### 34.5 F9 and run 28 — the keeper hunt
+
+**F9**: `sess_jiggle_ms` default 100 → **0**; usage(), the F8 comment
+and the `SESS_JIGGLE_INTERVAL_MS` define all record the run-27
+verdict. `--session-jiggle=100` restores the legacy jiggle for any
+future re-verification (one optional ON draw inside a run-28 evening
+would re-control for rig-pool era at zero extra cost).
+
+Run 28 hunts the first **keeper** (a draw surviving its full
+`--session-seconds`, which stops the lottery with rc 0):
+
+```
+knvstd.exe --session --session-token=<tok> --session-app=107057914 --session-seconds=360 --lottery=10 --lottery-gap=30 --session-au-dir=logs\aus_r28 > logs\run28.log
+```
+
+Ten draws at the run-27 odds (median ~22 s, max 52 s so far) may or
+may not produce a 360 s keeper in one evening — every draw is
+distribution data regardless, and a keeper ends the run early by
+design. Read matrix: a keeper ⇒ stage 2 closes against a real
+gameplay-length stream (and the next variable is a gameplay-reaching
+app); no keeper but draws ≥ 52 s ⇒ the tail is real and longer
+evenings farm it; a re-appearance of the ~10–13 s band in EVERY draw
+⇒ check the jiggle flag actually flew OFF (`feedback.jiggle:0`) and
+treat it as rig-pool drift, not a regression of F9.
+
+---
+
+## 35. Round XLVII — R7 runs 28 + 28b: **THE FIRST KEEPERS — STAGE 2 IS CLOSED.** Run 28 (jiggle OFF, `--lottery=10`) drew 33.2 s, then 201.6 s, then a **FULL-LENGTH KEEPER: `stop_reason:"time"`, wall 360.0 s, media 359.96 s — 10 800/10 800 access units decoded (= exactly 30 fps × 360 s), 169 036/169 036 datagrams authenticated, ZERO gaps, ZERO decode errors, ZERO recovery attempts, ONE keyframe, idr/pli NEVER needed, BWE 29.2 Mbps, au_clock drift −3 ms** — and the lottery stopped on it by design (rc 0). Run 28b (the optional era re-control, jiggle ON = 100) produced **a second full-length keeper on its FIRST draw** (359.95 s, 10 800/10 800, 171 427/171 427 datagrams, `jiggle:3533` reports flown, zero gaps/errors). Two perfect six-minute sessions, both settings — the client sustains a full-length GFN stream end to end. **The 28b keeper also forces the honest correction of the XLVI verdict**: a jiggle-ON draw CAN survive, so "the jiggle is a depressant" cannot stand as stated — the same-evening survival trend (band draws 18:00–20:30Z → OFF tails 20:41Z → OFF keeper 22:05Z → ON keeper 22:22Z) shows the rig pool drifted favourable across the evening for BOTH settings, and the run-27 A/B is downgraded from "conviction" to "suggestive, era-confounded". The default stays OFF (F9 — no evidence ON helps; the conservative choice stands). Ships **F10**: honest knlog failure labels — run 28's draws 1–2 logged `E_SESSION_NO_FRAMES` ("no access unit completed") right after decoding 998 and 6049 AUs perfectly, because the pre-D8 label pair predated the recovery contract that F6a made reachable; failure codes now follow the stop_reason. Stamp **XLVII**. Run 29 = sustained stability (30-minute draws) + optionally the first gameplay-reaching app.
+
+### 35.1 Run 28 draw by draw (jiggle OFF, T10 on XLVI first: ALL PASS 79)
+
+| draw | seat path | stop_reason | wall | media | AUs dec | datagrams | gaps/fec | BWE kbps |
+|---|---|---|---|---|---|---|---|---|
+| 1 | instant | recovery_exhausted | 43.3 s | 33.22 s | 998/998 | 13 340/13 340 | 0/0 | 31 045 |
+| 2 | 3 backoffs (20+40+80) | recovery_exhausted | 211.7 s | **201.59 s** | 6049/6049 | 91 941/91 941 | 0/**90** | 40 563 |
+| 3 | 3 backoffs (20+40+80) | **time — KEEPER** | **360.0 s** | **359.96 s** | **10 800/10 800** | **169 036/169 036** | 0/0 | 29 172 |
+
+Draw 2 already rewrote the endurance record threefold (52 s → 201 s,
+with 90 FEC repairs and zero gaps — the loss-resilience proof at
+scale); draw 3 then ran the contract to completion. Note the monotone
+improvement WITHIN the run (33 → 201 → 360 s across ~25 minutes) —
+the same evening-drift signature the correction below needs.
+
+### 35.2 Keeper anatomy (draws 28/3 and 28b/1 — nearly identical)
+
+- **Media**: 10 800 AUs = exactly 30.00 fps × 360 s; every one
+  decoded; `au_clock` drift −3/−9 ms over six minutes (the RTP clock
+  and the wall clock agree to 25 ppm — the transport's timing story
+  is sound at session scale).
+- **Integrity**: zero gaps, zero decode errors, zero withheld, zero
+  recovery attempts; ONE keyframe (the opening IDR — the stream never
+  needed a refresh, so `idr`/`pli` fired ZERO times; the whole
+  reliable-IDR machinery of round XL simply never armed).
+- **Control plane**: `0x0101` heartbeats at ~1 Hz for the full
+  session (333 by rel_ms 340 023; 348 total control msgs), the 8/9-
+  notification 0x010a startup burst as usual, `0x020e` ×1 (the
+  standing unknown), NO SESSION_LENGTH_TIMER (2 of the last 10 draws
+  carried one). The §34 healthy-draw indicator — 0x0101 alive past
+  10 s — holds at the 360 s scale: heartbeats never stopped in
+  either keeper.
+- **Estimator**: warm throughout (25–29 Mbps estimates, 1–3 %
+  util); `skip_reordered` single digits; the feedback plane's first
+  six-minute soak with zero pathologies.
+- **28b specifics**: `jiggle:3533` reports (~9.8/s × 360 s ✓) flew on
+  sid 6 with zero outbox drops across the whole session — the input
+  path is now endurance-proven too, it just isn't NEEDED.
+
+### 35.3 The corrected jiggle verdict (XLVI §34 → XLVII)
+
+The run-27 A/B (5 OFF draws beyond/near the ON band vs 5/5 ON draws
+in-band, P ≈ 0.03 %) assumed draws are i.i.d. from a stable nightly
+population. Runs 28/28b break that assumption directly: the SAME
+evening went band-draws (18:00–20:30Z, both settings) → OFF tails
+(20:41Z) → OFF keeper (22:05Z) → **ON keeper (22:22Z)**. A monotone
+evening drift explains every observation without any jiggle effect;
+so does a real depressant effect that the late-hot pool overwhelmed —
+the data no longer separates them. What survives:
+
+1. **The jiggle is NOT necessary** for any survival class (band,
+   tail, or keeper draws all happened OFF; 27/28 have no jiggle and
+   hold every record).
+2. **The jiggle is NOT invariably fatal** (28b's keeper flew 3533
+   reports and survived 360 s pristine).
+3. The run 23–26 vs 27 contrast remains *suggestive* of a depressant
+   effect but is era-confounded; settling it would need interleaved
+   ON/OFF draws inside one run — **deprioritised**: with keepers
+   reachable under both settings the question lost its practical
+   stakes.
+4. **Default stays OFF** (F9). Rationale unchanged: no evidence ON
+   helps, the 440 B/s bot-signature risk is real and asymmetric, and
+   the activation handshake — the part run 18 proved load-bearing —
+   is untouched either way.
+
+Survival-record bookkeeping: the "rig-side lottery" of §30/§34 is now
+a "rig-side lottery with a hot-pool mode": within ~4 hours the same
+client + app went from 5/5 band draws to 2/2 keepers. Any future A/B
+MUST be same-evening-interleaved or it is unreadable (trap 17, rev 38).
+
+### 35.4 F10 — honest failure labels
+
+Run 28's app.log carried, for draws 1–2:
+`operation_failed op=session.media code=E_SESSION_NO_FRAMES
+reason="media arrived but no access unit completed..."` — next to
+summaries reporting 998/998 and 6049/6049 decoded. The label pair
+predates D8: back then a non-zero exit with datagrams > 0 really did
+mean "no frames". F6a made `recovery_exhausted` (frames decoded,
+server froze, recovery exhausted) the dominant failure class, and the
+old label actively misinforms exactly there. F10 selects the failure
+code from the stop_reason: `E_SESSION_NO_MEDIA` (zero datagrams),
+`E_SESSION_RECOVERY_EXHAUSTED` (the common dead-draw case, reason
+text points at the recovery block + transport channel),
+`E_SESSION_SERVER_TERMINATION` (0x109), `E_SESSION_SOCKET_ERROR`,
+`E_SESSION_NO_FRAMES` (datagrams but zero AUs — the original
+meaning), `E_SESSION_FAILED_VERDICT` (contract under-delivery, e.g.
+`--session-expect-frames` unmet). Stdout is untouched; only the
+knlog/diag layer changes.
+
+### 35.5 Stage 2 — CLOSED
+
+Against BOOTSTRAP §12's G2 and the working definition carried in
+START-HERE §1 ("NVST media/transport"): RTSP OPTIONS→DESCRIBE→SETUP→
+ANNOUNCE→PLAY all 200 (runs 16+); access units assemble and decode
+correctly at scale (10 800/10 800 in one session; sha1-per-AU
+telemetry); reorder/NACK-v2/FEC survive injected AND natural loss
+(runs 25–27: gaps ≤ 7, fec ≤ 90, withheld ≤ 147, 100 % decoded);
+SRTP/GS/GS-header pipelines authenticated every datagram of every
+run (169 036/169 036 at the keeper); the estimator port flies the
+full seven-field QoS; D8's bounded recovery contract works live to
+the millisecond; the full-length session completes on contract
+(`stop_reason:"time"`) — twice. The stage-2 evidence set is complete;
+the remaining known-unknowns (audio bundle, keyboard/wheel/text,
+cursor payloads, input handshake timeout, decode-side watchdog) are
+stage-3/5 scope and none of them block the media/transport claim.
+
+**Stage 3 opens** with, in order: (1) the audio bundle — extraction
+first (DTLS-SRTP keying already negotiated, `srtp_prof:1`; Opus
+decode second), (2) G3's remainder behind the INPUT.md §9 caveat (no
+periodic patterns without a survival test), (3) G4 cursor payload
+decoding, (4) G1 input-handshake timeout, (5) D-t13 decode watchdog.
+
+### 35.6 Run 29 — sustained stability (and maybe gameplay)
+
+The keeper proved 360 s. Run 29 asks for **1800 s** (30 min) — the
+drift/leak/estimator soak at session scale, and the natural bridge to
+stage-3 testing (audio extraction lands better against long captures):
+
+```
+knvstd.exe --session --session-token=<tok> --session-app=107057914 --session-seconds=1800 --lottery=3 --lottery-gap=30 > logs\run29.log
+```
+
+NO `--session-au-dir` this time: a 30-minute keeper writes ~54 000 AU
+files (~800 MB) to the laptop for evidence the stdout telemetry
+already carries (per-AU sha1/len are sampled in the log, summary
+counts are exact). If a specific AU range is ever needed, a targeted
+short draw with `--session-au-dir` is cheaper.
+
+Read matrix: a 1800 s keeper ⇒ sustained-stability claim + green
+light for stage-3 audio work against long sessions; a death at N
+minutes with `recovery_exhausted` ⇒ the hot pool has a ceiling —
+the freeze forensics (transport channel + F10's honest label) date
+it exactly; if the operator can supply a GAMEPLAY-reaching app id,
+substituting `--session-app=` makes run 29 the first interactive-
+content test (scene-cut bitrate storms vs the parked portal's static
+screen — the estimator's real exam).
+
+## 36. Round XLVIII — R7 runs 29 + 29g: **THE ~600-SECOND SERVER CEILING IS MEASURED FROM BOTH SIDES, AND THE FIRST GAMEPLAY-REACHING APP DELIVERED A FLAWLESS 599-SECOND DRAW.** Run 29 (Arknights: Endfield, `--session-seconds=1800 --lottery=3`, XLVII stamp) never got near 30 minutes — the rig pool enforces a **session ceiling at ~600 s**: draw 1 died `recovery_exhausted` in the classic band; draw 2 streamed **17 821/17 821 AUs = 594 s of perfect 30 fps video** (280 505/280 505 datagrams, zero gaps) and then the datagram plane DECAYED GRADUALLY (444 → 0 over ~9 s — the rig-freeze signature is abrupt silence; a decay is the ceiling's) until `recovery_exhausted` at wall 604.1 s (the ~10 s recovery window included); draw 3 ran to **599.2 s and received the POLITE termination** (control `0x0109`, transport TERM `0x80008BE3` code 56 / `0x80008BC7`) → `stop_reason:"server_termination"` with **17 974/17 974 AUs, 285 078/285 078 datagrams, zero gaps**. Run 29g repeated the protocol on **Watch Dogs: Legion (app 100361011) — the first gameplay-reaching title in project history** (animated loading screens, intros, then a static settings-confirmation window): draw 1 = **a flawless 599.1 s `server_termination` keeper — 17 970/17 970 AUs decoded, zero gaps, zero decode errors** (only 54 307 datagrams — ~3 per AU: the static settings window is a low-bitrate scene, and the pipeline holds on real interactive content: scene cuts, video intros, launcher transitions); draws 2–3 died `recovery_exhausted` at **110 s and 144 s of media** (3 297 and 4 323 AUs, near-zero gaps) — long by band standards (the 10–13 s mode did NOT reproduce), short of the ceiling: the rig-free lottery still lives BELOW the ~600 s cap. **F10 matched all six draws** (every dead draw labelled `E_SESSION_RECOVERY_EXHAUSTED`, both ceiling draws `E_SESSION_SERVER_TERMINATION` — the XLVII mislabel class is extinct in the field); **F7 matched every queue** (403 → 20/40/80 s escalating backoff → create 200). Verdict: **session length is server-bounded at ~594–599 s** (silent-decay and polite-term are the ceiling's two faces); a soak must therefore target **≈570 s** (`--session-seconds=570`) so `stop_reason:"time"` remains reachable BELOW the floor — a 570 s keeper is the new full-length proof. Note for evidence readers: `bundle_rtp_in`/`bundle_rtcp_in` were counted internally in XLVII but are NOT in the summary JSON, so runs 29/29g carry **no retro audio measurement** — run 30 is the audio plane's first instrumented flight (the XLVIII `"audio"` summary block + `audio_arm`/`audio_close` events; `docs/BUNDLE-AUDIO.md`). **F11 ships** (sandbox-proven, target-pending): `kn_ogg` (OggOpus muxer) + `kn_arx` (bundle-audio SRTP receive: RFC 3711 AES_CM_128_HMAC_SHA1_80 via the RFC 5764 §4.2 DTLS-SRTP exporter → RFC 2198 RED → RFC 6716 TOC → Opus payload emit) + `--session-audio-out=F.opus` + the 34-key summary `"audio"` block, all pinned by two independent Python references (`tools/oggopus_reference.py`, `tools/arx_reference.py`) through `audio.vectors` (188 checks) and the new `test_knogg` (163) / `test_knarx` (62) suites. Stamp **XLVIII**. Run 30 = `--session-seconds=570 --lottery=2 --session-audio-out=audio.opus` (NO `--session-au-dir`): a `"time"` keeper + a playable ~570 s stereo 48 kHz .opus file.

@@ -775,6 +775,34 @@ language-independent. Everything **you** write is in English (D12).
 **Do not start stage 1 until G0.2 is closed**, because the presentation path determines the
 shape of the video loop.
 
+> **Status marker (round XLVIII, 2026-10-29 — the definitions above are
+> unchanged; this note only records progress):** **STAGE 2 CLOSED
+> (XLVII); STAGE 3 UNDERWAY — the audio bundle extraction is BUILT.**
+> Runs 28/28b delivered two full-length keepers (G2 met and exceeded);
+> runs 29/29g then measured the **~600 s server ceiling** from both
+> sides (polite `0x0109`/TERM at 599.1–599.2 s; silent gradual decay
+> at 594 s) and produced the **first gameplay-reaching keeper**
+> (Watch Dogs: Legion, flawless 599.1 s / 17 970 AUs, zero gaps —
+> RTSP §36). XLVIII ships **F11**: `kn_arx` (bundle SRTP audio rx) +
+> `kn_ogg` (OggOpus capture) + the RFC 5764 §4.2 exporter +
+> `--session-audio-out` + the summary `"audio"` block — sandbox-proven
+> (audio.vectors 188 checks; test_knogg 163; test_knarx 62; ctest
+> 22/22 ×2; T10 dry 72), **target-pending (run 30)**. G3's "audible
+> audio" bar is met as EXTRACTION (a playable .opus file); decode-to-
+> speaker is the deferred follow-on. Remaining stage-3 scope after
+> run 30: G3 keyboard/wheel/text, G4 cursor payloads, G1 handshake
+> timeout, D-t13 — see `START-HERE.md` §3/§4, `docs/BUNDLE-AUDIO.md`,
+> `docs/RTSP.md` §36.
+>
+> **Sandbox gate canon at XLVIII close:** native battery PASS (zero
+> warnings; new baselines test_knogg **163**, test_knarx **62**,
+> test_knselftest **118**) · cross `-Werror` ×2 arches PASS · ctest
+> **22/22** ×2 backends · T10 POSIX dry **ALL PASS 72** (target
+> expectation **82**) · T13 ALL PASS 63 (unchanged; no wire change) ·
+> e2e **43/43** · summary skeleton canon **113 recursive keys**
+> (`tools/check_summary_skeleton.py`) · selftest registry **16**
+> (audio.vectors 188 checks, gated).
+
 ---
 
 ## 13. Immediate next steps

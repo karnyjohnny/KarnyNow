@@ -70,6 +70,17 @@ struct kn_dtls {
     uint16_t applen[KN_DTLS_APPQ_SLOTS];
     unsigned app_head, app_count;
 
+    /* round XLVIII (F11): DTLS-SRTP key export (RFC 5764 §4.2). The
+     * mbedTLS export-keys callback captures the TLS 1.2 master secret +
+     * both randoms at the end of the handshake; kn_dtls_srtp_export runs
+     * EXTRACTOR-dtls_srtp over them. The bytes NEVER leave the process
+     * except through the export API (§7: shapes and ids in the log,
+     * never keys). */
+    unsigned char exp_master[48];
+    unsigned char exp_crand[32];
+    unsigned char exp_srand[32];
+    int      exp_have;
+
     /* state */
     int      ready;
     int      pin_matched;     /* verify cb saw SHA-256(der) == pin */
@@ -255,6 +266,31 @@ static void dtls_drain_app(kn_dtls *d)
     }
 }
 
+#ifdef MBEDTLS_SSL_DTLS_SRTP
+/* The mbedTLS key-export callback (mbedtls_ssl_export_keys_t): fires at
+ * the end of the handshake with the TLS 1.2 master secret + randoms —
+ * exactly the EXTRACTOR-dtls_srtp inputs (RFC 5764 §4.2). The reference
+ * gets the same material inside str0m; we get it here. */
+static void dtls_export_keys_cb(void *ctx, mbedtls_ssl_key_export_type type,
+                                const unsigned char *secret,
+                                size_t secret_len,
+                                const unsigned char client_random[32],
+                                const unsigned char server_random[32],
+                                mbedtls_tls_prf_types prf)
+{
+    kn_dtls *d = (kn_dtls *)ctx;
+    (void)prf;   /* DTLS 1.2 always maps to the SHA-256 PRF here */
+    if (type == MBEDTLS_SSL_KEY_EXPORT_TLS12_MASTER_SECRET &&
+        secret_len == 48 && d) {
+        memcpy(d->exp_master, secret, 48);
+        memcpy(d->exp_crand, client_random, 32);
+        memcpy(d->exp_srand, server_random, 32);
+        d->exp_have = 1;
+    }
+}
+#endif
+
+
 kn_dtls *kn_dtls_client(kn_sock_udp *sock, uint32_t dest_ip,
                         uint16_t dest_port, kn_cert *identity,
                         const char *remote_fp, char *err, size_t errsz)
@@ -379,6 +415,9 @@ kn_dtls *kn_dtls_client(kn_sock_udp *sock, uint32_t dest_ip,
         kn_dtls_free(d);
         return NULL;
     }
+#ifdef MBEDTLS_SSL_DTLS_SRTP
+    mbedtls_ssl_set_export_keys_cb(&d->ssl, dtls_export_keys_cb, d);
+#endif
     mbedtls_ssl_set_mtu(&d->ssl, KN_DTLS_MTU);
     mbedtls_ssl_set_bio(&d->ssl, d, dtls_bio_send, NULL, dtls_bio_recv);
     mbedtls_ssl_set_timer_cb(&d->ssl, d, dtls_timer_set, dtls_timer_get);
@@ -542,6 +581,34 @@ unsigned kn_dtls_srtp_profile(const kn_dtls *d)
 #endif
 }
 
+int kn_dtls_srtp_export(const kn_dtls *d, uint8_t out[60])
+{
+#ifdef MBEDTLS_SSL_DTLS_SRTP
+    uint8_t seed[64];
+    static const char label[] = "EXTRACTOR-dtls_srtp";
+    if (!d || !out || !d->ready || !d->exp_have)
+        return -1;
+    /* the exporter is defined for the negotiated profile ONLY — 0x0001
+     * (AES128_CM_HMAC_SHA1_80: 16-byte keys, 14-byte salts) */
+    if (kn_dtls_srtp_profile(d) !=
+        (unsigned)MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80)
+        return -1;
+    memcpy(seed, d->exp_crand, 32);
+    memcpy(seed + 32, d->exp_srand, 32);
+    /* RFC 5764 §4.2: PRF(master, "EXTRACTOR-dtls_srtp", cr|sr, 60) =
+     * [client_key 16][server_key 16][client_salt 14][server_salt 14].
+     * The caller takes the SERVER half (out+16, out+46) for the receive
+     * direction and feeds it to kn_arx_set_srtp (RFC 3711 KDF inside). */
+    if (mbedtls_ssl_tls_prf(MBEDTLS_SSL_TLS_PRF_SHA256, d->exp_master, 48,
+                            label, seed, sizeof seed, out, 60) != 0)
+        return -1;
+    return 0;
+#else
+    (void)d; (void)out;
+    return -1;
+#endif
+}
+
 void kn_dtls_stats_get(const kn_dtls *d, kn_dtls_stats *out)
 {
     if (!d || !out) return;
@@ -617,6 +684,11 @@ int kn_dtls_ciphersuite(const kn_dtls *d, char *out, size_t outsz)
 
 uint64_t kn_dtls_ready_ms(const kn_dtls *d) { (void)d; return 0; }
 unsigned kn_dtls_srtp_profile(const kn_dtls *d) { (void)d; return 0; }
+int kn_dtls_srtp_export(const kn_dtls *d, uint8_t out[60])
+{
+    (void)d; (void)out;
+    return -1;   /* honest: no DTLS-SRTP without the mbedTLS backend */
+}
 
 void kn_dtls_stats_get(const kn_dtls *d, kn_dtls_stats *out)
 {

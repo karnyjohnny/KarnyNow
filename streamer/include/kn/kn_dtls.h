@@ -183,6 +183,20 @@ uint64_t kn_dtls_ready_ms(const kn_dtls *d);
  * and ids in the log, never keys). */
 unsigned kn_dtls_srtp_profile(const kn_dtls *d);
 
+/* Round XLVIII (F11): the RFC 5764 §4.2 DTLS-SRTP keying material —
+ * EXTRACTOR-dtls_srtp over the captured TLS 1.2 master secret and
+ * randoms (mbedTLS export-keys callback). out[60] receives:
+ *   [0..16)  client_write_SRTP_master_key
+ *   [16..32) server_write_SRTP_master_key   <- the RECEIVE direction
+ *   [32..46) client_write_SRTP_master_salt
+ *   [46..60) server_write_SRTP_master_salt  <- the RECEIVE direction
+ * Returns 0 when ready AND the use_srtp extension negotiated
+ * SRTP_AES128_CM_HMAC_SHA1_80 (0x0001) AND the export material was
+ * captured; -1 otherwise (including every stub/schannel build). The
+ * session keys for kn_arx come from kn_srtp_kdf128 over the server
+ * half (RFC 3711 labels 0/1/2). NEVER log the bytes (§7). */
+int kn_dtls_srtp_export(const kn_dtls *d, uint8_t out[60]);
+
 void kn_dtls_stats_get(const kn_dtls *d, kn_dtls_stats *out);
 
 void kn_dtls_free(kn_dtls *d);   /* free(NULL)-safe (NOT double-free —

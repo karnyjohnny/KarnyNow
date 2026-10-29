@@ -1,3 +1,267 @@
+# INTEGRATION NOTES — Round XLVIII delta, rev 39 (**F11 SHIPPED (sandbox-proven): the bundle-audio extraction stage — `kn_arx` (SRTP/RED/TOC receive pipeline, 14-step order pinned by `tools/arx_reference.py`) + `kn_ogg` (zero-alloc OggOpus muxer, byte-exact vs `tools/oggopus_reference.py`) + the RFC 5764 §4.2 DTLS-SRTP exporter in `kn_dtls` (`mbedtls_ssl_set_export_keys_cb` → `kn_dtls_srtp_export(out60)`; server half → RFC 3711 KDF labels 0/1/2; stub/schannel honest −1) + `--session-audio-out=F.opus` + `audio_arm`/`audio_close` events + the 34-key summary `"audio"` block (new skeleton canon 113 recursive keys, validated by the NEW `tools/check_summary_skeleton.py` — the old block-scan validator and its 108-vs-112 mystery are retired) + `audio.vectors` self-test (188 checks, gated, registry 16) + suites `test_knogg` (163) / `test_knarx` (62) → ctest 22/22 ×2 backends, T10 dry 72 (target expectation **82**), native battery green zero warnings, cross `-Werror` ×2 arches green, e2e 43/43.** Runs 29/29g analysis (RTSP §36): the **~600 s server ceiling** measured from both sides (polite `0x0109`+TERM at 599.1–599.2 s; silent gradual decay at 594 s — decay = ceiling, abrupt silence = rig freeze), **Watch Dogs: Legion = the first gameplay-reaching app: a flawless 599.1 s / 17 970-AU `server_termination` keeper**; F10 labels matched 6/6 draws; F7 backoff matched every queue. Run 30 = `--session-seconds=570 --lottery=2 --session-audio-out=audio.opus`, NO au-dir; a `"time"` keeper below the 594 s floor + a playable ~570 s .opus. **App-id canon: 107057914 = Arknights: Endfield** (ALWAYS was — earlier docs saying "Arknights launcher-parked" mean Endfield), **100361011 = Watch Dogs: Legion**. Stamp **XLVIII**.)
+
+## Rev 39 changed files (round XLVIII)
+
+- NEW `streamer/include/kn/kn_arx.h`, `streamer/src/kn_arx.c` — the
+  bundle-audio receive pipeline (contract + decisions in
+  `docs/BUNDLE-AUDIO.md` §3/§8; 17 counters + first/last_ms).
+- NEW `streamer/include/kn/kn_ogg.h`, `streamer/src/kn_ogg.c` — the
+  OggOpus capture muxer (BUNDLE-AUDIO §4; CRC table GENERATED +
+  Python-verified in-file after the hand-typed 160-entry incident).
+- NEW `streamer/src/kn_audio_rx_kat_runner.h` — the shared KAT battery
+  runner (unit tests + the `audio.vectors` production self-test).
+- NEW `streamer/tests/test_knogg.c`, `streamer/tests/test_knarx.c` —
+  unit suites (differential + property legs).
+- NEW `tools/oggopus_reference.py`, `tools/arx_reference.py` — the
+  independent Python references (both `--check`/self-prove before
+  emitting; arx_reference had a POINTER-ARRAY emission bug fixed this
+  round: groups emitted `vec*[]` while the runner read `vec[]` — ASan
+  caught it on the first link; generators now emit struct arrays).
+- NEW `streamer/src/kn_ogg_kat_vectors.h` (3296 lines),
+  `streamer/src/kn_arx_kat_vectors.h` (12 groups / 21 packets).
+- NEW `docs/BUNDLE-AUDIO.md`; NEW `tools/check_summary_skeleton.py`.
+- `streamer/src/kn_dtls.c` / `include/kn/kn_dtls.h` — export-keys cb +
+  `kn_dtls_srtp_export` (mbedtls leg; stub −1); struct captures
+  master+randoms (never logged).
+- `streamer/src/kn_selftest.c` — `audio.vectors` (registry 16).
+- `streamer/src/knvstd_main.c` — CLI flag, arm/demux/teardown wiring,
+  pump fields + `sess_ice_stats` audio mirror (snapshot-safe), summary
+  `"audio"` block, help text, stamp XLVIII (~6940 lines).
+- `tests/test_knselftest.c` — registry pins 15→16, host ok_count 6→7,
+  results capacity 24.
+- `tests/T10_build_and_test.py` — suites +test_knogg/test_knarx,
+  registry pin 16, portable-must-pass list +audio.vectors (dry 72;
+  target expectation 82).
+- `CMakeLists.txt` — kncore +kn_ogg/kn_arx; ctest foreach +knogg +knarx
+  (22 tests).
+- `tools/build_native_tests.sh` — KNCORE +2 sources; build+run lines
+  for the two new suites (rc23/rc24 in the PASS tally).
+- `tools/cross_check.sh` — per-file cross compiles +2; KCORE +2 (the
+  kn_dtls REAL-body leg already covers the exporter).
+- `docs/RTSP.md` §36 (runs 29/29g + F11); `docs/AUDIO.md` naming
+  cross-ref; `docs/BOOTSTRAP.md` §12 status marker + gate counts;
+  `START-HERE.md` (XLVIII state + run-30 protocol + reaction matrix);
+  `tests/README.md` (T10 counts).
+
+## Rev 39 traps (new this round)
+
+1. **Never hand-type const tables** — the first kn_ogg CRC table was
+   written from memory: 160/256 entries, wrong from index 24. Generate
+   + verify in-file (the bitwise differential in test_knogg is now the
+   permanent guard).
+2. **RFC 6716 TOC**: 0xF8 = CELT-FB 20 ms = 960 samples; 0xC0 = SWB
+   2.5 ms = 120; 0xE0 = FB 2.5 ms = 120. The 16-31 config block is
+   bandwidth-major, duration-minor.
+3. **arx ordering IS semantics**: replay BEFORE seq accounting (true
+   dups → replay_reject, seq_dup stays 0); SSRC-change reset BEFORE the
+   replay guess; padded++ on the P bit even if the pad is invalid;
+   seq accounting right after SRTP commit, BEFORE padding/RED/TOC;
+   header-walk overflow = malformed, not srtp_fail.
+4. **OggOpus body offset**: the OpusHead magic sits at page offset
+   **28** (27-byte header + 1 lacing byte), not 27.
+5. **Native test link line** must carry the third_party .c files
+   (`third_party/tiny-aes-c/aes.c`,
+   `third_party/crypto-algorithms-sha1/sha1.c`) — kn_aes/kn_sha1 are
+   wrappers only.
+6. **Sandbox toolchain is NOT persistent** — every fresh session:
+   `apt-get update && apt-get install gcc cmake make ninja-build`
+   (mingw-w64 for the cross leg; it is huge — install in background).
+7. Summary canon: **113 recursive keys** (drops/outbox_by_sid emptied).
+   Validate with `tools/check_summary_skeleton.py <repo> <live.log>` —
+   skeleton==live is the gate, not a fixed block count.
+
+---
+
+# INTEGRATION NOTES — Round XLVII delta, rev 38 (RUNS 28 + 28b = **THE FIRST KEEPERS — STAGE 2 IS CLOSED.** Run 28 (jiggle OFF, `--lottery=10`) drew 33.2 s → 201.6 s (a threefold endurance record: 6049/6049 AUs, 91 941/91 941 datagrams, 90 FEC repairs, zero gaps) → **a FULL-LENGTH KEEPER: `stop_reason:"time"`, wall 360.0 s, media 359.96 s, 10 800/10 800 AUs decoded (exactly 30 fps × 360 s), 169 036/169 036 datagrams authenticated, zero gaps/errors/recoveries, ONE keyframe, idr/pli never needed, drift −3 ms** — and the lottery stopped on it by design (rc 0, exit 0). Run 28b (era re-control, jiggle ON) produced **a second keeper on its first draw** (359.95 s, 10 800/10 800, 171 427/171 427 datagrams, `jiggle:3533` flown, zero gaps). **The 28b ON-keeper forces the honest correction of the XLVI verdict**: the same evening drifted favourable for BOTH settings (band draws 18:00–20:30Z → OFF tails 20:41Z → OFF keeper 22:05Z → ON keeper 22:22Z), so "the jiggle is a depressant" is DOWNGRADED to *suggestive, era-confounded*; the default stays OFF (not necessary for any survival class, not invariably fatal, asymmetric bot-signature risk). Keepers' control plane: 0x0101 heartbeats at ~1 Hz for the full 360 s (333 by rel 340 s) — §34's healthy-draw indicator confirmed at session scale. No SESSION_LENGTH_TIMER in either (2 of last 10 draws). Ships **F10**: knlog failure labels follow the stop_reason (run 28's draws 1–2 logged `E_SESSION_NO_FRAMES` "no access unit completed" right after decoding 998/6049 AUs perfectly — the pre-D8 label pair predates the recovery contract F6a made reachable; new codes: `E_SESSION_RECOVERY_EXHAUSTED`, `E_SESSION_SERVER_TERMINATION`, `E_SESSION_SOCKET_ERROR`, `E_SESSION_FAILED_VERDICT` join the original two). Stamp **XLVII**. Target T10 on XLVI: ALL PASS 79. Run 29 = the 30-minute soak, optionally the first gameplay app.)
+
+> **Rev 38 supersedes rev 1-37 as the current delta.** Canonical state:
+> **`START-HERE.md`** (repo root). Design record: **`docs/RTSP.md` §35**
+> (the keeper anatomy, the corrected jiggle verdict, F10, the stage-2
+> closure statement, the run-29 plan) + **`docs/INPUT.md` §9** (the
+> downgraded verdict) + **`docs/BOOTSTRAP.md` §12** (status marker).
+
+## Changed files (round XLVII)
+
+| file | change |
+|---|---|
+| `streamer/src/knvstd_main.c` | **F10**: the single `kn_log_on_failure("session.media", ...)` site after the media loop — the pre-D8 `datagrams==0 ? NO_MEDIA : NO_FRAMES` pair replaced by a stop_reason-driven selection: `E_SESSION_NO_MEDIA` (0 datagrams) / `E_SESSION_RECOVERY_EXHAUSTED` (the dominant dead-draw class; reason text points at the recovery block + transport channel) / `E_SESSION_SERVER_TERMINATION` (0x109) / `E_SESSION_SOCKET_ERROR` / `E_SESSION_NO_FRAMES` (datagrams but zero AUs — the original meaning) / `E_SESSION_FAILED_VERDICT` (contract under-delivery). knlog/diag layer only — stdout untouched. Build stamp `XLVI`→`XLVII`. 6780 → 6808 lines. No wire-format changes. |
+| `docs/RTSP.md` | §35 — the full round-XLVII record (keeper tables + anatomy, the corrected verdict, F10, stage-2 closure, run-29 plan). |
+| `docs/INPUT.md` | §9 second correction: the depressant verdict DOWNGRADED (28b's ON keeper); what survives (not necessary / not fatal / default stays OFF / interleaved-A-B requirement). |
+| `docs/BOOTSTRAP.md` | §12 status marker: **stage 2 CLOSED** (definitions unchanged — the note only records progress). |
+| `START-HERE.md` | state → XLVII + **stage 3 of 5**; runs 28/28b rows; the XLVII-shipped block; §4 = run 29 (30-min soak, step-by-step); trap 17 (same-evening-interleaved A/B rule); history +XLVII. |
+
+## Integration notes / traps for the next agent
+
+1. **STAGE 2 IS CLOSED — the project is at stage 3** (audio bundle /
+   Opus first, then G3 keyboard-wheel-text, G4 cursor payloads, G1
+   handshake timeout; D-t13 watchdog last). Do not open new stage-2
+   media/transport work without a keeper-breaking regression.
+2. **The jiggle verdict is DOWNGRADED, not reversed-reversed**: the
+   XLVI "depressant" conviction is unsound (28b's ON keeper), the
+   run-27 A/B stays *suggestive*, and the practical decisions stand:
+   default OFF, handshake untouched, no periodic input patterns
+   without a survival test. Do not cite §34/rev 37 as settled science
+   — cite §35.3/this rev.
+3. **Era drift makes cross-evening A/Bs unreadable (trap 17)**: the
+   same client+app went 5/5 band draws → 2/2 keepers within ~4 hours
+   (Oct 28 18:00→22:30Z). Any future input/policy A/B MUST interleave
+   the arms inside one run (or one evening at minimum) — never
+   compare against a previous evening's draws.
+4. **The failure-label taxonomy changed (F10)**: knlog/diag consumers
+   keyed on `E_SESSION_NO_FRAMES` must know it now ONLY means
+   "datagrams but zero AUs"; the common dead-draw case is
+   `E_SESSION_RECOVERY_EXHAUSTED`. The diag zip's `operation_failed`
+   lines and `app.log` carry the new codes from run 29 on.
+5. **Keeper signature (the healthy-draw checklist)**: `stop_reason:
+   "time"` + `idr:0, pli:0, kf:1` + `recovery {attempts:0}` + 0x0101
+   heartbeats past 10 s + drift within ±10 ms over the session. A
+   draw that arms idr/pli > 0 is already in trouble (every dead draw
+   had 50–92 retries).
+6. **Do NOT pass `--session-au-dir` for long draws**: a 30-min keeper
+   writes ~54 000 AU files (~800 MB) to the operator's laptop for
+   evidence the stdout telemetry already carries. Targeted short
+   draws are the cheap way to capture AUs; the operator's push
+   excludes `.264` anyway (11 000-file pushes kill the laptop) — ask
+   by message for specific AU files when needed.
+7. Evidence workflow (since rev 37): the operator pushes whole runs
+   to **`github.com/karnyjohnny/karnynow-logs`** — now restructured
+   to hold ALL rounds (`runNN_logs/` folders, `.264` excluded). The
+   agent clones, copies the current run's folder into the workspace
+   IMMEDIATELY, and analyzes from there. Runs 22–28b are archived in
+   the workspace (`run22_logs/` … `run28b_logs/`) and in the repo.
+8. Everything from rev 36 stands except where corrected here (F6a/F6b
+   contracts — now field-proven by the keepers' rc 0 early stop; F7
+   schedule — draws 2–3 of run 28 queued on the 4th create after
+   exactly 20+40+80 s, twice more; `cm_create_backoff` naming; knlog
+   APPEND across draws; printf ritual — 112 blocks).
+
+## Gate results (sandbox, this round)
+
+| gate | result |
+|---|---|
+| `tools/build_native_tests.sh` | **NATIVE TESTS PASS** (per-suite counts unchanged; paranoid legs incl.) |
+| `tools/cross_check.sh` ×2 arches | **CROSS-CHECK PASS**, zero warnings |
+| ctest native / mbedTLS / schannel | **20/20 ×3** |
+| T10 POSIX dry | **69 checks, 0 failed** |
+| T13 | **ALL PASS 63** |
+| summary-printf validator | **112** blocks, 0 mismatches; summary **74 = 74**; skeleton `json.loads` PASS |
+| `sandbox_session_e2e` | **43/43 PASS** |
+| stamp check | build line reads `"round":"XLVII"`; lottery mechanics re-verified on the TLS-less build |
+| ASan/UBSan | carried from XLI.1 (no wire/decoder code touched XLIII–XLVII; F10 is label selection only) |
+
+## Target expectations (Win7, run 29)
+
+- **T10**: ALL PASS **79**, knrx **243**, kninput **548**,
+  `input.vectors` **50** — unchanged (F10 touched no test file).
+- First stdout line of every run: `"round":"XLVII"`.
+- **Run 29 — the 30-minute soak** (NO `--session-au-dir` — trap 6):
+  `knvstd.exe --session --session-token=<tok> --session-app=107057914 --session-seconds=1800 --lottery=3 --lottery-gap=30 > logs\run29.log`
+  A keeper now means a **1800 s** survival (rc 0, early stop). If a
+  gameplay-reaching app id is available, substitute `--session-app=`
+  — that makes run 29 the first interactive-content test (the
+  estimator's real exam: scene-cut bitrate storms vs the parked
+  portal's static screen).
+- Expected shapes: per draw the full session lines + summary;
+  `cm_create_backoff` waits between draws are normal; a dead draw now
+  logs `E_SESSION_RECOVERY_EXHAUSTED` in `app.log`/diag (F10) instead
+  of the misleading `E_SESSION_NO_FRAMES`.
+- Deliver via **karnynow-logs**: `run29.log` + the whole `logs/`
+  directory + the T10 pair (no `.264` — as usual).
+
+---
+
+# INTEGRATION NOTES — Round XLVI delta, rev 37 (RUN 27 = THE JIGGLE A/B, DECIDED: **THE SYNTHETIC MOUSE JIGGLE IS A SURVIVAL DEPRESSANT.** Five jiggle-OFF draws — same evening as the ON draws, same app, five FRESH rigs (a different IP per draw) — lived **10.32 / 21.81 / 15.39 / 52.19 / 22.87 s** of media: four of five beyond the jiggle-ON maximum (13.2 s), and draw 4 set the new project record — **52.19 s of continuous 30 fps video, 1546/1546 AUs decoded, 13 071/13 071 datagrams authenticated, 1 gap, zero decode errors, BWE 37.8 Mbps** (previous record: run 22's ~41 s — also jiggle-off). The five ON draws (runs 23–26): 10.6/10.4/11.6/13.2/11.3 — five of five inside the band; P(all five ≤ 13.2 s | OFF population) ≈ 0.03 %. The XLI.1 jiggle was TRUNCATING every draw. **F9 flips the default to OFF** (`--session-jiggle=100` restores legacy); XLII's "jiggle stays ON as a controlled constant" is REVERSED on evidence, and the run-16→22 "fidelity ladder" gets its final reinterpretation: survival differences were the jiggle penalty + rig variance, never client fidelity. The activation handshake is EXONERATED (flew 5/5 in the OFF draws; long draws came with it — only the periodic MOUSE_RELATIVE motion is implicated). Run 27 also field-proved **F7** (draws 2–5 each hit the seat cooldown and queued after exactly three escalating backoffs 20+40+80 s, fourth create succeeding — the cooldown is ~2–3 min; no 429 at this cadence) and **F8** (zero `input_jiggle` lines, `feedback.jiggle:0` ×5). No SESSION_LENGTH_TIMER in any draw (2 of the last 8 draws carried one — intermittent). Target T10 on XLV: ALL PASS 79. Stamp **XLVI**. Run 28 = the keeper hunt, ten draws at default OFF.)
+
+> **Rev 37 supersedes rev 1-36 as the current delta.** Canonical state:
+> **`START-HERE.md`** (repo root). Design record: **`docs/RTSP.md` §34**
+> (the A/B table, per-draw detail, the F7 cooldown measurement, the
+> 16-draw survival record, the run-28 read matrix) + **`docs/INPUT.md`
+> §9 corrected verdict** (the jiggle-is-a-depressant addendum).
+
+## Changed files (round XLVI)
+
+| file | change |
+|---|---|
+| `streamer/src/knvstd_main.c` | **F9**: `sess_jiggle_ms` default `SESS_JIGGLE_INTERVAL_MS` → **0** (the flag, validation and media-loop gate are the XLV F8 machinery — unchanged); usage() text records the new default and the verdict; the F8 comment in `run_session` and the `SESS_JIGGLE_INTERVAL_MS` define carry the run-27 evidence block. Build stamp `XLV`→`XLVI`. 6765 → 6780 lines. No wire-format changes. |
+| `docs/RTSP.md` | §34 — the full round-XLVI record. |
+| `docs/INPUT.md` | §9 **corrected verdict** addendum: the jiggle is a depressant, default OFF, the handshake exonerated, G3 caveat (measure survival impact before adopting any periodic input pattern). |
+| `START-HERE.md` | state → XLVI; run-27 row; the XLVI-shipped block; §4 = run 28 (keeper hunt, step-by-step); §11 = the NEW evidence workflow (the `karnynow-logs` git repo); history +XLVI. |
+
+## Integration notes / traps for the next agent
+
+1. **THE JIGGLE DEFAULT IS NOW OFF (F9)** — any procedure, script or
+   doc fragment still assuming "the jiggle flies by default" is
+   STALE (everything written XLII–XLV). `feedback.jiggle:0` + no
+   `input_jiggle` line in stdout is the OFF proof; `--session-jiggle=100`
+   is the legacy ON. Do not "restore" the ON default without a new A/B.
+2. **Input's role, final form**: the activation handshake (version 3,
+   enable-input chain) is REQUIRED for long draws (run 18's 11→30.5 s
+   move) and NOT harmful (flew in all run-27 draws); the periodic
+   synthetic MOUSE MOTION is a depressant (run 27 vs runs 23–26). If
+   G3 (keyboard/wheel/text) ever ships, it must be survival-tested
+   before adoption — no periodic patterns by default.
+3. **The seat cooldown is ~2–3 minutes** (run 27: four of four draws
+   queued on the 4th create after 30 s gap + 140 s of escalating
+   backoff; run 26: one draw needed only 20 s, one exceeded 90 s).
+   F7's 20/40/80/160 s schedule matches the field; the 429 limiter
+   (run 26) fires at ~7 creates in 6 min — a ≥ ~3 min/draw cadence
+   stays under it. Do not shorten the schedule without new evidence.
+4. **Evidence workflow CHANGED (run 27 onward)**: the operator pushes
+   the whole `logs/` directory + stdout capture to
+   **`github.com/karnyjohnny/karnynow-logs`** (cleaned and re-pushed
+   each run — no more .txt renames, no 10-file upload limit). The
+   agent CLONES it, archives a copy under `runNN_logs/` in the
+   workspace IMMEDIATELY (the repo is force-cleaned each round — the
+   workspace archive is the only history), then analyzes. Run 27
+   arrived complete: `run27.log`, `transport.{log,jsonl}`,
+   `diag{,.1,.2}.log` + the zip bundle, `wire_session.log`, T10 pair,
+   `aus_r27/` (1587 AU files).
+5. **Long draws keep the control plane alive**: draw 4's `ctrl_in`
+   reported 53 msgs at `rel_ms:40005` (0x0101 heartbeats flowing at
+   ~t+40 s) — the "ALL control ≤10 s" signature of in-band draws is a
+   property of the EARLY DEATH, not of the session. Presence of
+   0x0101 past 10 s is now a healthy-draw indicator.
+6. Everything from rev 36 stands (F6a exit-code contract, F6b lottery
+   rc semantics, `cm_create_backoff` naming + `"status"` field, knlog
+   APPEND across draws, SESSION_LENGTH_TIMER intermittency, drs
+   profile fields, knrx 218/243, printf ritual — 112 blocks).
+
+## Gate results (sandbox, this round)
+
+| gate | result |
+|---|---|
+| `tools/build_native_tests.sh` | **NATIVE TESTS PASS** (per-suite counts unchanged; paranoid legs incl.) |
+| `tools/cross_check.sh` ×2 arches | **CROSS-CHECK PASS**, zero warnings |
+| ctest native / mbedTLS / schannel | **20/20 ×3** |
+| T10 POSIX dry | **69 checks, 0 failed** |
+| T13 | **ALL PASS 63** |
+| summary-printf validator | **112** blocks, 0 mismatches; summary **74 = 74**; skeleton `json.loads` PASS |
+| `sandbox_session_e2e` | **43/43 PASS** (from the repo root) |
+| F9 field tests | usage() renders the new default text; `--session-jiggle=100` accepted (arg-valid); `--lottery=5` on the TLS-less build → stop after draw 1 rc:3, stamp `"XLVI"` |
+| ASan/UBSan | carried from XLI.1 (no wire/decoder code touched XLIII–XLVI) |
+
+## Target expectations (Win7, run 28)
+
+- **T10**: ALL PASS **79**, knrx **243**, kninput **548**,
+  `input.vectors` **50** — unchanged (XLVI touched no test file).
+- First stdout line of every run: `"round":"XLVI"`.
+- **Run 28 — the keeper hunt** (ten draws, default OFF — NO jiggle
+  flag needed):
+  `knvstd.exe --session --session-token=<tok> --session-app=107057914 --session-seconds=360 --lottery=10 --lottery-gap=30 --session-au-dir=logs\aus_r28 > logs\run28.log`
+- Per draw: NO `input_jiggle` line and `"jiggle":0` in every summary
+  (the OFF proof — now the default); `cm_create_backoff` waits of
+  20–160 s between draws are NORMAL. A draw surviving the full 360 s
+  ⇒ `lottery_draw rc:0`, early stop, process exit **0** — the first
+  KEEPER. Expect up to ~60–80 minutes for ten draws.
+- Optional era re-control (cheap, one extra command after the hunt):
+  `--lottery=2 --session-jiggle=100` — if both draws land in-band
+  while the evening's OFF draws did not, the A/B is re-confirmed
+  against rig-pool drift.
+- Deliver: push `run28.log` + the whole `logs/` directory (+ the T10
+  pair) to the **karnynow-logs** repo, as with run 27.
+
+---
+
 # INTEGRATION NOTES — Round XLV delta, rev 36 (RUN 26 = THE LOTTERY'S FIRST REAL SITTING: 5 draws, 2 real sessions, 3 lost at the CloudMatch door — and the door refusals are now MEASURED: the seat cooldown can exceed **90 s** (draw 2: 30 s gap + F4's 3×20 s retries, still 403) and repeated creates trip an **HTTP 429 rate limiter** (draws 3 and 5; F4 only retried 403, so both died instantly). F6a/F6b passed their live proof — every dead draw exited 1 honestly, the lottery ran all 5, `wire_session.log` (the exit≠0 ring dump) reappeared. The two real draws died in the band again (**13.15 s** and **11.34 s**; 379/379 + 342/342 AUs; draw 1 lossy — gaps 1, fec 1, withheld 16 — decoded perfectly), completing the pattern that reopens the jiggle question as a controlled A/B: **all FIVE jiggle-on draws ever died at 10.4–13.2 s; the only TWO long draws in history (runs 18/22: 30.5/41 s) were activation-WITHOUT-jiggle.** XLII eliminated input as a saviour but never tested it as a depressant. Ships **F7** (cm_create patience: retry 403 + the whole `cm_status_transient` class incl. 429, escalating **20/40/80/160 s**, event renamed `cm_create_backoff` + `"status"` field) and **F8** (`--session-jiggle=MS`, 0–10000, default 100 unchanged, **0 = OFF** — the A/B knob). No SESSION_LENGTH_TIMER in either draw (delivery is intermittent: present 23/25, absent 24/26×2 — the one-hour-budget fact of §32.2 stands). Stamp **XLV**. Run 27 = the jiggle-OFF lottery.)
 
 > **Rev 36 supersedes rev 1-35 as the current delta.** Canonical state:

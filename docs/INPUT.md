@@ -377,3 +377,51 @@ highest-fidelity non-official receiver on the wire. The G3 remainder
 investigation — run 24 changes the app (one that reaches gameplay
 without a login portal; runs 20–23 all parked on Arknights: Endfield's
 Qt launcher) rather than adding input types.
+
+### The live verdict, CORRECTED (run 27, round XLVI) — the jiggle is a DEPRESSANT; default OFF
+
+The XLII verdict above was right about one direction only: input does
+not SAVE a session (run 23 froze with the jiggle flying). Run 27
+tested the other direction as a clean same-evening A/B — five draws
+with `--session-jiggle=0` on five fresh rigs lived **10.3 / 21.8 /
+15.4 / 52.2 / 22.9 s** of media (draw 4 = the project record: 52.19 s,
+1546/1546 AUs, zero gaps) against the five jiggle-ON draws of runs
+23–26 at **10.6 / 10.4 / 11.6 / 13.2 / 11.3 s** — every ON draw inside
+the ~10–13 s band, four of five OFF draws beyond it (P ≈ 0.03 % under
+the OFF population). **The synthetic mouse motion truncates draws.**
+The "stays ON as a controlled constant" decision is REVERSED on
+evidence: `knvstd` now defaults to `--session-jiggle=0` (F9), and
+`100` restores the legacy behaviour for re-verification. Note what is
+NOT indicted: the activation handshake flew in all five OFF draws
+(`input_activation` ×5, `ready:1`) and the long draws came WITH it —
+the three-message enable-input chain is exonerated; only the periodic
+MOUSE_RELATIVE reports are implicated. Mechanism unknown (synthetic-
+input detection, portal cursor/focus churn, or a DRS-profile
+interaction — §34.1); the G3 remainder (keyboard/wheel/text) stays
+deprioritized, and if it ever ships, run 27 says to measure its
+survival impact BEFORE adopting any periodic pattern. Full record:
+`docs/RTSP.md` §34.
+
+### The verdict, DOWNGRADED (runs 28/28b, round XLVII) — suggestive, not proven
+
+Run 28b flew the legacy jiggle (`--session-jiggle=100`, 3533 reports
+over 360 s, zero outbox drops) and produced a **full-length KEEPER**:
+`stop_reason:"time"`, 10 800/10 800 AUs, zero gaps/errors — the
+stream pristine WITH the synthetic motion flying. A depressant that
+permits a perfect six-minute draw is not a depressant in any usable
+sense. The correction of the correction: the run-27 A/B remains
+*suggestive* (the ON draws of 18:00–20:30Z were 5/5 in-band while OFF
+draws grew tails and keepers from 20:41Z on), but the SAME evening
+drifted favourable for both settings — band draws → OFF tails → OFF
+keeper → ON keeper — and the data no longer separates "jiggle
+penalty" from "hot rig pool". Settling it would require interleaved
+ON/OFF draws inside one run; with keepers reachable under both
+settings that experiment is **deprioritised**. What stands: the
+jiggle is NOT necessary (every record was set without it) and NOT
+invariably fatal (28b). **The default stays OFF** — no evidence it
+helps, the 440 B/s bot-signature risk is asymmetric, and the
+activation handshake (the load-bearing part, run 18) is untouched
+either way. The G3 caveat stands unchanged: any future periodic
+input pattern gets survival-tested before adoption, and any such
+test must be same-evening-interleaved or it is unreadable. Full
+record: `docs/RTSP.md` §35.3.

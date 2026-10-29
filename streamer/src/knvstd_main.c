@@ -29,6 +29,8 @@
 #endif
 
 #include "kn/kn_audio.h"
+#include "kn/kn_arx.h"   /* round XLVIII (F11): bundle-audio rx */
+#include "kn/kn_ogg.h"   /* round XLVIII (F11): OggOpus capture file */
 #include "kn/kn_cert.h"
 #include "kn/kn_dtls.h"
 #include "kn/kn_sctp.h"
@@ -100,8 +102,12 @@ static void usage(void)
            "         [--session-play-settle=N] (extra ms after sctp_up before\n"
            "                                    PLAY; default 250)\n"
            "         [--session-expect-frames=N] [--session-au-dir=DIR]\n"
+           "         [--session-audio-out=F.opus] (capture the rig's\n"
+           "          bundle audio to an OggOpus file; needs the DTLS-SRTP\n"
+           "          key exporter — see the audio_arm event)\n"
            "         [--session-jiggle=MS] (mouse-jiggle period in ms;\n"
-           "                                    0 = OFF, default 100)\n"
+           "          default 0 = OFF — run 27 proved the jiggle shortens\n"
+           "          draws; 100 restores the legacy XLI.1 behaviour)\n"
            "         [--lottery=N] [--lottery-gap=SEC]  (re-draw the WHOLE\n"
            "          bring-up to N times after a terminal draw, SEC pause\n"
            "          between draws, default 20; round XLIII media lottery)\n"
@@ -1667,7 +1673,9 @@ static int64_t sess_bw_now_ns(void *ud)
  * 10 Hz keeps us inside the 300 ms PR-SCTP lifetime of sid 6 with room
  * to spare and matches the reference's "one motion report per frame"
  * feel at 30 fps without claiming a fidelity we cannot prove. */
-#define SESS_JIGGLE_INTERVAL_MS  100u
+#define SESS_JIGGLE_INTERVAL_MS  100u  /* legacy ON value (XLI.1); the
+                                          default is OFF since XLVI/F9 —
+                                          run 27 convicted the jiggle */
 #define SESS_FRAME_TIME_US       16666u
 /* Round XLIII (F4) / XLV (F7): cm_create backoff. Run 24's probe
  * showed the bare 403 seat cooldown; run 26's live lottery then
@@ -2885,6 +2893,15 @@ typedef struct {
      * bundle — rtcAudioOnNativeBundle:1; counted separately now,
      * consumed at the audio stage) + the feedback-outbox send counter */
     unsigned bundle_rtp_in, bundle_rtcp_in, fb_sent;
+    /* round XLVIII (F11): bundle-audio capture mirror. The kn_arx
+     * counters + Ogg totals live here (not only in the pump thread's
+     * live state) so the summary reads them through the snapshot
+     * handshake — never touching pump.arx/pump.ogg while the worker
+     * lives (the pump.st discipline above). */
+    unsigned audio_armed, audio_srtp_derived, audio_prof, audio_file_on;
+    kn_arx_stats audio_st;
+    unsigned long long audio_ogg_pages, audio_ogg_bytes,
+                       audio_ogg_dropped, audio_ogg_werr;
     /* round XXXVII: the control/input plane (docs/INPUT.md). Run 17
      * disproved the round-XXXVI hypothesis — the whole feedback set flew
      * for 242 s (rr 242 / qos 4701 / ka 81 / ack 331 / dropped 0) and
@@ -3014,6 +3031,18 @@ typedef struct {
     volatile unsigned sctl_termination;
     unsigned sctl_term_wire, sctl_term_reason, sctl_term_extended;
     int      sctl_term_resumable;
+    /* round XLVIII (F11): bundle-audio extraction state. Armed at the
+     * dtls_ready event when the RFC 5764 §4.2 exporter succeeds; every
+     * RTP datagram on the bundle then goes through kn_arx (SRTP
+     * unprotect + RED + TOC) and the emitted Opus payloads are muxed
+     * into an OggOpus file when --session-audio-out was given. */
+    kn_arx   arx;
+    kn_ogg_mux ogg;
+    uint8_t  ogg_page[KN_OGG_PAGE_BUF];   /* muxer scratch */
+    FILE    *audio_fp;
+    const char *audio_path;
+    int      audio_armed, audio_srtp_derived, audio_file_on;
+    unsigned audio_prof;
     int      input_version;          /* -1 until the rig's 0x020e lands */
     unsigned activation_sent;        /* latch: the chain flies once */
     unsigned activation_attempts;
@@ -3036,6 +3065,28 @@ typedef struct {
     pthread_t th;
 #endif
 } sess_pump;
+
+/* round XLVIII (F11): the OggOpus serial for --session-audio-out
+ * ("KNOG" little-endian; matches the kn_ogg default and the KAT
+ * vectors) + the sink/emit glue. The emit callback runs INSIDE the
+ * pump thread (kn_arx_process -> muxer -> fwrite); it must stay
+ * cheap and never block on anything but the file write. */
+#define SESS_OGG_SERIAL 0x4B4E4F47u
+
+static int sess_audio_file_write(void *ctx, const uint8_t *data, size_t len)
+{
+    sess_pump *p = (sess_pump *)ctx;
+    if (!p->audio_fp) return -1;
+    return fwrite(data, 1, len, p->audio_fp) == len ? 0 : -1;
+}
+
+static void sess_audio_emit(void *ctx, const uint8_t *payload, size_t len,
+                            uint32_t samples48)
+{
+    sess_pump *p = (sess_pump *)ctx;
+    if (p->audio_file_on)
+        (void)kn_ogg_mux_packet(&p->ogg, payload, len, samples48);
+}
 
 /* bounded string fill — snprintf("%s") into a parameter-sized dst is
  * what -Wformat-truncation cannot prove (the kn_cm.c precedent) */
@@ -3988,6 +4039,71 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
                            ds.records_out, ds.verify_result,
                            kn_dtls_srtp_profile(p->dtls));
                     fflush(stdout);
+                    /* round XLVIII (F11): arm the bundle-audio path.
+                     * The exporter succeeds only when the handshake is
+                     * ready AND use_srtp negotiated 0x0001 — otherwise
+                     * the audio stage honestly stays disarmed and the
+                     * summary says so (video is untouched either way).
+                     * The 60 key-material bytes are scrubbed from the
+                     * stack immediately and never logged (§7). */
+                    {
+                        uint8_t km[60];
+                        p->audio_prof = kn_dtls_srtp_profile(p->dtls);
+                        p->st.audio_prof = p->audio_prof;
+                        if (kn_dtls_srtp_export(p->dtls, km) == 0) {
+                            p->audio_srtp_derived = 1;
+                            kn_arx_init(&p->arx, sess_audio_emit, p);
+                            if (kn_arx_set_srtp(&p->arx, km + 16,
+                                                km + 46) == 0)
+                                p->audio_armed = 1;
+                        }
+                        memset(km, 0, sizeof km);
+                        p->st.audio_srtp_derived =
+                            (unsigned)p->audio_srtp_derived;
+                        p->st.audio_armed = (unsigned)p->audio_armed;
+                        if (p->audio_armed && p->audio_path &&
+                            p->audio_path[0]) {
+                            p->audio_fp = fopen(p->audio_path, "wb");
+                            if (p->audio_fp &&
+                                kn_ogg_mux_init(&p->ogg, p->ogg_page,
+                                                sizeof p->ogg_page,
+                                                SESS_OGG_SERIAL,
+                                                KN_ARX_CHANNELS,
+                                                sess_audio_file_write,
+                                                p) == 0 &&
+                                kn_ogg_mux_begin(&p->ogg) == 0)
+                                p->audio_file_on = 1;
+                        }
+                        p->st.audio_file_on = (unsigned)p->audio_file_on;
+                        {
+                            kn_lctx b;
+                            kn_lctx_init(&b, KN_CH_MEDIA, KN_INFO,
+                                         "audio_arm");
+                            kn_lctx_i64(&b, "srtp_derived",
+                                        p->audio_srtp_derived);
+                            kn_lctx_i64(&b, "armed", p->audio_armed);
+                            kn_lctx_i64(&b, "profile",
+                                        (long long)p->audio_prof);
+                            kn_lctx_i64(&b, "pt", KN_ARX_PT_OPUS);
+                            kn_lctx_i64(&b, "red_pt", KN_ARX_PT_RED);
+                            kn_lctx_i64(&b, "file", p->audio_file_on);
+                            kn_log_emit(&b);
+                        }
+                        printf("{\"mode\":\"session\","
+                               "\"event\":\"audio_arm\","
+                               "\"srtp_derived\":%d,\"armed\":%d,"
+                               "\"profile\":%u,\"pt\":%u,"
+                               "\"red_pt\":%u,\"channels\":%u,"
+                               "\"clock_hz\":%u,\"file\":%d}\n",
+                               p->audio_srtp_derived, p->audio_armed,
+                               p->audio_prof,
+                               (unsigned)KN_ARX_PT_OPUS,
+                               (unsigned)KN_ARX_PT_RED,
+                               (unsigned)KN_ARX_CHANNELS,
+                               (unsigned)KN_ARX_CLOCK_HZ,
+                               p->audio_file_on);
+                        fflush(stdout);
+                    }
                 } else if (drc < 0) {
                     kn_dtls_stats ds;
                     p->st.dtls_fail_rc = (unsigned)(-drc);
@@ -4075,10 +4191,27 @@ static void sess_ice_pump_run(sess_pump *p, uint32_t budget_ms)
                  * audio_streams, :8620-8627; our audio stage comes later)
                  * — classified, not "invalid" (run 16: invalid_in:175). */
                 if (rlen >= 12 && (p->rx[0] >> 6) == 2) {
-                    if (p->rx[1] >= 192 && p->rx[1] <= 223)
+                    if (p->rx[1] >= 192 && p->rx[1] <= 223) {
                         p->st.bundle_rtcp_in++;
-                    else
+                    } else {
                         p->st.bundle_rtp_in++;
+                        /* round XLVIII (F11): the audio stage consumes
+                         * every bundle RTP datagram — kn_arx classifies
+                         * (PT 111 Opus / 63 RED, anything else is
+                         * pt_filtered) and only emits audio payloads.
+                         * The mirror sync keeps ice_st honest for both
+                         * the snapshot and the stop paths. */
+                        if (p->audio_armed) {
+                            (void)kn_arx_process(&p->arx, p->rx, rlen,
+                                                 kn_sock_now_ms());
+                            p->st.audio_st = p->arx.st;
+                            p->st.audio_ogg_pages = p->ogg.pages_out;
+                            p->st.audio_ogg_bytes = p->ogg.bytes_out;
+                            p->st.audio_ogg_dropped =
+                                p->ogg.dropped_packets;
+                            p->st.audio_ogg_werr = p->ogg.write_errors;
+                        }
+                    }
                     continue;
                 }
                 p->st.invalid_in++;
@@ -4444,7 +4577,8 @@ static int run_session(const char *token, const char *device_id,
                        long queue_timeout, int keep_on_abort,
                        long expect_frames, long play_wait_ms,
                        long play_settle_ms, long jiggle_ms,
-                       const char *au_dir, const char *log_dir)
+                       const char *au_dir, const char *audio_out,
+                       const char *log_dir)
 {
     static uint8_t cm_rxb[64 * 1024];
     static char cm_json[SESS_JSON_CAP];
@@ -4543,7 +4677,15 @@ static int run_session(const char *token, const char *device_id,
      * run 26 completed the picture (all FIVE jiggle-on draws died in
      * the ~10-13 s band; the only two long draws ever, runs 18/22 at
      * 30.5/41 s, were activation-WITHOUT-jiggle), so the jiggle is now
-     * the variable under test, not a constant. 0 disables it. */
+     * the variable under test, not a constant. 0 disables it.
+     * Round XLVI (F9) — VERDICT: run 27 (jiggle OFF, 5 draws, 5 fresh
+     * rigs, same evening as the ON draws) lived 10.3/21.8/15.4/52.2/
+     * 22.9 s — 4 of 5 beyond the ON maximum of 13.2 s and a new
+     * project record (52.19 s, 1546/1546 AUs, zero gaps). The jiggle
+     * is a DEPRESSANT; the default flipped to OFF (main). The
+     * activation handshake is untouched — run 27 flew it 5/5 and the
+     * long draws came WITH it, so the handshake is not the culprit;
+     * the synthetic MOUSE MOTION is. */
     const uint32_t jiggle_interval = (uint32_t)(jiggle_ms > 0
                                                     ? jiggle_ms : 0);
     uint16_t ws_port = 0;
@@ -5387,6 +5529,8 @@ static int run_session(const char *token, const char *device_id,
         pump.sctl_term_resumable = -1;
         pump.st.term_resumable = -1;
         pump.origin_us = kn_sock_now_us();
+        pump.audio_path = audio_out;   /* round XLVIII (F11); NULL = no
+                                          file, counters still run */
         pump.next_ctrl_log_ms = kn_sock_now_ms() + 10000u;
         kn_input_cursor_init(&pump.cursor);
         kn_input_hist_init(&pump.ctrl_hist);
@@ -6356,7 +6500,23 @@ static int run_session(const char *token, const char *device_id,
                    "\"au_clock\":{\"drift_ms\":%lld,\"drift_min_ms\":%lld,"
                    "\"drift_max_ms\":%lld,\"ts_backwards\":%llu,"
                    "\"wall_ms\":%llu,\"rtp_ms\":%llu},"
-                   "\"recovery\":{\"attempts\":%u,\"exhausted\":%d}}}\n",
+                   "\"recovery\":{\"attempts\":%u,\"exhausted\":%d},"
+                   "\"audio\":{\"armed\":%d,\"srtp_derived\":%d,"
+                   "\"profile\":%u,\"pt\":%u,\"red_pt\":%u,"
+                   "\"channels\":%u,\"clock_hz\":%u,"
+                   "\"bundle_rtp_in\":%u,\"bundle_rtcp_in\":%u,"
+                   "\"packets\":%llu,\"payload_bytes\":%llu,"
+                   "\"red_packets\":%llu,\"red_blocks\":%llu,"
+                   "\"red_invalid\":%llu,\"pt_filtered\":%llu,"
+                   "\"malformed\":%llu,\"toc_invalid\":%llu,"
+                   "\"padded\":%llu,\"seq_loss\":%llu,"
+                   "\"seq_reorder\":%llu,\"seq_dup\":%llu,"
+                   "\"ssrc_changes\":%llu,\"srtp_fail\":%llu,"
+                   "\"replay_reject\":%llu,\"srtp_nokey\":%llu,"
+                   "\"first_ms\":%llu,\"last_ms\":%llu,"
+                   "\"ogg\":{\"pages\":%llu,\"bytes\":%llu,"
+                   "\"dropped_packets\":%llu,\"write_errors\":%llu},"
+                   "\"file\":%d}}}\n",
                    stop_reason, sess.session_id,
                    datagrams % 10000000000ull,
                    (unsigned long long)(v.authenticated_packets %
@@ -6424,7 +6584,42 @@ static int run_session(const char *token, const char *device_id,
                    (unsigned long long)(c.have_au_first
                        ? ((uint32_t)(c.au_last_ts - c.au_first_ts) / 90u)
                          % 1000000000ull : 0ull),
-                   c.recovery_attempts, c.recovery_exhausted);
+                   c.recovery_attempts, c.recovery_exhausted,
+                   /* round XLVIII (F11): the bundle-audio block. The
+                    * mirror in ice_st is snapshot-safe; the constants
+                    * match the hardcoded audioTrack (nvst_rtsp.rs:1309:
+                    * PT 111 Opus 48 kHz stereo + PT 63 RED). "file":1
+                    * means --session-audio-out opened successfully. */
+                   ice_st.audio_armed ? 1 : 0,
+                   ice_st.audio_srtp_derived ? 1 : 0,
+                   ice_st.audio_prof,
+                   (unsigned)KN_ARX_PT_OPUS, (unsigned)KN_ARX_PT_RED,
+                   (unsigned)KN_ARX_CHANNELS, (unsigned)KN_ARX_CLOCK_HZ,
+                   ice_st.bundle_rtp_in % 1000000000u,
+                   ice_st.bundle_rtcp_in % 1000000000u,
+                   ice_st.audio_st.packets % 10000000000ull,
+                   ice_st.audio_st.payload_bytes % 1000000000000ull,
+                   ice_st.audio_st.red_packets % 1000000000ull,
+                   ice_st.audio_st.red_blocks % 1000000000ull,
+                   ice_st.audio_st.red_invalid % 1000000000ull,
+                   ice_st.audio_st.pt_filtered % 1000000000ull,
+                   ice_st.audio_st.malformed % 1000000000ull,
+                   ice_st.audio_st.toc_invalid % 1000000000ull,
+                   ice_st.audio_st.padded % 1000000000ull,
+                   ice_st.audio_st.seq_loss % 1000000000ull,
+                   ice_st.audio_st.seq_reorder % 1000000000ull,
+                   ice_st.audio_st.seq_dup % 1000000000ull,
+                   ice_st.audio_st.ssrc_changes % 1000000000ull,
+                   ice_st.audio_st.srtp_fail % 1000000000ull,
+                   ice_st.audio_st.replay_reject % 1000000000ull,
+                   ice_st.audio_st.srtp_nokey % 1000000000ull,
+                   ice_st.audio_st.first_ms % 1000000000ull,
+                   ice_st.audio_st.last_ms % 1000000000ull,
+                   ice_st.audio_ogg_pages % 1000000000ull,
+                   ice_st.audio_ogg_bytes % 1000000000000ull,
+                   ice_st.audio_ogg_dropped % 1000000000ull,
+                   ice_st.audio_ogg_werr % 1000000000ull,
+                   ice_st.audio_file_on ? 1 : 0);
             fflush(stdout);
         }
         {
@@ -6460,15 +6655,43 @@ static int run_session(const char *token, const char *device_id,
             kn_ring_free(&ring);
         }
         if (exit_code != 0) {
-            kn_log_on_failure("session.media",
-                              datagrams == 0 ? "E_SESSION_NO_MEDIA"
-                                             : "E_SESSION_NO_FRAMES",
-                              datagrams == 0
-                                  ? "PLAY succeeded but no media datagrams "
-                                    "arrived (firewall? peer routing? R34)"
-                                  : "media arrived but no access unit "
-                                    "completed (SRTP material? vps? drops "
-                                    "map tells)",
+            /* Round XLVII (F10): honest failure labels. Before D8 every
+             * failed session was "no media" or "no frames"; run 28's
+             * draws 1-2 logged E_SESSION_NO_FRAMES ("no access unit
+             * completed") right after decoding 998 and 6049 access
+             * units perfectly — because F6a now fails
+             * recovery_exhausted draws correctly, the pre-D8 label
+             * actively lies in the MOST COMMON failure class. The code
+             * and reason now follow the stop_reason. */
+            const char *fcode, *fwhy;
+            if (datagrams == 0) {
+                fcode = "E_SESSION_NO_MEDIA";
+                fwhy  = "PLAY succeeded but no media datagrams arrived "
+                        "(firewall? peer routing? R34)";
+            } else if (strcmp(stop_reason, "recovery_exhausted") == 0) {
+                fcode = "E_SESSION_RECOVERY_EXHAUSTED";
+                fwhy  = "the server froze the media mid-session and the "
+                        "bounded D8 recovery (keyframe + retries) did "
+                        "not revive it — a dead rig draw; the recovery "
+                        "block in the stdout summary and the transport "
+                        "channel date the freeze";
+            } else if (strcmp(stop_reason, "server_termination") == 0) {
+                fcode = "E_SESSION_SERVER_TERMINATION";
+                fwhy  = "the server sent the 0x109 termination latch";
+            } else if (strcmp(stop_reason, "socket_error") == 0) {
+                fcode = "E_SESSION_SOCKET_ERROR";
+                fwhy  = "the media socket failed (cause codes in the "
+                        "sctp_down / rx lines)";
+            } else if (c.frames_out == 0 && c.aus == 0) {
+                fcode = "E_SESSION_NO_FRAMES";
+                fwhy  = "media arrived but no access unit completed "
+                        "(SRTP material? vps? drops map tells)";
+            } else {
+                fcode = "E_SESSION_FAILED_VERDICT";
+                fwhy  = "the session ended before its contract was met "
+                        "(stop_reason in the stdout summary)";
+            }
+            kn_log_on_failure("session.media", fcode, fwhy,
                               "the handoff line + drops map + wire mirror "
                               "in the log dir are the R7/R32 evidence");
         }
@@ -6499,6 +6722,50 @@ teardown:
     /* best-effort TEARDOWN (the reference's Drop path: 1 s, errors
      * ignored, sequence mismatches skipped) then close everything */
     sess_ctrl_ping_stop(&ctrl_ping);   /* R3-D: join before TEARDOWN */
+    /* round XLVIII (F11): close the bundle-audio capture — flush the
+     * final Ogg page (EOS), close the file, print the totals (they
+     * also land in the summary "audio" block). Skipped while the pump
+     * thread persists (keep mode — the file closes with the process;
+     * closing it under a live writer would race). */
+    if (pump.audio_file_on && !pump_persist) {
+        (void)kn_ogg_mux_finish(&pump.ogg);
+        if (pump.audio_fp) { fclose(pump.audio_fp); pump.audio_fp = NULL; }
+        pump.audio_file_on = 0;   /* ice_st.audio_file_on STAYS 1 — the
+                                     summary reports "a file was written" */
+        ice_st.audio_ogg_pages = pump.ogg.pages_out;
+        ice_st.audio_ogg_bytes = pump.ogg.bytes_out;
+        ice_st.audio_ogg_dropped = pump.ogg.dropped_packets;
+        ice_st.audio_ogg_werr = pump.ogg.write_errors;
+        {
+            kn_lctx b;
+            kn_lctx_init(&b, KN_CH_MEDIA, KN_INFO, "audio_close");
+            kn_lctx_i64(&b, "pages", (long long)pump.ogg.pages_out);
+            kn_lctx_i64(&b, "bytes", (long long)pump.ogg.bytes_out);
+            kn_lctx_i64(&b, "packets",
+                        (long long)pump.arx.st.packets);
+            kn_lctx_i64(&b, "payload_bytes",
+                        (long long)pump.arx.st.payload_bytes);
+            kn_lctx_i64(&b, "srtp_fail",
+                        (long long)pump.arx.st.srtp_fail);
+            kn_lctx_i64(&b, "write_errors",
+                        (long long)pump.ogg.write_errors);
+            kn_log_emit(&b);
+        }
+        printf("{\"mode\":\"session\",\"event\":\"audio_close\","
+               "\"pages\":%llu,\"bytes\":%llu,\"packets\":%llu,"
+               "\"payload_bytes\":%llu,\"red_packets\":%llu,"
+               "\"srtp_fail\":%llu,\"seq_loss\":%llu,"
+               "\"write_errors\":%llu}\n",
+               pump.ogg.pages_out % 1000000000ull,
+               pump.ogg.bytes_out % 1000000000000ull,
+               pump.arx.st.packets % 10000000000ull,
+               pump.arx.st.payload_bytes % 1000000000000ull,
+               pump.arx.st.red_packets % 1000000000ull,
+               pump.arx.st.srtp_fail % 1000000000ull,
+               pump.arx.st.seq_loss % 1000000000ull,
+               pump.ogg.write_errors % 1000000000ull);
+        fflush(stdout);
+    }
     {
         kn_rtsp_header th[4];
         kn_rtsp_response tresp;
@@ -6553,14 +6820,19 @@ int main(int argc, char **argv)
     const char *sess_token = NULL, *sess_device = "karnynow-win7-e5500";
     const char *sess_title = "KarnyNow session", *sess_cm_host = NULL;
     const char *sess_au_dir = NULL;
+    const char *sess_audio_out = NULL;   /* round XLVIII (F11) */
     long long sess_app = 0;
     /* queue default 600 s (round XXIII): the R7 runs showed real queues
      * 160+ deep; 180 s risked aborting a legitimate wait (the abort now
      * also cancels the session, but a seat is a seat) */
     long sess_seconds = 60, sess_queue_timeout = 600, sess_expect = 0;
-    long sess_jiggle_ms = SESS_JIGGLE_INTERVAL_MS;  /* round XLV (F8):
-        --session-jiggle=MS; 0 = OFF. The A/B knob for the run-27
-        jiggle-off lottery (see run_session's F8 comment). */
+    long sess_jiggle_ms = 0;             /* round XLVI (F9): default
+        OFF. Run 27's jiggle-OFF A/B (same evening, same app, five
+        fresh rigs) CONVICTED the synthetic mouse jiggle as a
+        survival depressant: OFF draws lived 10.3/21.8/15.4/52.2/
+        22.9 s (4 of 5 beyond the ON maximum, one a project record),
+        ON draws 10.6/10.4/11.6/13.2/11.3 s (5 of 5 inside the band).
+        --session-jiggle=100 restores the XLI.1 legacy behaviour. */
     long lottery_n = 1, lottery_gap_s = 20;  /* round XLIII (F5): the
         media-survival lottery driver — runs 16-24 drew 1.2-41 s of media
         from the SAME app with identical client behaviour, so one user
@@ -6641,6 +6913,8 @@ int main(int argc, char **argv)
             sess_expect = strtol(a + 24, NULL, 10);
         else if (strncmp(a, "--session-au-dir=", 17) == 0)
             sess_au_dir = a + 17;
+        else if (strncmp(a, "--session-audio-out=", 20) == 0)
+            sess_audio_out = a + 20;   /* round XLVIII (F11) */
         else if (strncmp(a, "--session-jiggle=", 17) == 0)
             sess_jiggle_ms = strtol(a + 17, NULL, 10);
         else if (strncmp(a, "--lottery=", 10) == 0)
@@ -6673,7 +6947,7 @@ int main(int argc, char **argv)
      * that contract (the native gate's json.load validators). --version
      * already prints the full build.json for the deep identity. */
     if (!list && !version && !(selftest && selftest[0]) && !diagnostics) {
-        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLV\"}\n",
+        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"XLVIII\"}\n",
                __DATE__, __TIME__);
         fflush(stdout);
     }
@@ -6711,7 +6985,8 @@ int main(int argc, char **argv)
                                    : KN_CM_DEFAULT_BASE_HOST,
                                sess_seconds, sess_queue_timeout, sess_keep,
                                sess_expect, sess_play_wait, sess_play_settle,
-                               sess_jiggle_ms, sess_au_dir, log_dir);
+                               sess_jiggle_ms, sess_au_dir,
+                               sess_audio_out, log_dir);
         /* Round XLIII (F5): lottery driver. run_session() is re-callable
          * by construction — every stateful static is re-initialised at
          * entry (memset &c, memset &pump + sess_fb_init) and destroyed
@@ -6744,7 +7019,7 @@ int main(int argc, char **argv)
                                   sess_queue_timeout, sess_keep,
                                   sess_expect, sess_play_wait,
                                   sess_play_settle, sess_jiggle_ms,
-                                  sess_au_dir, log_dir);
+                                  sess_au_dir, sess_audio_out, log_dir);
                 done = draw;
                 printf("{\"mode\":\"session\",\"event\":\"lottery_draw\","
                        "\"draw\":%ld,\"of\":%ld,\"rc\":%d}\n",

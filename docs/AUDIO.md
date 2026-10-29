@@ -1,5 +1,11 @@
 # WASAPI synthetic-PCM render (`kn_audio`) — implementation notes
 
+> **Round XLVIII naming note:** this module is PLAYBACK (render). The
+> rig's audio RECEIVE path — SRTP extraction from the bundle socket
+> into an OggOpus file (`kn_arx` + `kn_ogg`, F11) — is documented in
+> **`docs/BUNDLE-AUDIO.md`**. The stage-2 TODO below ("Opus decode →
+> the refill loop") now starts from a captured `.opus` file.
+
 Status: **IMPLEMENTED, sandbox-verified** (neutral half host-tested:
 `test_knaudio` 22 checks; cross `-Werror` x64/i686 clean; ctest 10/10;
 knvstd clean under `-Wformat-truncation=2` at -O0/-O2/-O3; PE imports

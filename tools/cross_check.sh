@@ -72,6 +72,11 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     # round XXXVIII (D-t10): the bandwidth estimator + server-control
     # decoder are pure computation — they must survive the target flags
     $CC $CFLAGS -c streamer/src/kn_bw.c    -o build/cross/kn_bw_$arch.o
+    # round XLVIII (F11): the bundle-audio extraction path (SRTP/RED/TOC)
+    # and the OggOpus muxer are pure computation — they must survive the
+    # target flags (kn_dtls REAL body above already covers the exporter)
+    $CC $CFLAGS -c streamer/src/kn_ogg.c   -o build/cross/kn_ogg_$arch.o
+    $CC $CFLAGS -c streamer/src/kn_arx.c   -o build/cross/kn_arx_$arch.o
     # round XXXIII (R3-C): the kn_sctp REAL body + the test's real section
     # must survive the exact target flags whenever the usrsctp tree exists
     if [ -d third_party/usrsctp/usrsctplib ]; then
@@ -177,6 +182,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_cert.c streamer/src/kn_dtls.c \
         streamer/src/kn_sctp.c streamer/src/kn_input.c \
         streamer/src/kn_bw.c \
+        streamer/src/kn_ogg.c streamer/src/kn_arx.c \
         third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
     $CC $CFLAGS $KCORE streamer/tests/test_kndiag.c \
         $LDFLAGS -o build/cross/test_kndiag_$arch.exe -lwinmm -ld3d9 -lole32 \

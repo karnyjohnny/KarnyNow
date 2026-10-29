@@ -64,9 +64,11 @@ static void test_registry(void)
     int n = kn_selftest_count();
     int i, saw_fec = 0, saw_srtp = 0, saw_clock = 0, saw_console = 0;
     /* round XXXVII added input.vectors (the control/input-plane KAT set,
-     * docs/INPUT.md) to the portable phase-A battery. */
-    CHECK(n == 15, "registry holds the 12 §7.9 names + rx.vectors + "
-                   "sock.loopback + input.vectors");
+     * docs/INPUT.md); round XLVIII added audio.vectors (the bundle-audio
+     * kn_ogg + kn_arx KAT set, docs/AUDIO.md) to the portable phase-A
+     * battery. */
+    CHECK(n == 16, "registry holds the 12 §7.9 names + rx.vectors + "
+                   "sock.loopback + input.vectors + audio.vectors");
     for (i = 0; i < n; ++i) {
         const char *nm = kn_selftest_name(i);
         CHECK(nm && nm[0], "registry name non-empty");
@@ -217,13 +219,13 @@ static void test_unknown_and_args(void)
 
 static void test_run_all_and_render(void)
 {
-    static kn_st_result results[16];
+    static kn_st_result results[24];
     char doc[16384];
     size_t n_doc;
-    int n = kn_selftest_run_all(results, 16);
+    int n = kn_selftest_run_all(results, 24);
     int i, ok_count = 0, skipped_count = 0;
 
-    CHECK(n == 15, "run_all executes the whole registry");
+    CHECK(n == 16, "run_all executes the whole registry");
     for (i = 0; i < n; ++i) {
         if (results[i].status == KN_ST_OK) ok_count++;
         if (results[i].status == KN_ST_SKIPPED) skipped_count++;
@@ -274,11 +276,11 @@ static void test_run_all_and_render(void)
                   || results[i].failures > 0,
                   "decode did not fail silently");
 #else
-    CHECK(ok_count == 6, "offline vector tests + sock.loopback OK (host)");
+    CHECK(ok_count == 7, "offline vector tests + sock.loopback OK (host)");
     CHECK(skipped_count == 9, "the rest honestly report skipped (host)");
     /* host skips: clock, console, d3d x2, net x4 (+decode w/o ffmpeg);
-     * host oks: fec, srtp, input.vectors, gs.parse, rx.vectors,
-     *           sock.loopback */
+     * host oks: fec, srtp, input.vectors, audio.vectors, gs.parse,
+     *           rx.vectors, sock.loopback */
 #endif
 
     n_doc = kn_selftest_render_json(results, n, doc, sizeof doc);
