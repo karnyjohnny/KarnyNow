@@ -1769,3 +1769,60 @@ cross `-Werror` ×2 **PASS** · ctest **27/27 ×2** · T10 dry **ALL PASS
 **113 == 113 vs run-36 live stdout** · ASan/UBSan clean (knaudio) ·
 knvstd clean `-Wformat-truncation=2` at -O0/-O2/-O3. Target: T10
 **89**, stamp **N**, ctest **27 ×2**.
+
+---
+
+## 18. Round-N slice 4a addendum (2026-10-30): run 39 read — a NEW death signature (congestion, not the freeze family) + F25a/F26a evidence fixes
+
+**Run 39 flew twice (lottery, stamp N build, T10 re-verified 89/89 by
+the operator first) and died both draws the same NEW way: bursty loss,
+a ~90 ms path queue (`queue_delay_us` 88/95 ms), a smooth server
+bitrate decay (415→83 d/s while frames held ~30/s = the operator's
+"stutters, then quality worsens"), draw 2's 3-second withheld stall
+briefly rescued by our own 93-IDR barrage, then terminal collapse. Two
+different rigs from two different /24 blocks, four minutes apart. The
+client exonerated itself a fourth time: `recv_timeouts = ticks −
+datagrams − 1` exact, loop 204–205 Hz, q_depth 0, decode 709/709 +
+605/605 with `decode_fail:0`, presenter fails:0, audio `seq_loss`
+54/83 = whole-path loss.** Full second-by-second read + the F25/F26a
+first-live verdicts: **RTSP.md §44**. F25a caught: `prerolls:0` was a
+`kn_audio_get_stats` copy omission (the waterline really worked:
+`starved:2`/`4` = EPISODES, vs runs 36–38's ungated ~800); F26a caught:
+`attempts:3` for 2 tries = for-loop exit value, now clamped. Draw 2's
+seat orphaned despite the retry (reclaiming server refused the
+connection twice) — browser release remains the fallback.
+
+**The one open question: local (evening Wi-Fi) vs remote (pool
+Friday-peak egress). Two instruments:**
+
+1. **Zero-code A/B — next operator action.** Re-fly the SAME lottery
+   command on **phone tether** (5 GHz): congestion signature reproduces
+   → pool, remedy = quiet hours; clean long draw → the Wi-Fi evening
+   environment. And/or re-fly on 2.4 GHz at a QUIET hour (keeper
+   history: 900 s ~midday, 744 s ~17:40, 815 s; deaths cluster at the
+   evening peak). Command: §17's run-39 block, unchanged.
+2. **F27 (next sandbox slice): the in-session STUN probe** — 5 s
+   cadence authenticated binding requests to the video peer over the
+   media socket (the pre-PLAY hole-punch proved the rig answers),
+   demuxed by first byte (0x00/0x01 vs RTP 0x80+) before kn_rx,
+   tid-matched RTT on new `stun_probe` transport lines
+   (`rtt_last/min/max_us`, `unanswered` streaks). Local Wi-Fi loss
+   starves probe and media identically; pool queueing inflates probe
+   RTT with `queue_delay_us`; sick-rig streamers leave the probe clean.
+   Design + hook point: **RTSP §44.3, item 2**. Event lines only —
+   the skeleton stays 113.
+
+**Files changed in slice 4a (operator syncs these):**
+`streamer/src/kn_audio.c` (F25a: prerolls copy in get_stats),
+`streamer/src/knvstd_main.c` (F26a: cm_release attempts clamp),
+`docs/RTSP.md` (§44), `docs/INTEGRATION.md` (rev 45 slice 4a),
+`docs/AUDIO.md` (F25a note), `START-HERE.md` (this §18).
+
+**Gates after F25a/F26a (all re-run green):** native PASS zero
+warnings (knaudio 74, knopus 105 bit-exact) · cross `-Werror` ×2 ·
+ctest **27/27 ×2** · T10 dry **79** · T13 **63** · e2e **48/48** ·
+skeleton **113 == 113 vs run-39's LIVE stdout** · ASan/UBSan clean ·
+knvstd `-Wformat-truncation=2` clean -O0/-O2/-O3. Target: T10 **89**,
+stamp **N** (unchanged binaries are fine — but a recompile stamps the
+F25a/F26a fixes; rebuild on the rig before run 40 so `prerolls` and
+`attempts` tell the truth), ctest **27 ×2**.

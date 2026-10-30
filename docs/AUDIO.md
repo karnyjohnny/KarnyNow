@@ -238,3 +238,12 @@ end-to-end audio latency — well below lip-drift perception and tiny
 against GFN's own pipeline. The plan() decision lives in the neutral
 half; the engine branch stays three lines (the kn_freeze discipline:
 pure decisions host-tested, Win32 wiring minimal).
+
+
+## F25a (2026-10-30): the get_stats copy fix (slice 4a)
+
+Run 39's first live F25 flight printed `prerolls:0` while the waterline
+demonstrably worked (`starved:2`/`4` = episodes — ~800× better than the
+ungated runs 36–38): `kn_audio_get_stats` copied every `audio_stats`
+field except the new one. Fixed in `kn_audio.c`; evidence-only, no
+behaviour change. Read: RTSP §44.4; integration: rev 45 slice 4a.

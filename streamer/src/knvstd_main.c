@@ -8701,6 +8701,12 @@ teardown:
                     break;                   /* got an answer (or a parse
                                               * /protocol error): no retry */
             }
+            if (attempts > 2)
+                attempts = 2;                /* F26a: the for-exit value is
+                                              * 3 after two failed tries —
+                                              * report the tries actually
+                                              * made (run 39 draw 2 showed
+                                              * attempts:3 for 2 DELETEs) */
             gone = (c_rc == KN_HTTP_OK &&
                     ((c_status >= 200 && c_status < 300) || c_status == 404));
             printf("{\"mode\":\"session\",\"event\":\"cm_release\",\"rc\":%d,"

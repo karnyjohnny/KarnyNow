@@ -1,5 +1,54 @@
 # INTEGRATION NOTES — Round N slice 4, rev 45 (**RUNS 36/37/38 READ: F21'S FIRST FLIGHT IS TECHNICALLY FLAWLESS — `audio_play_begin ok:1 fmt:"44100Hz 2ch float32" swr:1 opus:"libopus 1.5.2"` ×3, 14 386 packets decoded live with `decode_fail:0`/`dropped:0`, three valid parallel `.opus` files, presenter fails:0 — AND ALL THREE DRAWS STILL DIED `recovery_exhausted` AT 12–37 s OF MEDIA ON A PEAK-FRIDAY POOL (queues ~156–163, Amsterdam/London edges). The verdict is the pool's, not ours: TWO DIFFERENT RIGS died identically (185.136.70.139 — handed out TWICE, runs 36+38 — and 80.84.170.154), `rtsp_teardown` answered **200 on all three** (host stack alive, media stack dead = the run-22 signature), every client plane kept contract to the last millisecond (QoS ~20 Hz, IDR/PLI volleys unanswered, `datagrams==authenticated`, decode 1107/1107 + 397/397 + 346/346), the wire is IDENTICAL to run 35's 744.3 s flight ninety minutes earlier (F21 adds zero messages), the 10–13 s band predates F21 by a dozen builds — and the operator's own A/B closes the case: run 37 on the PHONE TETHER died the same way, while the GFN BROWSER on the same 2.4 GHz Wi-Fi played perfectly after run 38.** Two findings shipped as fixes: **F25** — the ungated playback ring counted `starved:759/801/802` (mostly the ~8–10 s post-mortem device tail + zero-pre-buffer jitter), so the feed engine now sits behind a **100 ms waterline** (`kn_audio_feed_plan`, pure + host-tested: silent pre-roll until level ≥ rate/10 or ring FULL; a post-prime empty pop = ONE `starved` episode + re-arm; new `prerolls` counter on `audio_play_end`; target 0 = legacy; `test_knaudio` 54 → **74**; +100 ms latency, inaudible); **F26** — runs 37/38 orphaned their seats when the release DELETE died at transport level (`cm_release rc:-2`, the run-35 CONN_RESET pattern), costing the operator a manual browser rescue + 403 SESSION_LIMIT on the next create, so the DELETE now gets **ONE retry on a fresh TLS stream after 500 ms, ONLY on `KN_HTTP_ERR_IO`** (answered statuses are never retried); the `cm_release` line grows `"attempts":N`. No wire-format and no summary-key change: skeleton **113 == 113 verified against run-36's LIVE stdout** (the first post-F21 summary in the field). Sandbox gates re-run green: native **PASS** (26 legs, zero warnings), cross `-Werror` ×2, ctest **27/27 ×2**, T10 dry **ALL PASS 79**, T13 **ALL PASS 63**, e2e **48/48 deletes:1**, ASan/UBSan clean; knvstd clean under `-Wformat-truncation=2` at -O0/-O2/-O3. **Target expectations unchanged: T10 ALL PASS 89, stamp N, ctest 27 ×2.** Also in this rev: the rig's first post-fix T10 came back **ALL PASS 89/89** (the 300 s build-wall FAIL(1) of the first attempt is fixed and confirmed on target). Run 39 = the LOTTERY fish (`--lottery=3 --lottery-gap=60 --lottery-stop-on-keeper=1`, RTSP §43.6) — band deaths re-draw automatically, a `"time"` keeper stops the lottery; preferably off the Friday-evening peak. Full analysis: `docs/RTSP.md` §43, `docs/AUDIO.md` §F25, `docs/BUNDLE-AUDIO.md` §11 addendum.)
 
+## Rev 45 slice 4a (2026-10-30): RUN 39 READ — A NEW DEATH SIGNATURE (CONGESTION, NOT THE FREEZE FAMILY) + F25a/F26a EVIDENCE FIXES
+
+**Run 39 flew the lottery twice (stamp N build; the operator re-verified
+T10 ALL PASS 89/89 first) and BOTH draws died the same NEW way**:
+bursty loss, a ~90 ms path queue (`queue_delay_us` 88/95 ms), a smooth
+server bitrate decay (415→83 d/s while frames held ~30/s = the
+operator's "cyclic stutters, then quality worsens"), draw 2's
+3-second withheld stall briefly rescued by our own 93-IDR barrage, then
+terminal collapse. Two different rigs from two different /24 blocks,
+four minutes apart (185.136.70.137 — run 36/38's block; 80.84.171.153
+— run 37's neighbourhood). The client exonerated itself a fourth time:
+`recv_timeouts = ticks − datagrams − 1` EXACT, loop 204–205 Hz,
+`q_depth:0`, decode **709/709 + 605/605** with `decode_fail:0`,
+presenter fails:0, audio `seq_loss` 54/83 = whole-path loss. Verdict:
+the congestion family (run 20/30-adjacent), arrived on the Friday-peak
+evening — **local evening Wi-Fi vs pool egress is the one open
+question**; instruments: the zero-code tether/quiet-hours A/B (next
+operator action) and **F27**, the in-session STUN probe on the media
+socket (next sandbox slice; design RTSP §44.3). Full read: **RTSP §44**;
+START-HERE §18.
+
+F21's first live flight worked as designed: `starved:2`/`4` = EPISODES
+(vs runs 36–38's ungated ~800), 11 241 packets decoded,
+`decode_fail:0`/`dropped:0`, swr 44.1 kHz path, valid parallel files.
+Run 39's evidence lines also caught two slice-4 bugs, both cosmetic,
+both fixed and re-gated the same evening:
+
+- **F25a** `streamer/src/kn_audio.c` — `kn_audio_get_stats` copied every
+  field except the new `prerolls`, so `audio_play_end` printed
+  `prerolls:0` while the waterline demonstrably worked. Field now
+  copied (test_knaudio unchanged: 74; the vector legs already covered
+  the struct).
+- **F26a** `streamer/src/knvstd_main.c` — `cm_release` reported
+  `attempts:3` for TWO failed DELETEs (the for-loop's exit value); now
+  clamped to the tries actually made. Draw 2's seat orphaned despite
+  the retry (the reclaiming server refused the connection twice,
+  `rc:-2` ×2): when the rig-side reclaim holds the connection dead,
+  retrying cannot save the seat — the browser release remains the
+  fallback of last resort (START-HERE §13 note).
+
+Docs touched: `docs/RTSP.md` §44, `docs/AUDIO.md` §F25a,
+`START-HERE.md` §18, this section. Gates re-run green after both fixes:
+native PASS zero warnings · cross `-Werror` ×2 · ctest **27/27 ×2** ·
+T10 dry **79** · T13 **63** · e2e **48/48** · skeleton **113 == 113 vs
+run-39's LIVE stdout** · ASan/UBSan clean · knvstd
+`-Wformat-truncation=2` clean -O0/-O2/-O3. Target: T10 **89**, stamp
+**N** — the rig should RECOMPILE before run 40 so `prerolls`/`attempts`
+tell the truth.
+
 ## Rev 45 changed files (round N slice 4)
 
 - `streamer/include/kn/kn_audio.h` — `kn_audio_stats.prerolls`;

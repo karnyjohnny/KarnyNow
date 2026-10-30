@@ -649,6 +649,9 @@ int kn_audio_get_stats(kn_audio *a, kn_audio_stats *out)
     out->events = a->stats.events;
     out->frames_written = a->stats.frames_written;
     out->starved = a->stats.starved;
+    out->prerolls = a->stats.prerolls;     /* F25a: run 39 exposed the
+                                              missing copy (prerolls:0
+                                              while the waterline worked) */
     out->wait_timeouts = a->stats.wait_timeouts;
     out->buffer_errors = a->stats.buffer_errors;
     out->queue_ms = a->stats.queue_ms;

@@ -4856,3 +4856,115 @@ full-length `"time"` keeper exits rc 0 → the lottery STOPS on it
 pool's health, not our code, is the binding constraint; run 35's 744 s
 on THIS build family is the proof that the client holds when the rig
 does.
+
+## 44. Round N slice 4a — RUN 39 (lottery ×2): **A NEW DEATH SIGNATURE, AND IT IS NOT THE FREEZE FAMILY — BOTH DRAWS DIED OF CONGESTION/RATE-COLLAPSE: BURSTY LOSS, A ~90 ms PATH QUEUE, A SMOOTH SERVER BITRATE DECAY FROM 415 TO 83 DATAGRAMS/s WHILE FRAMES HELD 30 fps (THE OPERATOR'S "CYCLIC STUTTERS THEN QUALITY WORSENS"), A 3-SECOND WITHHELD STALL OUR OWN IDR BARRAGE BRIEFLY RESCUED, THEN THE TERMINAL COLLAPSE. TWO DIFFERENT RIGS FROM TWO DIFFERENT /24 BLOCKS, FOUR MINUTES APART, IDENTICAL SIGNATURE — THE CLIENT IS EXONERATED A FOURTH TIME BY ITS OWN ARITHMETIC.**
+
+### 44.1 The two draws, second by second
+
+Both draws flew on the slice-4 build (compiled 21:27:38, stamp N; the
+operator re-verified **T10 ALL PASS 89/89** at 21:28 before flying),
+Endfield, `--lottery=2`, Friday ~21:33 local.
+
+**Draw 1** (rig **185.136.70.137** — the same /24 as runs 36/38's sick
+.139): the datagram rate DECAYS SMOOTHLY for 20 s — 415 → 375 → 327 →
+310 → 270 → 221 → 178 → 141 → 91 → 83/s — while **aus/s holds ~30 the
+whole way**: frames keep arriving 30/s but keep SHRINKING (≈14
+datagrams/frame at the start, ≈3 at the end; the freeze-witness kbps
+ramp bottom-reads 372 kbps). That is the server's rate controller
+walking the bitrate down under loss — exactly the operator's
+"pogorszenie jakości obrazu". Loss came in bursts at the start
+(withheld 5+8+14 across the first four seconds, gaps 4, FEC repaired
+22, NACK 12). Video died at rel 24.7 s; the terminal second fell to
+17 aus then zero. **Control died FIRST again (rel 8.6 s)** — the
+server's heartbeats went silent 16 s before its video (the runs-37/38
+cascade order, run 35's reversed).
+
+**Draw 2** (rig **80.84.171.153** — adjacent block to run 37's
+80.84.170.154): same decay (438 → 79/s), heavier loss (gaps 10,
+**withheld 178**, audio `seq_loss` 83 = 1.44 %), and the signature
+event: at 20:37:34–36 **aus/s = 0 for three full seconds while
+datagrams still flowed at 84–99/s and withheld climbed 33+29+30** —
+every frame held for retransmission/keyframe. Our recovery flew the
+textbook: 93 IDR/PLI, 7 keyframe requests — and at :37 video RETURNED
+(24 aus/s, keyframes among the 20 total), held four seconds, then
+collapsed at :41 (59 d/s, 12 aus) → `recovery_exhausted`. The
+operator watched exactly this: cyclic stutters, a freeze, a rescue,
+the death.
+
+Shared measurements: `queue_delay_us` **88 236 / 95 138** (one-way
+transit growth over the session minimum — a ~90 ms standing queue
+SOMEWHERE on the path), `jitter_us` 2.5/1.7 ms, BWE warm (38.0/39.8
+Mbps, util 2 %), audio `seq_loss` **54/83** (the 2nd/3rd non-zero
+loss counts in project history, same night as the video loss = the
+WHOLE path lost packets, not one plane).
+
+### 44.2 The client, exonerated a fourth time by its own arithmetic
+
+`recv_timeouts = loop_ticks − datagrams − 1` EXACT (2398 =
+7183−4785−1; draw 2 off by one at the boundary), loop 205/204 Hz,
+`q_depth:0` and `q_overflows:0` every second, decode **709/709 and
+605/605 frames, zero failures**, presenter fails:0 max_ms ≤2.2, QoS
+~18/s + RR ~1/s + keepalives nominal to the end, FEC/NACK/recovery all
+fired honestly, `datagrams == authenticated`. Nothing on the client
+stalled, starved or misbehaved — it decoded and presented every frame
+the path delivered, asked for every frame it didn't, and reported the
+truth in feedback while the server's own encoder walked the bitrate
+into the ground.
+
+### 44.3 What this signature is — and the one question left
+
+This is NOT the abrupt rig-freeze family of runs 22–38 (flat → zero in
+one second, no ramp, §42.2/§43). It is the congestion family: bursty
+loss + a ~90 ms path queue + rate-controller decay + a withheld stall
++ terminal collapse. It most resembles run 20's drip-feed and run 30
+draw 2's pre-death degradation (owd 230 ms), and it arrived on the
+Friday-evening peak (queues ~160 at 19:00; the operator's browser A/B
+was clean at ~19:20 — two hours before these draws).
+
+Two rigs from two different blocks behaved identically four minutes
+apart, so this is NOT one sick machine. What remains shared: the
+pool's egress/edge — or the operator's access network in the late
+evening (2.4 GHz neighbour traffic; a ~90 ms queue and 1 % loss live
+happily on congested Wi-Fi too; the proven-fast client loop rules out
+only OUR receive side). **Local vs remote is the one open question**,
+and two instruments answer it:
+
+1. **zero-code, tonight-able: the tether A/B.** Re-fly the SAME
+   lottery command on the phone tether (5 GHz LTE). Congestion
+   signature reproduces → it is the pool, and quiet hours are the
+   remedy; clean long draw → it was the Wi-Fi evening environment.
+   (Run 37's tether death was the ABRUPT family — a different thing;
+   this A/B is about the DECAY family.)
+2. **F27 (next slice): the in-session STUN probe.** A 5 s-cadence
+   authenticated binding request to the video peer over the media
+   socket itself (the pre-PLAY hole-punch proved the rig answers),
+   demuxed by first byte (0x00/0x01 vs RTP's 0x80+) BEFORE kn_rx, with
+   tid-matched RTT (`stun_probe` lines: rtt_last/min/max_us,
+   unanswered streaks). Local Wi-Fi loss hits the probe and the media
+   identically; pool-side queueing inflates probe RTT in step with
+   `queue_delay_us`; a sick rig streamer leaves the probe clean while
+   media dies. Event lines only — the skeleton stays 113.
+
+### 44.4 Slice 4a: two evidence bugs run 39 caught, fixed
+
+The run's own evidence lines exposed two slice-4 bugs, both cosmetic,
+both fixed and re-gated the same evening: **F25a** — `audio_play_end`
+printed `prerolls:0` while the waterline demonstrably worked
+(`starved:2`/`4` = EPISODES, vs the ungated 759/801/802 of runs 36–38):
+`kn_audio_get_stats` copied every field except the new one. **F26a** —
+draw 2's `cm_release` reported `attempts:3` for TWO DELETEs (the
+for-loop's exit value after both tries failed the transport): clamped
+to the tries actually made. (Draw 2's seat orphaned DESPITE the retry —
+the reclaiming server refused the connection twice; the browser
+release remains the fallback of last resort. Draw 1 released cleanly:
+`200 gone:1 attempts:1`.) F25's first live flight otherwise: 11 241
+packets decoded, `decode_fail:0`, `dropped:0`, the 44.1 kHz swr path
+again, files valid in parallel.
+
+Sandbox gates after F25a/F26a (all re-run): native PASS zero warnings ·
+cross `-Werror` ×2 · ctest **27/27 ×2** · T10 dry **79** · T13 **63** ·
+e2e **48/48 deletes:1** · skeleton **113 == 113 vs run-39's LIVE
+stdout** · ASan/UBSan clean · knvstd `-Wformat-truncation=2` clean at
+-O0/-O2/-O3. Target expectations unchanged: **T10 89, stamp N, ctest
+27 ×2**. Run 40 = the tether A/B lottery (or a quiet-hours re-fly),
+command identical to run 39's.
