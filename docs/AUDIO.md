@@ -112,3 +112,102 @@ Landmines recorded (all hit and defused in the sandbox this round):
 - `queue_audio_ms` then reports the jitter-buffer depth, not device
   padding; `starved` becomes the concealment trigger.
 - Volume/mute via ISimpleAudioVolume when the TUI grows transport keys.
+
+## F21 (round N slice 3): the module grows its real source — live playback of the arx Opus pipe
+
+Status: **IMPLEMENTED, sandbox-gated; the WASAPI engine still has NEVER
+EXECUTED anywhere** — the first live playback is run 36 on the target
+(`--session-audio-play`). Everything host-testable is host-tested:
+`test_knaudio` **54 checks** (feed ring + xform + the pre-F21 battery)
+under ASan+UBSan, `test_knopus` **105 checks** (85 KAT vectors, bit-exact
+vs libopus 1.5.2: max |diff| **0 LSB**), cross `-Werror` ×2 arches,
+ctest **27/27** on both TLS backends, T10 dry **ALL PASS 79** with the
+vendored opus staged (the real-vector leg).
+
+### What ships
+
+1. **`kn_opus.{h,c}` — the project's ONLY Opus knowledge** (decode-only,
+   four functions: `kn_opus_available` / `kn_opus_version` /
+   `kn_opus_decoder_create(rate, channels, err, errsz)` /
+   `kn_opus_decode_f32(dec, pkt, len, out, cap_frames)` → frames | −1,
+   plus `kn_opus_decoder_destroy`). Three build modes, in order:
+   system libopus (pkg-config), the pinned vendored tree
+   `third_party/opus` (T10 stages the 1.5.2 release tarball, SHA-256
+   `65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1`),
+   or the honest stub (`KN_HAVE_OPUS=0`: available 0, version `"none"`,
+   create NULL + `"libopus not linked in this build"`). The wrapper
+   accepts BOTH include layouts (`<opus/opus.h>` and `<opus.h>`) via
+   `__has_include`. Capacity is checked BEFORE decode
+   (`rate/1000*120` frames); `len==0`/NULL is −1; **no PLC by design** —
+   a lost packet is the arx `seq_loss` counter's business, and the ring
+   below already turns absence into counted, honest silence.
+2. **Feed mode in `kn_audio`** — `kn_audio_open_feed()` (default render
+   endpoint, shared mode, event-driven, plus a **2 s ring at the device
+   rate**: absorbs decode/pump jitter without audible lip-drift) and
+   `kn_audio_push_f32()` (the producer side). The engine thread's refill
+   branch becomes: pop from the ring → zero-fill the untaken tail (the
+   zero-fill IS the underrun) → `kn_audio_xform_f32` into the device
+   buffer. **`starved` counts only `pop==0 && pushed>0`** — pre-roll
+   silence while the stream arms is not a gap. POSIX: `open_feed`
+   refuses honestly (`"WASAPI is Win32-only"`), `push_f32` returns 0.
+3. **The feed ring itself** (`kn_audio_feed_*`, neutral, host-tested):
+   SPSC, power-of-two capacity rounded DOWN from the backing size,
+   **cap−1 usable frames** so `wr==rd` stays unambiguously EMPTY;
+   monotonic `wr`/`rd` masked on access; overflow **drops the tail and
+   counts it** (`dropped`) — for live audio the newest samples win and
+   back-pressure is forbidden; lifetime `pushed`/`popped` counters.
+4. **`kn_audio_xform_f32`** — float32 → the negotiated device format:
+   F32 copy+clamp; S16/S32 `lrintf`/`lrint` scale+clamp (S32 computes in
+   **double**: the float constant `2147483647.0f` rounds UP to 2^31 and
+   overflowed the int cast at v==1.0 — caught by the new checks on the
+   first ASan pass); NaN → silence, never propagated; UNKNOWN format
+   writes one block-aligned container of silence per frame.
+5. **`knvstd` wiring** (`--session-audio-play`, default OFF, Win32
+   only): open on the MAIN thread before the pump starts (COM/WASAPI on
+   a known thread, one device per draw); `sess_audio_emit` keeps the
+   **file first** (the F13 `.opus` contract is untouched — playback is
+   best-effort and never back-pressures the SRTP commit), then
+   decode → `swr_convert` ONLY when the device rate ≠ 48 kHz (FFmpeg
+   gated) → `push_f32`. Open failure is NON-FATAL: the session stays
+   file-only and says so (`audio_play_begin ok:0 reason:"…"`). Close
+   runs after `sess_pump_stop()` joined the worker (F12's
+   join-before-read rule) at all three session-exit sites.
+
+### Evidence lines (stdout + the media channel log)
+
+```
+{"mode":"session","event":"audio_play_begin","ok":1,"fmt":"48000 Hz 2ch f32",
+ "rate":48000,"channels":2,"swr":0,"opus":"1.5.2"}          (or ok:0 + reason)
+{"mode":"session","event":"audio_play_end","pkts":…,"frames":…,
+ "decode_fail":…,"pushed":…,"dropped":…,"starved":…,
+ "events":…,"written":…,"queue_ms":…}
+```
+
+No summary keys are added (the skeleton stays **113**): playback lives
+on the event lines, the `"audio"` block stays the file's evidence.
+
+### KAT vectors (`streamer/src/kn_opus_kat_vectors.h`, GENERATED)
+
+85 vectors from `tools/opus_reference.py` (which encodes AND decodes
+through an INDEPENDENT path — libopus via Python ctypes — before
+emitting, and refuses to emit unless its self-proofs pass:
+determinism, warm-replay repeatability, RMS bands, garbage rejection).
+One sequential 48 kHz stereo stream at the fixed 96 kb/s / complexity-10
+operating point: 40 warmup packets, then per content vector 10
+transition packets + the pinned packet, then one garbage TOC (0xFF)
+vector that MUST be rejected with −1 on a cold decoder. Four content
+vectors carry full s16 expectations (two-tone, alternate two-tone, a
+quiet-noise-floor band); the rest pin frame counts only. Tolerance for
+content: |Δ| ≤ 1 LSB; measured across the battery: **0**.
+
+### Relation to the old Stage-2 TODO list
+
+The TODO above ("Opus decode → swresample → refill loop with a jitter
+buffer, 45 ms target / 100 ms concealment cap") is SUPERSEDED by F21
+with two deliberate deviations, both recorded here: the absorber is a
+**2 s ring** (not a 45 ms jitter buffer — the GFN audio plane arrives
+over SRTP with its own sequencing; our ring smooths the decode/pump
+handoff, not the network), and concealment is **counted silence** (no
+PLC — `starved`/`dropped`/`decode_fail` tell the truth instead).
+`queue_audio_ms` still reports device padding at the last refill.
+Volume/mute transport keys remain a future TUI item.

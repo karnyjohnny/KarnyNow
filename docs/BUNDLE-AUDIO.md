@@ -512,3 +512,42 @@ script used `-r 25` on a 30 fps stream, stretching the timeline 1.2×
 for the tail check (sharpness flat 8.7–8.8, zero dips — RTSP.md §41.1)
 but the corrected script ships with the run-34 addendum in
 START-HERE §13: **`-r 30`**, or `-f h264 -r 30 -i` form.
+
+### 10.4 Run 35: 747 seconds of real stereo game sound — and the first non-zero `seq_loss` on record
+
+Run 35 (first live-picture run, RTSP.md §42) kept the audio contract
+intact through the presenter's addition: **149 461 packets = 747.3 s**
+(`last_ms − first_ms` == packets × 5 ms exactly), `srtp_fail 0`,
+`malformed/toc_invalid/pt_filtered/padded/replay_reject` all 0, RED
+blocks consistent, `ogg.dropped_packets/write_errors` 0, delivered
+`.opus` **22.0 MB** — and ONE first: **`seq_loss 1`**, the first
+non-zero sequence loss in project history (one 5 ms packet out of
+149 461 ≈ 0.0007 %; zero audible or structural consequence — the Ogg
+stream is contiguous and ffmpeg-verified at 48 kHz stereo ≈246 kbps,
+volumedetect mean −54.6 dB / max −23.6 dB = real in-world content,
+matching the operator watching gameplay). The counter exists precisely
+so a "always zero" claim dies the moment it stops being true; a single
+lost packet on a 2.4 GHz Wi-Fi run is the network being a network.
+The freeze-side audio behaviour mirrors run 33/34: audio outlived
+video by +2.2 s, then total silence (freeze_witness cascade, §42.2).
+
+## 11. F21 (round N slice 3): the pipe grows a LIVE consumer — playback beside the file
+
+`--session-audio-play` (knvstd, Win32, default OFF) taps the SAME arx
+emit callback that feeds the OggOpus file, and plays the draw live:
+**file first, playback second** — `sess_audio_emit` writes the ogg
+packet BEFORE touching the playback chain, so every F12/F13/F16 file
+guarantee (EOS page, per-draw names, close-after-join) is untouched
+and playback can never back-pressure the SRTP commit. The chain: arx
+emit → `kn_opus_decode_f32` (the `kn_opus` wrapper — decode-only,
+three build modes, honest stub, docs/AUDIO.md §F21) → `swr_convert`
+ONLY when the device mix rate ≠ 48 kHz → the 2 s SPSC feed ring →
+the WASAPI refill thread. Every stage counts itself into the
+`audio_play_end` evidence line (`pkts/frames/decode_fail/pushed/
+dropped/starved/events/written/queue_ms`); a build without libopus
+reports `audio_play_begin ok:0 reason:"libopus not linked in this
+build (KN_HAVE_OPUS=0)"` and the run stays file-only — loud, never
+silent, never fatal. The summary `"audio"` block and the 113-key
+skeleton are UNCHANGED: playback is event-line evidence. Provisioning:
+T10 stages opus 1.5.2 into `third_party/opus` (SHA-256-pinned release
+tarball, README pin table); run 36 is the first listen.

@@ -171,9 +171,148 @@ static void test_gen(void)
     CHECK(buf[0] == 0x5A, "unknown format writes nothing");
 }
 
+/* --- F21: the feed ring (SPSC PCM) and the float32 -> device xform ----- */
+
+static void test_feed_ring(void)
+{
+    static float backing[1024];          /* 512 frames x 2 ch = 1024 floats */
+    static float src[2048];
+    static float dst[2048];
+    kn_audio_feed f;
+    unsigned cap, i, n;
+
+    CHECK(kn_audio_feed_init(&f, backing, 0, 2) >= 1u ||
+          kn_audio_feed_init(&f, backing, 1024, 0) == 0u, "feed bad args");
+    cap = kn_audio_feed_init(&f, backing, 512, 2);
+    CHECK(cap == 512u, "feed cap pow2 down");
+    CHECK(kn_audio_feed_level(&f) == 0u, "feed empty level");
+    CHECK(kn_audio_feed_pop(&f, dst, 10) == 0u, "feed pop empty");
+
+    for (i = 0; i < 2048; ++i)
+        src[i] = (float)i * 0.001f - 1.0f;
+    n = kn_audio_feed_push(&f, src, 300);
+    CHECK(n == 300u, "feed push fits");
+    CHECK(kn_audio_feed_level(&f) == 300u, "feed level 300");
+    /* overflow: cap-1 usable frames; 300 already in, push 400 -> 211 in,
+     * 189 dropped */
+    n = kn_audio_feed_push(&f, src, 400);
+    CHECK(n == 511u - 300u, "feed push clamps to free");
+    CHECK(f.dropped == 400u - n, "feed dropped counted");
+    CHECK(kn_audio_feed_level(&f) == 511u, "feed level cap-1");
+
+    /* pop order: the ring holds src[0..299] then src[0..210] (the 189
+     * dropped frames never entered), so popped frame i maps to src[i]
+     * for i < 300 and src[i-300] after. */
+    CHECK(kn_audio_feed_pop(&f, dst, 400) == 400u, "feed pop 400");
+    for (i = 0; i < 400u; ++i) {
+        unsigned e = (i < 300u) ? i : i - 300u;
+        if (dst[i * 2] != src[e * 2] || dst[i * 2 + 1] != src[e * 2 + 1]) {
+            CHECK(0, "feed pop order");
+            break;
+        }
+    }
+    CHECK(1, "feed pop order");
+    CHECK(kn_audio_feed_pop(&f, dst, 400) == 111u, "feed drains to empty");
+    for (i = 0; i < 111u; ++i) {
+        if (dst[i * 2] != src[(100u + i) * 2]) {
+            CHECK(0, "feed drain tail");
+            break;
+        }
+    }
+    CHECK(1, "feed drain tail");
+    CHECK(kn_audio_feed_level(&f) == 0u, "feed empty after drain");
+    /* rd==wr==511 now: the next push straddles the physical buffer end */
+    n = kn_audio_feed_push(&f, src, 400);
+    CHECK(n == 400u, "feed push after drain");
+    CHECK(kn_audio_feed_pop(&f, dst, 400) == 400u, "feed pop after wrap");
+    for (i = 0; i < 400 * 2; ++i) {
+        if (dst[i] != src[i]) {
+            CHECK(0, "feed wrap data");
+            break;
+        }
+    }
+    CHECK(1, "feed wrap data");
+    CHECK(f.pushed == 300u + 211u + 400u, "feed pushed lifetime");
+    CHECK(f.popped == 911u, "feed popped lifetime");
+
+    /* NULL discipline */
+    CHECK(kn_audio_feed_push(NULL, src, 4) == 0u, "feed push null");
+    CHECK(kn_audio_feed_pop(&f, NULL, 4) == 0u, "feed pop null");
+}
+
+static void test_xform(void)
+{
+    static const float in[8] = { 0.0f, 1.0f, -1.0f, 0.5f,
+                                 2.0f, -2.0f, 0.0f, 0.25f };
+    kn_audio_fmt f;
+    unsigned char buf[64];
+    short s16[8];
+    int s32[8];
+    float f32[8];
+    unsigned i;
+
+    memset(&f, 0, sizeof f);
+    f.rate = 48000;
+    f.channels = 2;
+    f.fmt = KN_AFMT_F32;
+    f.block_align = 8;
+    memset(buf, 0x5A, sizeof buf);
+    kn_audio_xform_f32(&f, buf, in, 4);
+    memcpy(f32, buf, sizeof f32);
+    CHECK(f32[0] == 0.0f && f32[1] == 1.0f && f32[2] == -1.0f &&
+          f32[3] == 0.5f, "xform f32 copy");
+    /* clamp: the 2.0 / -2.0 pair of the SECOND frame */
+    CHECK(f32[4] == 1.0f && f32[5] == -1.0f, "xform f32 clamp");
+
+    f.fmt = KN_AFMT_S16;
+    f.block_align = 4;
+    memset(buf, 0x5A, sizeof buf);
+    kn_audio_xform_f32(&f, buf, in, 4);
+    memcpy(s16, buf, 8 * sizeof(short));
+    CHECK(s16[0] == 0 && s16[1] == 32767 && s16[2] == -32767,
+          "xform s16 scale");
+    CHECK(s16[3] == (short)lrintf(0.5f * 32767.0f), "xform s16 round");
+    CHECK(s16[4] == 32767 && s16[5] == -32767, "xform s16 clamp");
+
+    f.fmt = KN_AFMT_S32;
+    f.block_align = 8;
+    memset(buf, 0x5A, sizeof buf);
+    kn_audio_xform_f32(&f, buf, in, 2);
+    memcpy(s32, buf, 4 * sizeof(int));
+    CHECK(s32[0] == 0, "xform s32 zero");
+    CHECK(s32[1] == 2147483647, "xform s32 max");
+    CHECK(s32[2] == -2147483647, "xform s32 min");
+    CHECK(s32[3] == (int)lrint(0.5 * 2147483647.0), "xform s32 round");
+
+    /* NaN -> silence, never propagate */
+    {
+        float nan_in[2] = { 0.0f, 0.0f };
+        nan_in[0] = (float)NAN;
+        f.fmt = KN_AFMT_S16;
+        f.block_align = 4;
+        kn_audio_xform_f32(&f, buf, nan_in, 1);
+        memcpy(s16, buf, 2 * sizeof(short));
+        CHECK(s16[0] == 0 && s16[1] == 0, "xform nan silence");
+    }
+
+    /* unknown format zeroes the container frame */
+    f.fmt = KN_AFMT_UNKNOWN;
+    f.block_align = 4;
+    memset(buf, 0x5A, sizeof buf);
+    kn_audio_xform_f32(&f, buf, in, 2);
+    for (i = 0; i < 8; ++i)
+        if (buf[i] != 0)
+            break;
+    CHECK(i == 8, "xform unknown zeroes");
+    (void)f32;
+    (void)s32;
+}
+
 int main(void)
 {
     test_fmt_parse();
     test_gen();
+    test_feed_ring();
+    test_xform();
     return kn_test_summary("test_knaudio");
 }

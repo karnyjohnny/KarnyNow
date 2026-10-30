@@ -179,6 +179,7 @@ operator watches and hears live.
 | 32 | L→M | **THE FIRST TYPING RUN: EVERYTHING FLEW EXCEPT THE TYPING.** Endfield (107057914), the operator's own 80-event/416 s macro, one draw with video+audio+release all on. **T10 on target = ALL PASS 84** (the rev-41 suites-list catch is the only reason `test_kndrawpath` ran on Win7). **F17 proven where it counts**: `video.264` 3 679 210 B, 668/668 frames decode, and the operator WATCHED it — Endfield launcher + animations from t≈0. **F16 proven**: `audio.opus` correctly named, size == `audio_close.bytes`. **F18 PROVEN**: `rtsp_teardown rc:0 status:200` + `cm_release status:200 gone:1` — the first seat this project ever gave back, zero 403 ladders. **F19 armed but silent**: `input_script_loaded` 80 events `unmapped:0`, gate latched at 0.83 s, and `input_summary fired:0 gated:0 sent:0` — the draw died at **29.0 s of media** (39.2 s wall, `recovery_exhausted`, the first LOSSY freeze: 17 gaps / 191 withheld / 31 FEC / 51 NACK, BWE 24–42 Mbps) **before the macro's first timestamp**. Audio silent again (the launcher makes no sound; peak 1 LSB). 0x010a: `Launcher.exe → Games.exe (cmsId 107057914) → QtWebEngineProcess.exe` mislabeled "EA Desktop" — the Qt Endfield launcher UI; canon confirmed by pixels + cmsId. Lesson + fix: the login UI is on screen from t≈1 s ⇒ **run 33's macro starts at t≈6–12 s** with retries and `--input-anti-afk=60000` (INPUT §10.9, RTSP §39) |
 | 33 | M→N | **THE FIRST FULL SUCCESS — LOGIN, WORLD, SWORD, SOUND.** Single Endfield draw (900 s requested), the operator's own 80-event/416 s macro + `--input-anti-afk=60000` + video/audio/release. **Every macro stage landed first try**: Play at t=40 s → **`Endfield.exe` JustLaunched t=44.2 s (first game process ever; `drsProfileName:"Arknights: Endfield"`)** → in-game login typed t≈161–170 s → world entered t≈411–416 s → sword swing (operator watched live-quality video the whole 13.6 min). `input_summary events:80 fired:80 sent:108 (key:86 btn:16 abs:6) gated:0 late_skips:0 build_fail:0 push_fail:0 unmapped:0`, `afk_pulses:14` — **F19 proven at full scale**. Video: 24 424 AUs / 815.689 s = 29.94 fps, 215 MB, **zero gaps/withheld/FEC/NACK/decode errors** (run 32's loss was the launcher, not the line). Audio: 163 728 pkts × 5 ms = 818.68 s = ffmpeg's 13:38.64, `seq_loss 0` — **first content-bearing capture: real stereo game sound, Audacity-verified**. Freeze at 815.2 s: abrupt total silence, `recovery_exhausted` at wall 825.6 s, **no 0x0109, NOT the length timer (1 h declared at rel 1.2 s), NOT loss (zero), NOT idle (input+AFK from t≈1 s)** — and `ctrl_in` still logging at rel 820 s ⇒ control plane alive after media death (run-30 anatomy at 13.6-min scale) ⇒ F22 witness. `rtsp_teardown 200` + `cm_release 200 gone:1` (2nd consecutive clean release). Two cosmetic label bugs found ⇒ F23. Full analysis `docs/RTSP.md` §40, `docs/BUNDLE-AUDIO.md` §10.2, `docs/INPUT.md` §10.10 |
 | 34 | N | **THE FIRST 900-SECOND KEEPER WITH EVERYTHING ON — AND F22/F23 PROVEN LIVE.** Same command as run 33 on the F22/F23 build (T10 on target **ALL PASS 86**, as predicted), faster macro + **ten attack clicks at 20 s spacing** as an idle-eviction control: `stop_reason:"time" wall_ms:900019`, 26 985 AUs @ 29.97 fps, ZERO gaps/loss, `input_summary events:96 fired:96 sent:126 gated:0`, `afk_pulses:15`. **F22's debut: ten `bitrate_decay_warn` episodes, ten recoveries** — loading-valley false positives (baseline 100–1100 kbps; round N adds the avg60 ≥ 1500 kbps gate) plus three genuine mid-gameplay throttling dips healing in 4–42 s; **nothing after 562 s** and the pushed tail is flat (sharpness 8.7–8.8, zero dips; audio −58 dB content to the last packet). The idle/AFK-eviction theory is DEAD: the final 300 s flew anti-AFK pulses only and completed. New anomaly: `rtsp_teardown` **400** on the polite stop (cm_release still 200 gone:1) — round N diagnoses. **Hygiene incident:** the push included `login.txt` WITH plaintext credentials — agent redacted its copies same-turn, operator got the rotate+remove procedure (INPUT §10.11). Analysis `docs/RTSP.md` §41 |
+| 35 | N | **THE FIRST LIVE-PICTURE RUN — THE OPERATOR WATCHED FULL-SCREEN GEFORCE NOW VIDEO FROM THE PURE-C CLIENT, ON DELIBERATELY BAD 2.4 GHz WI-FI, AND IT HELD FOR 744 SECONDS.** Endfield on a Frankfurt rig (185.136.69.134, np-frk-06), run-34 command + `--session-present`: **F20 PROVEN LIVE** — `video_present_end reason:"session_end" frames:22329 fails:0 max_ms:5.0`, operator verdict smooth/stable/clear; 22 329 AUs @ 29.97 fps, **196 420/196 420 datagrams, ZERO gaps/decode errors**, 9 keyframes, idr/pli 41/41, BWE 37 618 kbps at 6 % utilisation (the handicap never bit). Death: `recovery_exhausted` at media **744.3 s** (series 14/14/29/36/122/815.7/900.0/**744.3** — second-longest ever), and the freeze_witness localises it: last ctrl rel 729 110 = **15.2 s BEFORE** last video, audio +2.2 s after, FLAT ramp (abrupt, not the ceiling's decay), cascade ORDER varying per run ⇒ **rig-side staged death**, not network, not client. F22-gate verified live (8 warns / 7 recoveries / the fatal at 743.99 correctly terminal); F23 proven (`input_summary 98/98/124`, failures 0). Audio: 149 461 pkts = 747.3 s, **first non-zero `seq_loss` on record — ONE packet** (0.0007 %, zero consequence), srtp_fail 0, 22.0 MB valid .opus, real content (−54.6 dB mean, in-world gameplay). Teardown on the dead rig = F24's first transport-level failure: `rtsp_teardown rc:-3` TIMEOUT, mbedTLS −0x004E CONN_RESET on the DELETE, `cm_release rc:-2` — **the seat came NOT back**; run 36 may open on a 403 ladder (diagnosis, not damage). Full analysis `docs/RTSP.md` §42 |
 
 **Round XXXVIII shipped** (target-verified in round XXXIX: **T10 ALL PASS
 79 on Win7**, `test_knbw` reported 387 checks on target = sandbox — the
@@ -1558,3 +1559,114 @@ history, and the next evidence pull is a FRESH CLONE (`docs/INPUT.md`
 Next slice: **F21** (live WASAPI playback of the arx Opus pipeline) —
 blocked on the one-time libopus provisioning on the rig; instructions
 will ship with the slice.
+
+## 15. Round-N slice 3 addendum (2026-10-30): run 35 read + F21 shipped — run 36 = the first WATCH-AND-LISTEN run
+
+Slice 3 closes round N's ship list: **F21, live WASAPI playback of the
+arx Opus pipe** (`--session-audio-play`), is code-complete and gated in
+the sandbox. Run 35's read lives in `docs/RTSP.md` §42 (verdict: F20
+proven live over the deliberate 2.4 GHz handicap; the 744.3 s death is
+a rig-side staged cut; the seat did NOT come back — a 403 ladder at the
+start of run 36 is expected and owned by F7's backoff). Detail:
+`docs/INTEGRATION.md` rev 44, `docs/AUDIO.md` §F21,
+`docs/BUNDLE-AUDIO.md` §10.4 + §11.
+
+**What changed since the operator's last sync (files to copy to the
+rig):**
+
+```
+streamer/include/kn/kn_opus.h          (NEW — the decode-only wrapper contract)
+streamer/src/kn_opus.c                 (NEW — real body + honest stub, one file)
+streamer/src/kn_opus_kat_vectors.h     (NEW — GENERATED, 85 KAT vectors; do not edit)
+streamer/tests/test_knopus.c           (NEW — the 27th suite, 105 checks)
+tools/opus_reference.py                (NEW — the independent vector emitter)
+streamer/src/kn_audio.c                (feed ring + xform + open_feed/push_f32)
+streamer/include/kn/kn_audio.h
+streamer/tests/test_knaudio.c          (22 -> 54 checks)
+streamer/src/knvstd_main.c             (--session-audio-play wiring + STAMP L -> N)
+CMakeLists.txt                         (three-mode opus detect + the 27th suite)
+tools/build_native_tests.sh            (opus sniff, test_knopus legs, rc_opus)
+tools/cross_check.sh                   (kn_opus per-file + link legs, both arches)
+tests/T10_build_and_test.py            (the opus pin + ensure_opus_source + suites)
+README.md                              (the opus row + pin)
+docs/AUDIO.md, docs/RTSP.md (§42), docs/BUNDLE-AUDIO.md (§10.4/§11),
+docs/BOOTSTRAP.md, docs/INTEGRATION.md (rev 44), START-HERE.md
+```
+
+**The one-time libopus provisioning is AUTOMATIC**: T10 downloads the
+pinned opus 1.5.2 release tarball (~7.8 MB, SHA-256
+`65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1`),
+verifies it BEFORE extraction and stages `third_party/opus` (gitignored
+like every vendor tree); CMake then builds the vendored static lib and
+`KN_HAVE_OPUS=1` turns the stub into the real decoder. If staging ever
+fails, T10 says FAIL loudly (never a silent downgrade) and the build
+stays the honest stub.
+
+**Rig procedure (same shape as every slice):**
+
+1. sync the files above;
+2. clean rebuild + **T10 in full** — expected verdict **ALL PASS 89**
+   (was 86: +1 opus staging, +1 `test_knopus exists in build`, +1
+   `test_knopus -> PASS`; the suite runs the REAL 105-check vector
+   battery because the vendored tree is staged). ctest goes
+   **26/26 → 27/27** on both TLS backends. Suite baselines:
+   `test_knopus` **105** (NEW), `test_knaudio` **54** (was 22);
+   everything else unchanged (`test_knfreeze` 901, `test_kninput` 794,
+   `test_kndrawpath` 1051, `audio.vectors` 188/0). If T10 reports
+   anything else, re-sync and redo;
+3. **check the stamp**: the first line of the run log must now be
+   `{"mode":"build","compiled":"...","round":"N"}` — slice 2 shipped
+   without the bump (run 35 flew stamped `L`), so `L` on the log means
+   the rebuild did not take;
+4. **run 36** = the run-35 command plus ONE flag:
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 ^
+  --session-seconds=900 --lottery-gap=60 --lottery-stop-on-keeper=0 ^
+  --input-script=build\login.txt --input-anti-afk=60000 ^
+  --session-video-out=logs\video.264 --session-audio-out=logs\audio.opus ^
+  --session-present --session-audio-play --session-release > logs\run36.log
+```
+
+What to expect with `--session-audio-play`:
+
+1. early in the draw: `audio_play_begin ok:1 fmt:"..." rate:...
+   channels:... swr:0 opus:"1.5.2"` — and then LIVE stereo game audio
+   through the default render endpoint, in parallel with the `.opus`
+   file (the file stays the primary evidence; playback never touches
+   the F12/F13/F16 file guarantees);
+2. at teardown: `audio_play_end pkts:... frames:... decode_fail:0
+   pushed:... dropped:... starved:... events:... written:...
+   queue_ms:...` — `decode_fail` must be 0; small `dropped`/`starved`
+   are tolerated and counted (each starve = one zero-filled device
+   buffer = a click at worst);
+3. if the build somehow has no libopus: `audio_play_begin ok:0
+   reason:"libopus not linked in this build (KN_HAVE_OPUS=0)"` — the
+   run is still fully valid (file-only audio, exactly like run 35),
+   but then T10's staging leg failed earlier and deserves a look;
+4. a 403 SESSION_LIMIT ladder at create time is the run-35 orphaned
+   seat (RTSP §42.3) — F7's 20/40/80 s backoff owns it; only a
+   persistent refusal beyond the ladder is new information;
+5. everything else behaves EXACTLY like run 35 (presenter, input,
+   freeze witness, release).
+
+Evidence protocol unchanged: stdout capture PLUS the whole `logs/`
+knlog directory, pushed to `karnynow-logs` as `run36_logs/`.
+
+**Sandbox gates at slice-3 close (all green, re-run after the last
+edit):** native battery **PASS** (26 legs, zero warnings; `test_knaudio`
+54, `test_knopus` 105 bit-exact vs libopus 1.5.2 — max |diff| 0 LSB) ·
+cross `-Werror` **PASS ×2 arches** (kn_opus.c per-file + test_knopus
+link legs) · ctest **27/27 ×2 backends** · T10 POSIX dry **ALL PASS
+79** (was 76; the dry stages the vendored opus and runs the REAL
+vector leg) · T13 **ALL PASS 63** · `sandbox_session_e2e` **48/48
+deletes:1** · skeleton **113 == 113** vs run-35 stdout (no key added —
+playback lives on event lines) · ASan/UBSan clean on both touched
+suites (ASan caught the test's own ring-backing sizing; the new xform
+checks caught a REAL S32 overflow — `2147483647.0f` is 2^31 in float —
+before first ship).
+
+No wire-format change, no summary-key change. Round N's ship list
+(F20/F21/F22-gate/F24) is now complete; what remains open for the
+round: the run-36 listen, the orphaned-seat/403 question, and the
+teardown-400-vs-timeout family diagnosis (F24 keeps measuring).

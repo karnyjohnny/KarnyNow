@@ -4601,3 +4601,141 @@ INPUT.md §10.11.
   WASAPI audio) remains the last piece before run 35 becomes a full
   watch-and-listen run; until then audio still lands in
   `--session-audio-out` only.
+
+## 42. Round N slices 2–3 — RUN 35: **THE FIRST LIVE-PICTURE RUN — THE OPERATOR WATCHED A FULL-SCREEN GEFORCE NOW STREAM FROM THE PURE-C CLIENT, ON DELIBERATELY BAD 2.4 GHz WI-FI, AND IT HELD FOR 744 SECONDS. F20 PROVEN LIVE; THE DEATH IS A RIG-SIDE STAGED DEATH; F21 SHIPS (LIVE WASAPI PLAYBACK) — RUN 36 IS THE FIRST WATCH-AND-LISTEN RUN.**
+
+### 42.1 The verdict: F20 flew where it counts — in the operator's eyes
+
+Run 35 (Endfield 107057914, stamp L build, rig **185.136.69.134**,
+host **np-frk-06** — a Frankfurt pool draw, the first non-Warsaw rig of
+the era) was flown with the run-34 command plus ONE flag
+(`--session-present`) and one deliberate handicap: the operator ran the
+session over **2.4 GHz Wi-Fi instead of the 5 GHz phone tether** to
+raise the bar. Result, in the operator's words: **smooth, stable,
+clear** — full-screen live GeForce NOW video from our own D3D9
+presenter, for over twelve minutes.
+
+The counters agree with the eyes:
+
+- `video_present_end reason:"session_end" frames:22329 fails:0 max_ms:5.0`
+  — every presented frame accounted for, ZERO present failures, worst
+  single present 5.0 ms (the 1 Hz overlay never saw a hitch);
+- 22 329 AUs = 744.3 s at 29.97 fps; **196 420/196 420 datagrams
+  authenticated, ZERO gaps, ZERO decode errors**; 9 keyframes, idr/pli
+  41/41 answered; BWE warm all run (37 618 kbps estimate, **6 %
+  utilisation** — the 2.4 GHz handicap never came close to the video
+  bitrate's ceiling);
+- input: `input_summary events:98 fired:98 sent:124`, failures 0,
+  `afk_pulses` nominal — **F23's per-event source labels proven live**;
+- the F22 baseline gate (avg60 ≥ 1500 kbps) did exactly its job:
+  **8 decay warns, 7 recoveries**, and the fatal episode at 743.99 s
+  correctly refused to "recover" into the death;
+- captured media verified off-rig (ffmpeg 5.1.9): `video_trimmed.mp4`
+  h264 1280×720 30/1 ≈1.53 Mbps, last frame = in-world Endfield
+  gameplay; `audio_trimmed.opus` 48 kHz stereo ≈246 kbps,
+  volumedetect mean −54.6 dB / max −23.6 dB = **real content**, not
+  the launcher silence of runs 30–32.
+
+### 42.2 The death at 744.3 s: abrupt, control-plane-first, rig-side
+
+`stop_reason:"recovery_exhausted"` at media 744.3 s. The survival
+series now reads 14 / 14 / 29 / 36 / 122 / 815.7 / 900.0 / **744.3** —
+the second-longest draw ever, and the freeze_witness line (F22, its
+first firing on a genuine death since the gate shipped) localises the
+cut precisely:
+
+- last control message rel **729 110** = **15.2 s BEFORE** the last
+  video rel 744 352; last audio +2.2 s after video;
+- the video ramp into the death is FLAT (no decay — abrupt silence,
+  the freeze signature, not the ceiling's gradual decay of §36);
+- across runs 33/34/35 the **cascade ORDER varies** (ctrl-first here,
+  video-first in run 33) while the shape is identical: total silence
+  inside ~1 s with the WSS still writable. A staged, rig-side death
+  (hypervisor/host reclaim), not a network gradient and not our client:
+  every plane of ours kept its contracts to the last millisecond
+  (zero gaps, zero SRTP failures, recovery + IDR/PLI fired honestly
+  into the silence).
+
+### 42.3 Teardown on a dead rig — F24's first measurement, and the seat question
+
+The polite stop after the death measured, for the record:
+`rtsp_teardown rc:-3` (TIMEOUT — the rig's RTSP socket never answered),
+mbedTLS **−0x004E** (CONN_RESET) on the CloudMatch DELETE,
+`cm_release rc:-2` (IO). So run 35's seat was **NOT given back** — the
+release failed at the transport, not at the API (run 34's 400 was the
+server answering; here nobody answered at all). Expect a possible
+**403 SESSION_LIMIT** ladder at the start of run 36 and treat it as
+diagnosis, not damage (F7's backoff owns it). F24's body-snippet leg
+stays armed for the next server-answered non-2xx.
+
+Audio plane footnote: **`seq_loss 1`** — the first non-zero sequence
+loss in project history, on 149 461 packets (747.3 s), one lost 5 ms
+packet, zero SRTP failures, zero TOC-invalid; the `.opus` shipped at
+22.0 MB with `ogg.dropped_packets/write_errors` 0. Harmless by every
+contract we have, recorded because "always zero" claims deserve their
+first counterexample.
+
+### 42.4 F21 ships: live WASAPI playback of the arx Opus pipe
+
+Slice 3 closes round N's ship list. `--session-audio-play` (default
+OFF, Win32 only) plays THIS draw's bundle audio live, **in parallel**
+with `--session-audio-out` (the file stays the primary evidence; the
+ogg write happens FIRST in `sess_audio_emit` and playback never
+back-pressures the SRTP commit): arx emit → `kn_opus_decode_f32`
+(decode-only wrapper, the project's only Opus knowledge) →
+`swr_convert` ONLY when the device mix rate ≠ 48 kHz → 2 s SPSC feed
+ring → the event-driven WASAPI refill thread (zero-fill = counted,
+honest underrun). Open failure is NON-FATAL and LOUD
+(`audio_play_begin ok:0 reason:"…"`); teardown reports
+`audio_play_end pkts/frames/decode_fail/pushed/dropped/starved/events/
+written/queue_ms`. No summary keys: the skeleton stays **113**.
+
+The one-time provisioning: T10 stages **opus 1.5.2** (release tarball,
+SHA-256-pinned like every vendor tree) into `third_party/opus`; CMake
+prefers a system libopus (pkg-config), then the vendored tree, then
+compiles the honest stub — a build without opus says so on every
+`audio_play_begin` line instead of pretending. Pinning discipline:
+`test_knopus` (105 checks) replays 85 KAT vectors from
+`tools/opus_reference.py` (independent encode+decode path, self-proving
+emitter) — **bit-exact, max |diff| 0 LSB** — and the stub mode has its
+own contract leg, so the suite passes honestly in BOTH worlds.
+
+Sandbox gates at slice-3 close (all green): native battery **PASS**
+(26 legs; `test_knaudio` 22 → **54** with the ring+xform legs under
+ASan/UBSan, `test_knopus` **105** NEW) · cross `-Werror` ×2 arches
+**PASS** (kn_opus.c per-file legs + test_knopus link) · ctest
+**27/27 ×2 backends** · T10 POSIX dry **ALL PASS 79** (was 76: +opus
+staging, +`test_knopus` exists, +suite run; the vendored tree builds
+and the REAL vector leg runs in the dry) · T13 **ALL PASS 63** (no
+wire change) · `sandbox_session_e2e` **48/48 deletes:1** · skeleton
+**113 == 113** vs run-35 stdout · ASan/UBSan clean on both new/edited
+suites. Two real bugs caught by the new checks before first ship: the
+test's own ring-backing sizing (ASan: global-buffer-overflow) and the
+**S32 xform's float-constant overflow** (`2147483647.0f` rounds to
+2^31; fixed with double math). **Target T10 expectation moves 86 →
+89**; the build stamp moves **L → N** (slice 2 shipped without the
+bump — run 35 flew stamped L; from run 36 the stamp check is `"N"`).
+
+### 42.5 Run 36 = the first watch-AND-listen run
+
+The run-35 command plus ONE flag:
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 ^
+  --session-seconds=900 --lottery-gap=60 --lottery-stop-on-keeper=0 ^
+  --input-script=build\login.txt --input-anti-afk=60000 ^
+  --session-video-out=logs\video.264 --session-audio-out=logs\audio.opus ^
+  --session-present --session-audio-play --session-release > logs\run36.log
+```
+
+What to expect: everything run 35 showed, plus
+`audio_play_begin ok:1 … opus:"1.5.2"` early (device mix format +
+swr:0 on a 48 kHz endpoint), live stereo game audio through the
+default render endpoint, and at teardown `audio_play_end` with
+`decode_fail:0`, `dropped` ≈ 0 (a few frames per draw boundary are
+normal), `starved` small-but-nonzero tolerated (each starvation is one
+zero-filled device buffer = a click at worst), `written` ≈
+rate × session seconds. If opus provisioning failed on the rig the run
+is still valid — `audio_play_begin ok:0 reason:"libopus not linked…"`
+and the `.opus` file carries the audio as before. Evidence both ways
+as always: stdout capture PLUS the `logs/` knlog directory.

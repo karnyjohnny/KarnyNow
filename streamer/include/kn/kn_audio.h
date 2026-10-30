@@ -62,6 +62,64 @@ int kn_audio_fmt_parse(const unsigned char *wfx, size_t len,
 void kn_audio_gen(const kn_audio_fmt *fmt, unsigned char *dst,
                   unsigned frames, unsigned tone_hz, double *phase);
 
+/* --- F21 feed core (platform-NEUTRAL, host-testable) -------------------
+ * The single-producer/single-consumer PCM ring between the session's
+ * decode side (producer: the pump thread, inside the kn_arx emit
+ * callback) and the WASAPI render thread (consumer). Frame-indexed,
+ * power-of-two capacity, floats stay floats INSIDE the ring — the
+ * device-format conversion happens exactly once, at the consumer, in
+ * kn_audio_xform_f32(), so a 44.1 kHz S16 device and a 48 kHz float32
+ * device ride the same ring code.
+ *
+ * Concurrency contract: `wr` is written ONLY by the producer after its
+ * memcpys, `rd` ONLY by the consumer after its reads; both are volatile
+ * unsigned words (the same single-word latch discipline as the pump's
+ * sctl_* mirrors — x86 stores are release-ordered for this use, and the
+ * worst case of a stale index read is one refill of silence or one
+ * dropped tail chunk, both counted, never corruption).
+ * push() never blocks and never fails: frames that do not fit are
+ * DROPPED from the tail and counted (a full ring means the consumer is
+ * a whole ring behind — audibly hopeless anyway; dropping keeps the
+ * playback edge at the live position instead of sliding into latency).
+ * pop() returns how many frames it took; the caller zero-fills the rest
+ * (that zero-fill IS the underrun, and the engine counts it). */
+typedef struct kn_audio_feed {
+    float *buf;                /* cap * channels interleaved floats */
+    unsigned cap;              /* power-of-two frame capacity */
+    unsigned channels;
+    volatile unsigned wr;      /* producer frame cursor (mod cap) */
+    volatile unsigned rd;      /* consumer frame cursor (mod cap) */
+    unsigned long long pushed; /* frames accepted, lifetime */
+    unsigned long long popped; /* frames delivered, lifetime */
+    unsigned long long dropped;/* frames refused (ring full), lifetime */
+} kn_audio_feed;
+
+/* Bind a feed to caller-owned `backing` (backing_frames * channels
+ * floats). backing_frames is ROUNDED DOWN to a power of two (minimum 1);
+ * returns the usable frame capacity, or 0 on bad args. The caller keeps
+ * the allocation alive for the feed's whole life. */
+unsigned kn_audio_feed_init(kn_audio_feed *f, float *backing,
+                            unsigned backing_frames, unsigned channels);
+
+/* Producer: copy up to `frames` interleaved float frames in; returns the
+ * frames accepted (the rest counted in dropped). */
+unsigned kn_audio_feed_push(kn_audio_feed *f, const float *pcm,
+                            unsigned frames);
+
+/* Consumer: take up to `frames` frames into `dst` (capacity frames *
+ * channels floats); returns frames taken (0 = empty ring). */
+unsigned kn_audio_feed_pop(kn_audio_feed *f, float *dst, unsigned frames);
+
+/* Current fill in frames (wr - rd, unsigned wrap-safe). */
+unsigned kn_audio_feed_level(const kn_audio_feed *f);
+
+/* Convert `frames` interleaved float32 samples (already at the device
+ * rate and channel count) into the device container format: F32 copies
+ * with a +-1 clamp, S16/S32 scale+round+clamp, KN_AFMT_UNKNOWN zeroes.
+ * Byte-level portable code, same family as kn_audio_gen. */
+void kn_audio_xform_f32(const kn_audio_fmt *fmt, unsigned char *dst,
+                        const float *src, unsigned frames);
+
 typedef struct kn_audio_stats {
     unsigned long long events;           /* buffer events serviced */
     unsigned long long frames_written;
@@ -69,6 +127,10 @@ typedef struct kn_audio_stats {
     unsigned long long wait_timeouts;    /* event never fired (200 ms) */
     unsigned long long buffer_errors;    /* GetBuffer/ReleaseBuffer fails */
     unsigned queue_ms;                   /* last measured device padding */
+    /* F21 feed mode (zero in synthetic mode): */
+    unsigned long long push_dropped;     /* frames refused: ring was full */
+    unsigned ring_ms;                    /* current ring fill, ms */
+    unsigned feed;                       /* 1 = feed mode engine */
 } kn_audio_stats;
 
 typedef struct kn_audio kn_audio;        /* opaque */
@@ -79,6 +141,21 @@ int kn_audio_available(void);            /* 1 on Win32 */
  * tone_hz: 0 = silence, else the sine frequency. On failure returns NULL
  * and writes a human reason into errbuf. */
 kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz);
+
+/* F21: open the same default endpoint in FEED mode — the render thread
+ * consumes a kn_audio_feed instead of the synthetic sine. The ring is
+ * sized from the NEGOTIATED device rate (2 s of frames), so the producer
+ * pushes at device rate (the session resamples before pushing when the
+ * device is not 48 kHz). Starved counts refills that found the ring
+ * empty AFTER the first push (pre-roll silence is not an underrun).
+ * Failure modes and the errbuf contract are kn_audio_open's. POSIX/stub
+ * builds return NULL ("no WASAPI backend"). */
+kn_audio *kn_audio_open_feed(char *errbuf, size_t errsz);
+
+/* Producer side of the feed engine: interleaved float32 at the device
+ * rate. Returns frames accepted. 0 when `a` is NULL, not in feed mode,
+ * or the ring is full (every refusal counted in stats.push_dropped). */
+unsigned kn_audio_push_f32(kn_audio *a, const float *pcm, unsigned frames);
 
 /* Device padding in ms (queue_audio_ms for §7.6); -1 when unavailable. */
 int kn_audio_queue_ms(kn_audio *a);

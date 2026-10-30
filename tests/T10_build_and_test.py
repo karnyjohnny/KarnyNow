@@ -270,6 +270,18 @@ USRSCTP_COMMIT = "c625e21950600460cb5c6075616eb1622df2b06a"
 USRSCTP_SHA256 = ("090b9d03bf068ce5989576c8e0ff6979d3031ea85e405acd"
                   "263206f19166b41e")
 
+# round N slice 3 (F21): the one-time libopus provisioning. opus 1.5.2
+# release tarball (xiph), SHA-256 pinned like every other vendor tree;
+# CMake auto-detects third_party/opus and links it into kncore, which is
+# what turns the kn_opus stub into the real decoder on the rig. Without
+# it the build stays honest (stub + audio_play_begin ok:0), so a staging
+# failure is a gated check, never a silent downgrade.
+OPUS_VERSION = "1.5.2"
+OPUS_URL = ("https://github.com/xiph/opus/releases/download/v%s/"
+            "opus-%s.tar.gz" % (OPUS_VERSION, OPUS_VERSION))
+OPUS_SHA256 = ("65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee8"
+               "7f9a7ce1")
+
 
 def ensure_usrsctp_source(results):
     """Fetch the pinned usrsctp source (R3-C, the kn_sctp backend).
@@ -312,6 +324,45 @@ def ensure_usrsctp_source(results):
         shutil.rmtree(stage, ignore_errors=True)
 
 
+def ensure_opus_source(results):
+    """Fetch the pinned opus source (F21, the live-playback decoder).
+
+    usrsctp's discipline verbatim: pinned release tarball, SHA-256
+    verified before extraction, gitignored tree, CMake auto-detect.
+    The marker is the pair CMake needs (CMakeLists.txt + the public
+    header the wrapper includes)."""
+    source = os.path.join(ROOT, "third_party", "opus")
+    # upstream release tarballs keep the public headers FLAT under
+    # include/ (distro packages are the ones that nest them in
+    # include/opus/) — the marker matches what the pin actually ships.
+    marker = os.path.join(source, "include", "opus.h")
+    cmake_marker = os.path.join(source, "CMakeLists.txt")
+    if os.path.isfile(marker) and os.path.isfile(cmake_marker):
+        check(True, results, "opus source already present")
+        return True
+    stage = tempfile.mkdtemp(prefix="opus-stage-",
+                             dir=os.path.join(ROOT, "third_party"))
+    staged = os.path.join(stage, "opus")
+    try:
+        _extract_pinned_tarball(OPUS_URL, OPUS_SHA256, staged)
+        if not os.path.isfile(os.path.join(staged, "include", "opus.h")):
+            raise ValueError("downloaded tree lacks include/opus.h")
+        if os.path.exists(source):
+            raise ValueError(
+                "incomplete third_party/opus exists; left untouched")
+        os.rename(staged, source)
+        check(True, results,
+              "pinned opus %s source downloaded and verified"
+              % OPUS_VERSION)
+        return True
+    except (OSError, urllib.error.URLError, tarfile.TarError,
+            ValueError) as exc:
+        check(False, results, "opus source available (%s)" % exc)
+        return False
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
 def net_tls_finding(ev):
     """Render the per-host measurements available in the selected TLS probe."""
     if not isinstance(ev, dict):
@@ -341,8 +392,9 @@ def main():
     if TLS_BACKEND == "mbedtls":
         tls_backend_ok = ensure_mbedtls_source(results) and tls_backend_ok
     sctp_backend_ok = ensure_usrsctp_source(results)
+    opus_ok = ensure_opus_source(results)
     dependencies_ok = (dependencies_ok and tls_backend_ok
-                       and sctp_backend_ok)
+                       and sctp_backend_ok and opus_ok)
 
     # ---- 0. toolchain ------------------------------------------------
     log("\n=== toolchain ===")
@@ -382,7 +434,8 @@ def main():
     # build/. Retry missing targets explicitly before any binary is launched.
     required_bins = ["test_knfec", "test_knring", "test_knaudio", "test_kngs",
                      "test_knselftest", "knvstd", "test_kndiag", "test_knlog",
-                     "test_knsrtp", "test_kndrawpath", "test_knfreeze"]
+                     "test_knsrtp", "test_kndrawpath", "test_knfreeze",
+                     "test_knopus"]
     missing = [name for name in required_bins if not os.path.isfile(exe(name))]
     if missing and configure_ok:
         log("\nmissing build outputs: %s" % ", ".join(name + ".exe" for name in missing))
@@ -427,7 +480,11 @@ def main():
               # round M (F22): the freeze-witness ring — same story: pure
               # integer math, identical on both machines, and only this
               # list decides whether the target runs it.
-              "test_knfreeze"]
+              "test_knfreeze",
+              # round N slice 3 (F21): the Opus decode wrapper. On the
+              # rig (opus staged) this runs the FULL vector stream; on an
+              # opus-less host it runs the stub contract and says so.
+              "test_knopus"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out

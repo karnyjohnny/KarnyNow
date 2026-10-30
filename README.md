@@ -131,13 +131,15 @@ KarnyNow stands on excellent open-source work — with thanks to all of it:
 | [FFmpeg](https://ffmpeg.org/) | H.264 decode in-process (libavcodec / swscale / swresample / avutil) | LGPL-2.1+ (or GPL, depending on build configuration) | prebuilt win7 dev tree committed under `build/ffmpeg/` (built by the repo owner) |
 | [Mbed TLS](https://www.trustedfirmware.org/projects/mbed-tls/) 3.6.0 | TLS/DTLS 1.2, X.509 verification (the `mbedtls` backend) | Apache-2.0 **OR** GPL-2.0-or-later | `third_party/mbedtls` — staged locally, not committed |
 | [usrsctp](https://github.com/sctp/usrsctp) | userspace SCTP (AF_CONN) for the control/input plane | BSD-3-Clause | `third_party/usrsctp` — staged locally, not committed |
+| [Opus](https://opus-codec.org/) 1.5.2 (Xiph.Org) | Opus decode for live playback (`kn_opus`, F21) — the build stays an honest stub without it | BSD-3-Clause | `third_party/opus` — staged locally, not committed (T10 downloads the pinned release tarball and verifies its SHA-256) |
 | [tiny-AES-c](https://github.com/kokke/tiny-aes-c) (kokke) | AES block primitives for SRTP/DTLS keying | public domain / Unlicense (per upstream) | `third_party/tiny-aes-c` — staged locally (T10 verifies SHA-256 of the pinned files) |
 | [crypto-algorithms](https://github.com/B-Con/crypto-algorithms) SHA-1 (Brad Conte) | SHA-1 for DTLS fingerprints / SRTP KDF | provided "as is" (see file headers) | `third_party/crypto-algorithms-sha1` — staged locally |
 | Cisco OpenH264 API headers; mingw-w64 `d3d9`/`dxva2` headers | signature-verification reference only — **not compiled into any binary** | BSD-2-Clause (Cisco); public domain / ZLIB (mingw-w64) | `docs/reference/` |
 
 `third_party/` pins (enforced by `tests/T10_build_and_test.py`): tiny-AES-c
 `23856752f` · crypto-algorithms `cfbde484` · usrsctp `c625e219` · mbedTLS
-3.6.0 `2ca6c285` + framework `750634d3`.
+3.6.0 `2ca6c285` + framework `750634d3` · opus 1.5.2 (release tarball,
+SHA-256 `65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1`).
 
 ## Documentation map
 

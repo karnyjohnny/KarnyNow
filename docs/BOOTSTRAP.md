@@ -971,3 +971,19 @@ pass their selftests on the target (`present mean 0.31 ms`, synthetic
 PCM), run 34 is the first run the operator watches and hears live. The
 freeze family arrived at 815.2 s with the control plane still alive
 (RTSP.md §40.2) — F22 instruments the witness.
+
+**Run 35 marker (2026-10-30): the operator WATCHED a live GeForce NOW
+stream from the pure-C client.** Full-screen D3D9 presentation over the
+DELIBERATE 2.4 GHz Wi-Fi handicap: smooth, stable, clear —
+`video_present_end frames:22329 fails:0 max_ms:5.0`, 196 420/196 420
+datagrams, zero gaps/decode errors, 744.3 s of media (second-longest
+draw on record) before a rig-side staged death (freeze_witness: control
+plane silent 15.2 s before video; RTSP.md §42.2). **F20 PROVEN LIVE;
+G3's video-presentation bar is MET LIVE.** The audio bar was met as
+file-only in run 35 (747.3 s, first non-zero `seq_loss`: ONE packet,
+BUNDLE-AUDIO §10.4) — and slice 3 ships the last piece: **F21, live
+WASAPI playback** (`--session-audio-play`: arx Opus → `kn_opus` decode
+(vendored libopus 1.5.2, T10-staged under a SHA-256 pin) → 2 s feed
+ring → the event-driven refill thread; the file stays the primary
+evidence, playback never back-pressures SRTP). Run 36 is the first
+watch-AND-listen run; stage-3 presentation closes on its evidence.

@@ -59,9 +59,44 @@ add_library(kncore STATIC
   streamer/src/kn_bw.c
   streamer/src/kn_ogg.c
   streamer/src/kn_arx.c
+  streamer/src/kn_opus.c
   third_party/tiny-aes-c/aes.c
   third_party/crypto-algorithms-sha1/sha1.c
 )
+# --- Opus (round N slice 3, F21: live WASAPI playback of the arx pipe) ---
+# Three modes, in order of preference: a system libopus (pkg-config — the
+# sandbox dev-package path), the pinned vendored tree third_party/opus
+# (T10 stages opus 1.5.2 with a SHA-256 pin — the rig path), or the
+# honest stub (kn_opus.c compiles its !KN_HAVE_OPUS body and the session
+# reports audio_play_begin ok:0). The wrapper's include handles BOTH
+# header layouts (pkg-config and the vendored tree export an include dir
+# where <opus.h> resolves; a system /usr/include resolves <opus/opus.h>),
+# so no per-mode include fiddling lives here — kn_opus.c accepts both.
+set(KN_OPUS_SYSTEM 0)
+set(KN_OPUS_VENDORED 0)
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+  pkg_check_modules(OPUS QUIET opus)
+  if(OPUS_FOUND)
+    set(KN_OPUS_SYSTEM 1)
+  endif()
+endif()
+if(NOT KN_OPUS_SYSTEM AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/opus/CMakeLists.txt")
+  set(KN_OPUS_VENDORED 1)
+  set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+  set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+  set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+  add_subdirectory(third_party/opus EXCLUDE_FROM_ALL)
+  if(TARGET opus)
+    # upstream opus is not built under OUR -Werror policy (same rule as
+    # the mbedtls target below)
+    target_compile_options(opus PRIVATE -w)
+  endif()
+endif()
+
 set(KN_TLS_BACKEND "mbedtls" CACHE STRING "TLS backend: mbedtls or schannel")
 set_property(CACHE KN_TLS_BACKEND PROPERTY STRINGS mbedtls schannel)
 if(NOT KN_TLS_BACKEND STREQUAL "schannel" AND
@@ -204,8 +239,24 @@ target_compile_definitions(kncore PRIVATE
   KN_DIAG_BUILD_FLAGS="${_kn_flags}"
   KN_DIAG_BUILD_EXTRA="${_kn_ffmpeg}")
 
+# F21: publish the opus mode to every consumer of kncore (knvstd AND the
+# test suites — test_knopus runs the vector stream only in real builds).
+if(KN_OPUS_SYSTEM)
+  target_compile_definitions(kncore PUBLIC KN_HAVE_OPUS=1)
+  target_include_directories(kncore PUBLIC ${OPUS_INCLUDE_DIRS})
+  target_link_libraries(kncore PUBLIC ${OPUS_LIBRARIES})
+  message(STATUS "Opus: system pkg-config (${OPUS_VERSION})")
+elseif(KN_OPUS_VENDORED)
+  target_compile_definitions(kncore PUBLIC KN_HAVE_OPUS=1)
+  target_link_libraries(kncore PUBLIC opus)
+  message(STATUS "Opus: vendored third_party/opus (F21 live playback ON)")
+else()
+  message(STATUS "Opus: ABSENT — kn_opus compiles the honest stub; "
+                 "--session-audio-play will report audio_play_begin ok:0")
+endif()
+
 enable_testing()
-foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert kndtls knsctp kninput kndrawpath knfreeze knbw knogg knarx)
+foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert kndtls knsctp kninput kndrawpath knfreeze knbw knogg knarx knopus)
   add_executable(test_${t} streamer/tests/test_${t}.c)
   target_link_libraries(test_${t} PRIVATE kncore)
   # tests include the generated KAT vector headers, which live in src/

@@ -29,6 +29,7 @@
 #endif
 
 #include "kn/kn_audio.h"
+#include "kn/kn_opus.h"  /* round N slice 3 (F21): live WASAPI playback */
 #include "kn/kn_arx.h"   /* round XLVIII (F11): bundle-audio rx */
 #include "kn/kn_freeze.h" /* round M (F22): freeze-witness ring */
 #include "kn/kn_ogg.h"   /* round XLVIII (F11): OggOpus capture file */
@@ -53,6 +54,16 @@
 #include "kn/kn_ws.h"
 #include "kn/knlog.h"
 #include "kn/knring.h"
+/* Round N slice 3 (F21): the live-playback resampler. Only compiled when
+ * the build has an FFmpeg dev tree (KN_HAVE_FFMPEG, the same gate as the
+ * video decode path); swr_alloc_set_opts2 + AVChannelLayout are the
+ * non-deprecated 5.1..8.x API, so the rig's libswresample 63 and the
+ * sandbox's system 5.1 both take this body. */
+#ifdef KN_HAVE_FFMPEG
+#  include <libswresample/swresample.h>
+#  include <libavutil/channel_layout.h>
+#  include <libavutil/samplefmt.h>
+#endif
 
 #include <signal.h>
 #include <stdio.h>
@@ -190,6 +201,14 @@ static void usage(void)
            "                            backbuffer). ESC or WM_CLOSE closes\n"
            "                            the window and the session continues\n"
            "                            headless. Default OFF. Win32 only.\n"
+           "       [--session-audio-play] round N slice 3 (F21): PLAY the\n"
+           "                            bundle audio LIVE through WASAPI\n"
+           "                            (arx Opus -> kn_opus decode -> feed\n"
+           "                            ring -> default render endpoint),\n"
+           "                            IN PARALLEL with --session-audio-out.\n"
+           "                            Needs libopus in the build; a failed\n"
+           "                            open is logged and never kills the\n"
+           "                            session. Default OFF. Win32 only.\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
            "  knvstd --list-selftests\n"
            "  knvstd --version\n"
@@ -1404,6 +1423,7 @@ static int run_replay(const char *cap_path, const char *au_dir,
  * the writer must preserve evidence through an abnormal end). */
 static volatile sig_atomic_t g_knv_stop;
 static int  g_sess_present = 0;   /* round N (F20): --session-present */
+static int  g_sess_audio_play = 0; /* round N slice 3 (F21): --session-audio-play */
 
 #ifdef _WIN32
 static BOOL WINAPI knv_ctrl_handler(DWORD type)
@@ -3316,6 +3336,27 @@ typedef struct {
     const char *audio_path;
     int      audio_armed, audio_srtp_derived, audio_file_on;
     unsigned audio_prof;
+    /* round N slice 3 (F21): live WASAPI playback of THIS draw's arx
+     * pipeline. Opened on the MAIN thread before sess_pump_start (COM +
+     * device + render thread), consumed on the PUMP thread inside
+     * sess_audio_emit (decode + resample + ring push — the producer
+     * half of the kn_audio_feed SPSC contract), closed on the main
+     * thread after sess_pump_stop joins (F12's FILE* discipline applied
+     * to a device handle). Counters: single writer (the pump thread). */
+    int      play_on;                 /* --session-audio-play was given */
+    kn_audio *play_dev;               /* feed-mode engine or NULL */
+    kn_opus_dec *play_dec;            /* 48 kHz stereo decoder or NULL */
+#ifdef KN_HAVE_FFMPEG
+    struct SwrContext *play_swr;      /* NULL unless device rate != 48k */
+#else
+    void *play_swr;
+#endif
+    float   *play_src;                /* decode scratch: 5760*2 floats */
+    float   *play_dst;                /* post-resample scratch */
+    unsigned play_dst_cap;            /* frame capacity of play_dst */
+    unsigned play_rate;               /* device rate the ring expects */
+    unsigned long long play_pkts, play_frames, play_fail, play_pushed;
+    char     play_err[96];            /* open-failure reason (evidence) */
     int      input_version;          /* -1 until the rig's 0x020e lands */
     /* round M (F22): freeze-witness cross-thread latches — the pump
      * worker writes them (audio emit, ctrl_in beat), the media loop
@@ -3354,6 +3395,11 @@ typedef struct {
  * cheap and never block on anything but the file write. */
 #define SESS_OGG_SERIAL 0x4B4E4F47u
 
+/* F21: the decode scratch must hold libopus's worst case — one 120 ms
+ * packet at 48 kHz = 5760 frames per channel (kn_opus refuses smaller
+ * capacities by contract). */
+#define KN_OPUS_PLAY_CAP 5760u
+
 static int sess_audio_file_write(void *ctx, const uint8_t *data, size_t len)
 {
     sess_pump *p = (sess_pump *)ctx;
@@ -3368,6 +3414,43 @@ static void sess_audio_emit(void *ctx, const uint8_t *payload, size_t len,
     p->fw_last_audio_ms = kn_sock_now_ms();   /* F22 cascade latch */
     if (p->audio_file_on)
         (void)kn_ogg_mux_packet(&p->ogg, payload, len, samples48);
+    /* round N slice 3 (F21): the live-playback consumer chain — decode
+     * on the pump thread (a 5 ms CELT packet is microseconds of work),
+     * resample only when the device mix rate is not 48 kHz, then push
+     * into the feed ring (SPSC: this thread produces, the kn_audio
+     * render thread consumes; a full ring drops the tail and counts it
+     * instead of adding latency). The file path above stays the
+     * primary evidence — playback is best-effort and never back-pressures
+     * the SRTP commit. */
+    if (p->play_dev && p->play_dec) {
+        int n = kn_opus_decode_f32(p->play_dec, payload, len, p->play_src,
+                                   KN_OPUS_PLAY_CAP);
+        if (n > 0) {
+            const float *src = p->play_src;
+            unsigned frames = (unsigned)n;
+            p->play_pkts++;
+            p->play_frames += (unsigned)n;
+#ifdef KN_HAVE_FFMPEG
+            if (p->play_swr) {
+                uint8_t *out = (uint8_t *)p->play_dst;
+                const uint8_t *in = (const uint8_t *)p->play_src;
+                int got = swr_convert(p->play_swr, &out,
+                                      (int)p->play_dst_cap, &in, n);
+                if (got > 0) {
+                    src = p->play_dst;
+                    frames = (unsigned)got;
+                } else {
+                    frames = 0u;             /* resampler error: drop, count */
+                    p->play_fail++;
+                }
+            }
+#endif
+            if (frames)
+                p->play_pushed += kn_audio_push_f32(p->play_dev, src, frames);
+        } else {
+            p->play_fail++;
+        }
+    }
 }
 
 /* round XLIX (F12): close the bundle-audio capture — flush the final
@@ -3431,6 +3514,198 @@ static void sess_audio_file_close(sess_pump *p, sess_ice_stats *st)
            p->arx.st.seq_loss % 1000000000ull,
            p->ogg.write_errors % 1000000000ull);
     fflush(stdout);
+}
+
+/* round N slice 3 (F21): open the live WASAPI playback path for this
+ * draw — feed-mode kn_audio (default render endpoint), a 48 kHz stereo
+ * kn_opus decoder, and (only when the device mix rate is not 48 kHz) a
+ * libswresample float->float converter. NEVER fatal: every failure
+ * lands on the audio_play_begin evidence line with its reason and the
+ * session continues file-only, exactly like F20's presenter-open policy.
+ *
+ * CALL CONTRACT: main thread, before sess_pump_start (the pump thread
+ * becomes the sole producer through sess_audio_emit; the kn_audio
+ * render thread is the sole consumer). Idempotent per draw: play_on is
+ * cleared on close. */
+static void sess_audio_play_open(sess_pump *p, int want)
+{
+    const kn_audio_fmt *af;
+    char fdesc[64];
+    int swr_on = 0;
+
+    p->play_on = want ? 1 : 0;
+    if (!want)
+        return;
+    if (!kn_opus_available()) {
+        snprintf(p->play_err, sizeof p->play_err,
+                 "libopus not linked in this build");
+        goto fail;
+    }
+    p->play_dev = kn_audio_open_feed(p->play_err, sizeof p->play_err);
+    if (!p->play_dev)
+        goto fail;
+    af = kn_audio_format(p->play_dev);
+    p->play_rate = af->rate;
+    p->play_dec = kn_opus_decoder_create(KN_ARX_CLOCK_HZ, KN_ARX_CHANNELS,
+                                         p->play_err, sizeof p->play_err);
+    if (!p->play_dec) {
+        kn_audio_close(p->play_dev);
+        p->play_dev = NULL;
+        goto fail;
+    }
+    p->play_src = (float *)malloc((size_t)KN_OPUS_PLAY_CAP *
+                                  KN_ARX_CHANNELS * sizeof(float));
+    if (af->rate != KN_ARX_CLOCK_HZ) {
+#ifdef KN_HAVE_FFMPEG
+        AVChannelLayout ch;
+        av_channel_layout_default(&ch, (int)KN_ARX_CHANNELS);
+        if (swr_alloc_set_opts2(&p->play_swr, &ch, AV_SAMPLE_FMT_FLT,
+                                (int)af->rate, &ch, AV_SAMPLE_FMT_FLT,
+                                (int)KN_ARX_CLOCK_HZ, 0, NULL) != 0 ||
+            !p->play_swr || swr_init(p->play_swr) < 0) {
+            av_channel_layout_uninit(&ch);
+            snprintf(p->play_err, sizeof p->play_err,
+                     "swr_init failed for %u Hz device", af->rate);
+            kn_opus_decoder_destroy(p->play_dec);
+            p->play_dec = NULL;
+            kn_audio_close(p->play_dev);
+            p->play_dev = NULL;
+            free(p->play_src);
+            p->play_src = NULL;
+            goto fail;
+        }
+        av_channel_layout_uninit(&ch);
+        swr_on = 1;
+        /* 120 ms in at 48k can become 120 ms out at the device rate,
+         * plus one swr flush frame of headroom */
+        p->play_dst_cap = KN_OPUS_PLAY_CAP + 4096u;
+        p->play_dst = (float *)malloc((size_t)p->play_dst_cap *
+                                      KN_ARX_CHANNELS * sizeof(float));
+        if (!p->play_dst) {
+            snprintf(p->play_err, sizeof p->play_err,
+                     "resample scratch alloc failed");
+            swr_free(&p->play_swr);
+            kn_opus_decoder_destroy(p->play_dec);
+            p->play_dec = NULL;
+            kn_audio_close(p->play_dev);
+            p->play_dev = NULL;
+            free(p->play_src);
+            p->play_src = NULL;
+            goto fail;
+        }
+#else
+        snprintf(p->play_err, sizeof p->play_err,
+                 "device rate %u Hz != 48000 and no FFmpeg resampler "
+                 "in this build", af->rate % 1000000u);
+        kn_opus_decoder_destroy(p->play_dec);
+        p->play_dec = NULL;
+        kn_audio_close(p->play_dev);
+        p->play_dev = NULL;
+        free(p->play_src);
+        p->play_src = NULL;
+        goto fail;
+#endif
+    }
+    if (!p->play_src) {
+        snprintf(p->play_err, sizeof p->play_err, "decode scratch alloc failed");
+        kn_opus_decoder_destroy(p->play_dec);
+        p->play_dec = NULL;
+        kn_audio_close(p->play_dev);
+        p->play_dev = NULL;
+        goto fail;
+    }
+    kn_audio_fmt_describe(af, fdesc, sizeof fdesc);
+    printf("{\"mode\":\"session\",\"event\":\"audio_play_begin\","
+           "\"ok\":1,\"fmt\":\"%s\",\"rate\":%u,\"channels\":%u,"
+           "\"swr\":%d,\"opus\":\"%s\"}\n",
+           fdesc, af->rate % 10000000u, af->channels % 1000u, swr_on,
+           kn_opus_version());
+    fflush(stdout);
+    {
+        kn_lctx b;
+        kn_lctx_init(&b, KN_CH_MEDIA, KN_INFO, "audio_play_begin");
+        kn_lctx_str(&b, "fmt", fdesc);
+        kn_lctx_i64(&b, "swr", swr_on);
+        kn_lctx_str(&b, "opus", kn_opus_version());
+        kn_log_emit(&b);
+    }
+    return;
+
+fail:
+    printf("{\"mode\":\"session\",\"event\":\"audio_play_begin\","
+           "\"ok\":0,\"reason\":\"%s\"}\n", p->play_err);
+    fflush(stdout);
+    {
+        kn_lctx b;
+        kn_lctx_init(&b, KN_CH_MEDIA, KN_WARN, "audio_play_begin");
+        kn_lctx_i64(&b, "ok", 0);
+        kn_lctx_str(&b, "reason", p->play_err);
+        kn_log_emit(&b);
+    }
+}
+
+/* round N slice 3 (F21): the teardown half — print audio_play_end with
+ * the pump's lifetime counters plus the engine's own stats, then
+ * release decoder, resampler, scratches and the device (the join
+ * happens inside kn_audio_close). CALL CONTRACT: after
+ * sess_pump_stop() joined the worker, so the pump's counters are final
+ * (the same join-before-read rule as F12's audio_close). Idempotent. */
+static void sess_audio_play_close(sess_pump *p)
+{
+    kn_audio_stats as;
+
+    if (!p->play_on)
+        return;
+    p->play_on = 0;
+    memset(&as, 0, sizeof as);
+    if (p->play_dev)
+        (void)kn_audio_get_stats(p->play_dev, &as);
+    printf("{\"mode\":\"session\",\"event\":\"audio_play_end\","
+           "\"pkts\":%llu,\"frames\":%llu,\"decode_fail\":%llu,"
+           "\"pushed\":%llu,\"dropped\":%llu,\"starved\":%llu,"
+           "\"events\":%llu,\"written\":%llu,\"queue_ms\":%u}\n",
+           p->play_pkts % 10000000000ull,
+           p->play_frames % 10000000000ull,
+           p->play_fail % 10000000000ull,
+           p->play_pushed % 10000000000ull,
+           as.push_dropped % 10000000000ull,
+           as.starved % 10000000000ull,
+           as.events % 10000000000ull,
+           as.frames_written % 10000000000ull,
+           as.queue_ms % 100000u);
+    fflush(stdout);
+    {
+        kn_lctx b;
+        kn_lctx_init(&b, KN_CH_MEDIA, KN_INFO, "audio_play_end");
+        kn_lctx_i64(&b, "pkts", (long long)p->play_pkts);
+        kn_lctx_i64(&b, "frames", (long long)p->play_frames);
+        kn_lctx_i64(&b, "decode_fail", (long long)p->play_fail);
+        kn_lctx_i64(&b, "pushed", (long long)p->play_pushed);
+        kn_lctx_i64(&b, "starved", (long long)as.starved);
+        kn_log_emit(&b);
+    }
+    if (p->play_dev) {
+        kn_audio_close(p->play_dev);
+        p->play_dev = NULL;
+    }
+    if (p->play_dec) {
+        kn_opus_decoder_destroy(p->play_dec);
+        p->play_dec = NULL;
+    }
+#ifdef KN_HAVE_FFMPEG
+    if (p->play_swr) {
+        swr_free(&p->play_swr);
+        p->play_swr = NULL;
+    }
+#endif
+    if (p->play_src) {
+        free(p->play_src);
+        p->play_src = NULL;
+    }
+    if (p->play_dst) {
+        free(p->play_dst);
+        p->play_dst = NULL;
+    }
 }
 
 /* bounded string fill — snprintf("%s") into a parameter-sized dst is
@@ -6954,6 +7229,10 @@ static int run_session(const char *token, const char *device_id,
          * media loop untouched). Unified mode keeps the round-XXVIII
          * handoff shape: one socket, one owner, join before media
          * (deviation D-t2 — bundle servicing there is R3-C scope). */
+        /* round N slice 3 (F21): open the live playback path BEFORE the
+         * pump starts — the pump thread becomes the ring's only producer
+         * from its first emit, and a failed open stays non-fatal. */
+        sess_audio_play_open(&pump, g_sess_audio_play);
         if (!desc.disable_play) {
             play_attempts = 1;
             if (ice_enabled) {
@@ -8221,6 +8500,7 @@ static int run_session(const char *token, const char *device_id,
          * sctp (its write path is dtls), then free dtls, then sockets */
         sess_pump_stop(&pump);
         sess_audio_file_close(&pump, &ice_st);  /* F12: after the join */
+        sess_audio_play_close(&pump);           /* F21: same join rule */
         sess_fb_destroy(&fb);
         if (pump.sctp) { kn_sctp_close(pump.sctp); pump.sctp = NULL; }
         if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
@@ -8231,6 +8511,7 @@ static int run_session(const char *token, const char *device_id,
     teardown_sock:
         sess_pump_stop(&pump);          /* idempotent (started flag) */
         sess_audio_file_close(&pump, &ice_st);  /* F12: after the join */
+        sess_audio_play_close(&pump);           /* F21: same join rule */
         sess_fb_destroy(&fb);
         if (pump.sctp) { kn_sctp_close(pump.sctp); pump.sctp = NULL; }
         if (dtls) { kn_dtls_free(dtls); dtls = NULL; }
@@ -8249,6 +8530,7 @@ teardown:
      * audio FILE* into the next draw, which is what scrambled run 30's
      * audio.opus at the draw1→draw2 boundary). */
     sess_audio_file_close(&pump, &ice_st);
+    sess_audio_play_close(&pump);    /* F21: defensive, idempotent */
 
     /* round N (F20): the presenter closes with its own evidence line
      * (frames presented, failures, worst frame cost) before anything
@@ -8550,6 +8832,7 @@ int main(int argc, char **argv)
     int sess_input_live = 0;
     long sess_afk_ms = 0;                /* --input-anti-afk[=MS] */
     long sess_present = 0;               /* --session-present (F20) */
+    long sess_audio_play = 0;   /* --session-audio-play (F21, slice 3) */
     long sess_text_gap_ms = 30;          /* --input-text-gap=MS */
     long long sess_app = 0;
     /* queue default 600 s (round XXIII): the R7 runs showed real queues
@@ -8664,6 +8947,8 @@ int main(int argc, char **argv)
             sess_afk_ms = 60000;          /* round L (F19): 1 min default */
         else if (strcmp(a, "--session-present") == 0)
             sess_present = 1;            /* round N (F20): live window */
+        else if (strcmp(a, "--session-audio-play") == 0)
+            sess_audio_play = 1;     /* round N slice 3 (F21): live WASAPI */
         else if (strncmp(a, "--input-anti-afk=", 17) == 0)
             sess_afk_ms = strtol(a + 17, NULL, 10);
         else if (strncmp(a, "--input-text-gap=", 17) == 0)
@@ -8705,7 +8990,7 @@ int main(int argc, char **argv)
      * already prints the full build.json for the deep identity. */
     if (!list && !version && !(selftest && selftest[0]) && !diagnostics &&
         !(input_check && input_check[0])) {
-        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"L\"}\n",
+        printf("{\"mode\":\"build\",\"compiled\":\"%s %s\",\"round\":\"N\"}\n",
                __DATE__, __TIME__);
         fflush(stdout);
     }
@@ -8758,6 +9043,7 @@ int main(int argc, char **argv)
         sicfg.text_gap_ms = (unsigned)sess_text_gap_ms;
         if (lottery_n == 1) {
             g_sess_present = (int)sess_present;
+            g_sess_audio_play = (int)sess_audio_play;
             return run_session(sess_token, sess_device, sess_app,
                                sess_title,
                                sess_cm_host && sess_cm_host[0] ? sess_cm_host
@@ -8823,6 +9109,7 @@ int main(int argc, char **argv)
                     sess_sleep((uint32_t)(lottery_gap_s * 1000L), NULL);
                 }
                 g_sess_present = (int)sess_present;
+                g_sess_audio_play = (int)sess_audio_play;
                 lrc = run_session(sess_token, sess_device, sess_app,
                                   sess_title, cmh, sess_seconds,
                                   sess_queue_timeout, sess_keep,

@@ -139,6 +139,147 @@ void kn_audio_gen(const kn_audio_fmt *f, unsigned char *dst, unsigned frames,
     *phase = ph;
 }
 
+/* ============================================================ F21 feed core
+ * Platform-neutral SPSC PCM ring + the float32 -> device-format convert.
+ * Host-testable by design (test_knaudio): the Win32 engine below is a
+ * thin consumer of exactly these two functions. */
+
+unsigned kn_audio_feed_init(kn_audio_feed *f, float *backing,
+                            unsigned backing_frames, unsigned channels)
+{
+    unsigned cap;
+
+    if (!f || !backing || channels == 0u || channels > 8u)
+        return 0u;
+    cap = 1u;
+    while (cap * 2u <= backing_frames && cap * 2u >= cap)
+        cap *= 2u;
+    if (backing_frames < 1u || cap < 1u)
+        return 0u;
+    f->buf = backing;
+    f->cap = cap;
+    f->channels = channels;
+    f->wr = 0u;
+    f->rd = 0u;
+    f->pushed = 0ull;
+    f->popped = 0ull;
+    f->dropped = 0ull;
+    return cap;
+}
+
+unsigned kn_audio_feed_level(const kn_audio_feed *f)
+{
+    if (!f)
+        return 0u;
+    return (f->wr - f->rd) & (f->cap - 1u);
+}
+
+unsigned kn_audio_feed_push(kn_audio_feed *f, const float *pcm,
+                            unsigned frames)
+{
+    unsigned free_slots, n, first, second, ch;
+
+    if (!f || !pcm || frames == 0u)
+        return 0u;
+    /* cap-1 usable frames: wr==rd must stay unambiguously EMPTY */
+    free_slots = (f->cap - 1u) - kn_audio_feed_level(f);
+    n = frames < free_slots ? frames : free_slots;
+    if (n < frames)
+        f->dropped += (unsigned long long)(frames - n);
+    if (n == 0u)
+        return 0u;
+    ch = f->channels;
+    first = f->cap - (f->wr & (f->cap - 1u));      /* frames to the wrap */
+    if (first > n)
+        first = n;
+    second = n - first;
+    memcpy(f->buf + (size_t)(f->wr & (f->cap - 1u)) * ch, pcm,
+           (size_t)first * ch * sizeof(float));
+    if (second)
+        memcpy(f->buf, pcm + (size_t)first * ch,
+               (size_t)second * ch * sizeof(float));
+    f->wr = (f->wr + n) & (f->cap - 1u);
+    f->pushed += n;
+    return n;
+}
+
+unsigned kn_audio_feed_pop(kn_audio_feed *f, float *dst, unsigned frames)
+{
+    unsigned level, n, first, second, ch;
+
+    if (!f || !dst || frames == 0u)
+        return 0u;
+    level = kn_audio_feed_level(f);
+    n = frames < level ? frames : level;
+    if (n == 0u)
+        return 0u;
+    ch = f->channels;
+    first = f->cap - (f->rd & (f->cap - 1u));
+    if (first > n)
+        first = n;
+    second = n - first;
+    memcpy(dst, f->buf + (size_t)(f->rd & (f->cap - 1u)) * ch,
+           (size_t)first * ch * sizeof(float));
+    if (second)
+        memcpy(dst + (size_t)first * ch, f->buf,
+               (size_t)second * ch * sizeof(float));
+    f->rd = (f->rd + n) & (f->cap - 1u);
+    f->popped += n;
+    return n;
+}
+
+static float ka_clamp1(float v)
+{
+    if (!(v == v))                       /* NaN: silence, never propagate */
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
+    if (v < -1.0f)
+        return -1.0f;
+    return v;
+}
+
+void kn_audio_xform_f32(const kn_audio_fmt *fmt, unsigned char *dst,
+                        const float *src, unsigned frames)
+{
+    unsigned i;
+    unsigned ch;
+
+    if (!fmt || !dst || !src)
+        return;
+    ch = fmt->channels ? fmt->channels : 1u;
+    for (i = 0u; i < frames * ch; ++i) {
+        float v = ka_clamp1(src[i]);
+
+        switch (fmt->fmt) {
+        case KN_AFMT_F32: {
+            memcpy(dst, &v, 4);
+            dst += 4;
+            break;
+        }
+        case KN_AFMT_S16: {
+            short s = (short)lrintf(v * 32767.0f);
+            memcpy(dst, &s, 2);
+            dst += 2;
+            break;
+        }
+        case KN_AFMT_S32: {
+            /* double math: 2147483647.0f rounds UP to 2^31 in float, which
+             * would overflow the int cast at v == 1.0 (lrintf(2^31) UB). */
+            int s = (int)lrint((double)v * 2147483647.0);
+            memcpy(dst, &s, 4);
+            dst += 4;
+            break;
+        }
+        default:
+            memset(dst, 0, fmt->block_align ? fmt->block_align : 4u);
+            dst += fmt->block_align ? fmt->block_align : 4u;
+            i += ch - 1u;                /* one container frame of silence */
+            break;
+        }
+    }
+}
+
 /* ============================================================ Win32 engine */
 
 #ifdef _WIN32
@@ -169,6 +310,11 @@ struct kn_audio {
     unsigned buffer_frames;
     unsigned tone_hz;
     int coinit;
+    /* F21 feed mode: 0 = synthetic sine (v1), 1 = consume fd */
+    int feed;
+    kn_audio_feed fd;
+    float *fd_backing;               /* the ring storage (malloc'd) */
+    float *pop_buf;                  /* per-refill float scratch, frames*ch */
 };
 
 static void ka_logf(int level, const char *fmt, ...)
@@ -204,13 +350,29 @@ static DWORD WINAPI kn_audio_thread(LPVOID p)
             : 0u;
         if (pad >= a->buffer_frames) continue;       /* nothing to fill */
         avail = a->buffer_frames - pad;
-        if (pad == 0 && a->stats.frames_written > 0)
+        if (pad == 0 && a->stats.frames_written > 0 && !a->feed)
             a->stats.starved++;                      /* device ran dry */
         {
             BYTE *data = NULL;
             HRESULT hr = IAudioRenderClient_GetBuffer(a->render, avail, &data);
             if (SUCCEEDED(hr) && data) {
-                kn_audio_gen(&a->fmt, data, avail, a->tone_hz, &phase);
+                if (a->feed) {
+                    /* F21: consume the session ring; the zero-fill of the
+                     * untaken tail IS the underrun. starved only counts
+                     * AFTER the first push — pre-roll silence while the
+                     * stream arms is not a gap (docs/AUDIO.md §F21). */
+                    unsigned got = kn_audio_feed_pop(&a->fd, a->pop_buf,
+                                                     avail);
+                    if (got == 0u && a->fd.pushed > 0ull)
+                        a->stats.starved++;
+                    if (got < avail)
+                        memset(a->pop_buf + (size_t)got * a->fd.channels, 0,
+                               (size_t)(avail - got) * a->fd.channels *
+                               sizeof(float));
+                    kn_audio_xform_f32(&a->fmt, data, a->pop_buf, avail);
+                } else {
+                    kn_audio_gen(&a->fmt, data, avail, a->tone_hz, &phase);
+                }
                 hr = IAudioRenderClient_ReleaseBuffer(a->render, avail, 0);
                 if (SUCCEEDED(hr)) {
                     a->stats.frames_written += avail;
@@ -238,17 +400,12 @@ static void ka_err(char *errbuf, size_t errsz, const char *fmt, ...)
     va_end(ap);
 }
 
-kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
+/* F21: the device-setup half of kn_audio_open, shared verbatim by the
+ * feed opener so both modes ride ONE COM/WASAPI bring-up (the round-XV
+ * G1 pattern; only the refill source differs). Returns 0 on success. */
+static int ka_setup_device(kn_audio *a, char *errbuf, size_t errsz)
 {
-    kn_audio *a;
     HRESULT hr;
-
-    a = (kn_audio *)calloc(1, sizeof *a);
-    if (!a) {
-        ka_err(errbuf, errsz, "out of memory");
-        return NULL;
-    }
-    a->tone_hz = tone_hz;
 
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) a->coinit = 1;
@@ -258,30 +415,26 @@ kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
     if (FAILED(hr) || !a->enumerator) {
         ka_err(errbuf, errsz, "CoCreateInstance(MMDeviceEnumerator) 0x%08lx",
                (unsigned long)hr);
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
     hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(a->enumerator, eRender,
                                                      eMultimedia, &a->device);
     if (FAILED(hr) || !a->device) {
         ka_err(errbuf, errsz, "GetDefaultAudioEndpoint 0x%08lx (no default "
                "render device?)", (unsigned long)hr);
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
     hr = IMMDevice_Activate(a->device, &IID_IAudioClient, CLSCTX_ALL, NULL,
                             (void **)&a->client);
     if (FAILED(hr) || !a->client) {
         ka_err(errbuf, errsz, "IAudioClient activate 0x%08lx",
                (unsigned long)hr);
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
     hr = IAudioClient_GetMixFormat(a->client, &a->mix);
     if (FAILED(hr) || !a->mix) {
         ka_err(errbuf, errsz, "GetMixFormat 0x%08lx", (unsigned long)hr);
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
     {
         size_t wlen = sizeof(WAVEFORMATEX) + (size_t)a->mix->cbSize;
@@ -295,8 +448,7 @@ kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
             ka_err(errbuf, errsz, "unsupported mix format (tag 0x%04x, %s) — "
                    "v1 renders float32/s16/s32 only",
                    (unsigned)a->mix->wFormatTag, d);
-            kn_audio_close(a);
-            return NULL;
+            return -1;
         }
     }
 
@@ -304,8 +456,7 @@ kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
     if (!a->event) {
         ka_err(errbuf, errsz, "CreateEventEx failed (err %lu)",
                (unsigned long)GetLastError());
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
     /* 100 ms shared-mode buffer, event-driven (the documented WASAPI
      * pattern; ~4800 frames at 48 kHz) */
@@ -315,29 +466,32 @@ kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
     if (FAILED(hr)) {
         ka_err(errbuf, errsz, "IAudioClient_Initialize 0x%08lx",
                (unsigned long)hr);
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
     hr = IAudioClient_GetBufferSize(a->client, &a->buffer_frames);
     if (FAILED(hr) || a->buffer_frames == 0) {
         ka_err(errbuf, errsz, "GetBufferSize 0x%08lx", (unsigned long)hr);
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
     hr = IAudioClient_SetEventHandle(a->client, a->event);
     if (FAILED(hr)) {
         ka_err(errbuf, errsz, "SetEventHandle 0x%08lx", (unsigned long)hr);
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
     hr = IAudioClient_GetService(a->client, &IID_IAudioRenderClient,
                                  (void **)&a->render);
     if (FAILED(hr) || !a->render) {
         ka_err(errbuf, errsz, "GetService(RenderClient) 0x%08lx",
                (unsigned long)hr);
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
+    return 0;
+}
+
+/* Start the client + the refill thread (both openers, after setup). */
+static int ka_start_engine(kn_audio *a, char *errbuf, size_t errsz)
+{
+    HRESULT hr;
 
     /* Start BEFORE spawning the refill thread: a thread waiting on the
      * event before Start would burn its first 200 ms timeout and pollute
@@ -347,8 +501,7 @@ kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
     if (FAILED(hr)) {
         ka_err(errbuf, errsz, "IAudioClient_Start 0x%08lx",
                (unsigned long)hr);
-        kn_audio_close(a);
-        return NULL;
+        return -1;
     }
     a->run = 1;
     a->thread = CreateThread(NULL, 0, kn_audio_thread, a, 0, NULL);
@@ -356,6 +509,26 @@ kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
         ka_err(errbuf, errsz, "CreateThread failed (err %lu)",
                (unsigned long)GetLastError());
         a->run = 0;
+        return -1;
+    }
+    return 0;
+}
+
+kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
+{
+    kn_audio *a;
+
+    a = (kn_audio *)calloc(1, sizeof *a);
+    if (!a) {
+        ka_err(errbuf, errsz, "out of memory");
+        return NULL;
+    }
+    a->tone_hz = tone_hz;
+    if (ka_setup_device(a, errbuf, errsz) != 0) {
+        kn_audio_close(a);
+        return NULL;
+    }
+    if (ka_start_engine(a, errbuf, errsz) != 0) {
         kn_audio_close(a);
         return NULL;
     }
@@ -369,6 +542,62 @@ kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
                 tone_hz % 100000u);
     }
     return a;
+}
+
+kn_audio *kn_audio_open_feed(char *errbuf, size_t errsz)
+{
+    kn_audio *a;
+    unsigned cap, backing_frames;
+
+    a = (kn_audio *)calloc(1, sizeof *a);
+    if (!a) {
+        ka_err(errbuf, errsz, "out of memory");
+        return NULL;
+    }
+    a->feed = 1;
+    if (ka_setup_device(a, errbuf, errsz) != 0) {
+        kn_audio_close(a);
+        return NULL;
+    }
+    /* 2 s of device-rate ring: absorbs decode/pump jitter and a brief
+     * scheduler hiccup without an audible gap, while staying far below
+     * the latency a listener would notice as lip-drift (docs/AUDIO.md). */
+    backing_frames = a->fmt.rate ? a->fmt.rate * 2u : 96000u;
+    a->fd_backing = (float *)malloc((size_t)backing_frames *
+                                    a->fmt.channels * sizeof(float));
+    a->pop_buf = (float *)malloc((size_t)a->buffer_frames *
+                                 a->fmt.channels * sizeof(float));
+    if (!a->fd_backing || !a->pop_buf) {
+        ka_err(errbuf, errsz, "feed ring alloc failed (%u frames x %u ch)",
+               backing_frames % 10000000u, a->fmt.channels % 1000u);
+        kn_audio_close(a);
+        return NULL;
+    }
+    cap = kn_audio_feed_init(&a->fd, a->fd_backing, backing_frames,
+                             a->fmt.channels);
+    if (cap == 0u) {
+        ka_err(errbuf, errsz, "feed init rejected the ring");
+        kn_audio_close(a);
+        return NULL;
+    }
+    if (ka_start_engine(a, errbuf, errsz) != 0) {
+        kn_audio_close(a);
+        return NULL;
+    }
+    {
+        char d[64];
+        kn_audio_fmt_describe(&a->fmt, d, sizeof d);
+        ka_logf(KN_INFO, "audio open (feed): %s, buffer %u frames, ring %u frames",
+                d, a->buffer_frames % 1000000u, cap % 10000000u);
+    }
+    return a;
+}
+
+unsigned kn_audio_push_f32(kn_audio *a, const float *pcm, unsigned frames)
+{
+    if (!a || !a->feed)
+        return 0u;
+    return kn_audio_feed_push(&a->fd, pcm, frames);
 }
 
 int kn_audio_queue_ms(kn_audio *a)
@@ -385,6 +614,11 @@ int kn_audio_get_stats(kn_audio *a, kn_audio_stats *out)
     out->wait_timeouts = a->stats.wait_timeouts;
     out->buffer_errors = a->stats.buffer_errors;
     out->queue_ms = a->stats.queue_ms;
+    out->push_dropped = a->fd.dropped;      /* producer-written, benign read */
+    out->ring_ms = a->fmt.rate
+        ? kn_audio_feed_level(&a->fd) * 1000u / a->fmt.rate
+        : 0u;
+    out->feed = a->feed ? 1u : 0u;
     return 0;
 }
 
@@ -410,6 +644,8 @@ void kn_audio_close(kn_audio *a)
     if (a->enumerator) IMMDeviceEnumerator_Release(a->enumerator);
     if (a->event) CloseHandle(a->event);
     if (a->mix) CoTaskMemFree(a->mix);
+    if (a->fd_backing) free(a->fd_backing);
+    if (a->pop_buf) free(a->pop_buf);
     if (a->coinit) CoUninitialize();
     free(a);
 }
@@ -424,6 +660,21 @@ kn_audio *kn_audio_open(unsigned tone_hz, char *errbuf, size_t errsz)
     if (errbuf && errsz)
         snprintf(errbuf, errsz, "WASAPI is Win32-only (posix host build)");
     return NULL;
+}
+
+kn_audio *kn_audio_open_feed(char *errbuf, size_t errsz)
+{
+    if (errbuf && errsz)
+        snprintf(errbuf, errsz, "WASAPI is Win32-only (posix host build)");
+    return NULL;
+}
+
+unsigned kn_audio_push_f32(kn_audio *a, const float *pcm, unsigned frames)
+{
+    (void)a;
+    (void)pcm;
+    (void)frames;
+    return 0u;
 }
 
 int kn_audio_queue_ms(kn_audio *a) { (void)a; return -1; }

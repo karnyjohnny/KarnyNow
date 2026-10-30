@@ -36,6 +36,11 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS -c streamer/src/kn_rx.c    -o build/cross/kn_rx_$arch.o
     $CC $CFLAGS -c streamer/src/kn_perf.c  -o build/cross/kn_perf_$arch.o
     $CC $CFLAGS -c streamer/src/kn_audio.c -o build/cross/kn_audio_$arch.o
+    # round N slice 3 (F21): the wrapper's STUB body cross-compiles here
+    # (no mingw opus in the sandbox); the REAL body is host-compiled by
+    # build_native_tests.sh (system libopus) and target-compiled by T10
+    # (staged third_party/opus) — same three-tier split as kn_net_tls.
+    $CC $CFLAGS -c streamer/src/kn_opus.c -o build/cross/kn_opus_$arch.o
     $CC $CFLAGS -c streamer/src/kn_net.c   -o build/cross/kn_net_$arch.o
     # Round XXII: the Win32+mbedTLS body of kn_net_mbedtls.c MUST compile
     # here whenever the pinned tree is present. Sandbox cmake (POSIX stubs)
@@ -172,6 +177,8 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         $LDFLAGS -o build/cross/test_kndrawpath_$arch.exe
     $CC $CFLAGS streamer/src/kn_freeze.c streamer/tests/test_knfreeze.c \
         $LDFLAGS -o build/cross/test_knfreeze_$arch.exe
+    $CC $CFLAGS streamer/src/kn_opus.c streamer/tests/test_knopus.c \
+        $LDFLAGS -o build/cross/test_knopus_$arch.exe
     $CC $CFLAGS streamer/src/kn_bw.c streamer/tests/test_knbw.c \
         $LDFLAGS -o build/cross/test_knbw_$arch.exe
     $CC $CFLAGS streamer/src/kn_aes.c streamer/src/kn_sha1.c streamer/src/knsrtp.c \
@@ -193,6 +200,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_freeze.c \
         streamer/src/kn_bw.c \
         streamer/src/kn_ogg.c streamer/src/kn_arx.c \
+        streamer/src/kn_opus.c \
         third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
     $CC $CFLAGS $KCORE streamer/tests/test_kndiag.c \
         $LDFLAGS -o build/cross/test_kndiag_$arch.exe -lwinmm -ld3d9 -lole32 \
