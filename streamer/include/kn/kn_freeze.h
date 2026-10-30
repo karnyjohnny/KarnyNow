@@ -52,6 +52,14 @@ extern "C" {
 #define KN_FW_DECAY_PCT 60u
 #define KN_FW_REARM_PCT 80u
 
+/* round N: the baseline gate. Run 34 proved the detector cannot tell
+ * starvation from STILLNESS: a loading screen encodes at 100-1100 kbps
+ * on its own and every valley cried wolf (ten warns, ten recoveries,
+ * zero deaths). A wind-down that matters starts from a healthy stream
+ * — run 33's fatal ramp had a 2.7 Mbps baseline — so decay only fires
+ * when the 60 s baseline mean is at least this many kbps. */
+#define KN_FW_MIN_BASELINE_KBPS 1500u
+
 typedef struct kn_fw {
     unsigned kbps[KN_FW_SECS];
     unsigned idr[KN_FW_SECS];

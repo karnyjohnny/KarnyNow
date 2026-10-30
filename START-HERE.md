@@ -1499,3 +1499,62 @@ pause
    macros in any repo carry `type <PLACEHOLDER>` lines;
 4. standing rule unchanged: chat and pushes carry `--input-check`
    summaries and counter lines, never script bodies (INPUT §10.7).
+
+## 14. Round-N slice 2 addendum (2026-10-30): F20/F22-gate/F24 shipped — run 35 = the first LIVE-PICTURE run
+
+Slice 2 of round N is code-complete and gated in the sandbox (native
+battery zero warnings, ctest 26/26, cross both archs `-Werror`, E2E
+48/48, skeleton 113 == 113 vs run-34 stdout, T10 dry ALL PASS 76,
+`test_knfreeze` 865/865). Detail: `docs/INTEGRATION.md` rev 43
+"slice 2" + `docs/RTSP.md` §41.4.
+
+What changed since the operator's last sync (files to copy to the rig):
+
+```
+streamer/src/knvstd_main.c              (F20 wiring + --session-present + F24 + F22-gate use)
+streamer/include/kn/kn_freeze.h         (KN_FW_MIN_BASELINE_KBPS 1500u)
+streamer/src/kn_freeze.c                (baseline gate inside kn_fw_decay)
+streamer/tests/test_knfreeze.c          (rebaselined; 865 checks)
+docs/INTEGRATION.md, docs/RTSP.md, docs/INPUT.md, START-HERE.md
+```
+
+No new files, no wire-format change, no summary-key change: target T10
+expectation stays **ALL PASS 86** and the skeleton stays 113.
+
+**Run 35 (first watch-live run; audio is still file-only until F21).**
+Same command as run 34 plus ONE flag:
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 ^
+  --session-seconds=900 --lottery-gap=60 --lottery-stop-on-keeper=0 ^
+  --input-script=build\login.txt --input-anti-afk=60000 ^
+  --session-video-out=logs\video.264 --session-audio-out=logs\audio.opus ^
+  --session-present --session-release > logs\run35.log
+```
+
+What to expect with `--session-present`:
+
+1. a D3D9 window opens on the FIRST decoded frame (event line
+   `video_present_begin` in the media log) and shows the live stream;
+2. a 1 Hz overlay in the window: `dec/pres/fail/max ms` counters;
+3. ESC or the window's X closes the WINDOW ONLY — the session keeps
+   running headless (and keeps recording); nothing else is affected;
+4. at teardown: `video_present_end` + the present-evidence counters;
+5. if the polite stop answers TEARDOWN with a non-2xx again, stdout and
+   the RTSP log now carry `rtsp_teardown_body` with the server's own
+   reason text — that line is the whole point of F24.
+
+If the window never opens, the session still behaves exactly like run
+34 (presenter open failure = headless continue, by design) — check for
+`video_present_begin` to tell the two apart.
+
+**Credential incident — CLOSED:** password rotated, the entire upstream
+logs repo deleted and recreated empty; upstream history restarts at
+2026-10-30, the workspace archive (runs 22–34, redacted) is the only
+history, and the next evidence pull is a FRESH CLONE (`docs/INPUT.md`
+§10.11). Standing rules unchanged: macro lives only on the rig as
+`build\login.txt`; chat/pushes carry `--input-check` summaries only.
+
+Next slice: **F21** (live WASAPI playback of the arx Opus pipeline) —
+blocked on the one-time libopus provisioning on the rig; instructions
+will ship with the slice.

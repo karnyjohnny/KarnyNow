@@ -4562,4 +4562,42 @@ The agent redacted its workspace archive copy and deleted the scratch
 clone's copy the same turn; the operator received a step-by-step
 rotation + removal procedure (INPUT.md §10.11). No credential appears
 in any KarnyNow file, log line or doc; the `input_summary` key counts
-(29 typed chars) remain the only trace, by design.
+(29 typed chars) remain the only trace, by design. **Closure
+(2026-10-30):** the operator rotated the password AND deleted the
+entire upstream logs repository, recreating it empty — no poisoned
+commit exists anywhere; upstream history restarts at 2026-10-30 and the
+redacted workspace archive (runs 22–34) is now the only history. The
+next evidence pull is a FRESH CLONE, not a `git pull`. Full note:
+INPUT.md §10.11.
+
+### 41.4 Round-N slice 2 (shipped; awaiting run 35): the teardown-400 is now MEASURED, the decay detector is gated, and `--session` can finally show picture
+
+- **F24 — teardown-400, measure-first.** Run 34's `rtsp_teardown 400`
+  could not be diagnosed post hoc: no log family carried the response
+  body (rtsp.log holds event lines only, by design). Rather than
+  theorize, the client now captures the evidence: on any non-2xx
+  TEARDOWN it prints the status text plus a body snippet (new
+  `knv_json_snip()` helper) to stdout and writes an
+  `rtsp_teardown_body` WARN line into the RTSP channel log. Run 35's
+  polite stop decides what the 400 actually is. Context that keeps this
+  cosmetic-until-proven-otherwise: `cm_release 200 gone:1` still freed
+  the seat and zero 403s followed.
+- **F22 baseline gate.** Run 34's ten decay episodes included
+  loading-valley false positives (cheap-encoded static screens under
+  1000 kbps that are healthy, not freezing). `kn_fw_decay` now also
+  vetoes when the 60 s baseline mean is below
+  `KN_FW_MIN_BASELINE_KBPS` (1500). The three genuine mid-gameplay dips
+  (4–42 s heal) sat far above the gate, so detection is unchanged where
+  it mattered. `test_knfreeze` rebaselined: **865 checks, PASS**.
+- **F20 — live presentation wired behind `--session-present`.** The
+  stage-1 D3D9 NV12 presenter (`kn_d3d_vp_*`, proven in the loopback
+  round) is now connected to the real session path: lazy open on the
+  first decoded frame, synchronous present in the decode callback,
+  per-tick pump, 1 Hz stats overlay, `video_present_begin/end` event
+  lines, present counters in the teardown evidence line. CLOSED after
+  open failure → headless continue; FAULT/LOST → close, never retry;
+  ESC/WM_CLOSE closes the window only and the session keeps running.
+  Off by default — no flag, no window, no behavior change. F21 (live
+  WASAPI audio) remains the last piece before run 35 becomes a full
+  watch-and-listen run; until then audio still lands in
+  `--session-audio-out` only.

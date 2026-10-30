@@ -184,6 +184,12 @@ static void usage(void)
            "          0 = run every draw — REQUIRED for an interleaved A/B,\n"
            "          otherwise the first keeper ends the experiment)\n"
            "       [--log-dir=DIR]   (WASAPI synthetic PCM unless --no-audio)\n"
+           "       [--session-present]  round N (F20): PRESENT the session\n"
+           "                            video LIVE in a D3D9 window (stage-1\n"
+           "                            presenter, NV12 -> StretchRect ->\n"
+           "                            backbuffer). ESC or WM_CLOSE closes\n"
+           "                            the window and the session continues\n"
+           "                            headless. Default OFF. Win32 only.\n"
            "  knvstd --diagnostics [--log-dir=DIR]\n"
            "  knvstd --list-selftests\n"
            "  knvstd --version\n"
@@ -1397,6 +1403,7 @@ static int run_replay(const char *cap_path, const char *au_dir,
  * summary line and a flushed capture file instead of a torn write (R2b:
  * the writer must preserve evidence through an abnormal end). */
 static volatile sig_atomic_t g_knv_stop;
+static int  g_sess_present = 0;   /* round N (F20): --session-present */
 
 #ifdef _WIN32
 static BOOL WINAPI knv_ctrl_handler(DWORD type)
@@ -2109,6 +2116,20 @@ typedef struct dec_ctx {
     uint64_t   fw_last_video_ms;
     unsigned   fw_decay_warned;
     uint64_t   fw_decay_at_ms;
+
+    /* ---- round N (F20): the LIVE presenter -------------------------
+     * The stage-1 presenter (kn_d3d_vp_*) owned by THIS thread (the
+     * media loop): opened lazily on the first decoded frame, fed
+     * straight from the decode callback while the NV12 planes are
+     * alive, pumped once per media-loop tick so the window stays
+     * responsive (closable!) even through a freeze. Off by default;
+     * --session-present arms it. POSIX/stub: kn_d3d_available()==0 and
+     * the arm logs an honest unavailable note. */
+    int         present_on;
+    kn_d3d_vp  *vp;
+    unsigned long long present_frames, present_fails;
+    double      present_ms_max;
+    int         vp_status;          /* last non-OK vp return           */
 } dec_ctx;
 
 static uint8_t g_dec_qbytes[DEC_QUEUE_CAP][DEC_AU_CAP];
@@ -2250,10 +2271,64 @@ static int dec_frame_out_cb(const uint8_t *data, int w, int h, int sy,
                             int suv, int is_nv12, long long idx, void *ud)
 {
     dec_ctx *c = (dec_ctx *)ud;
-    (void)data; (void)sy; (void)suv; (void)is_nv12; (void)idx;
+    (void)idx;
     c->frames_out++;
     c->last_w = w;
     c->last_h = h;
+    /* round N (F20): live presentation. The planes are only valid for
+     * the duration of this call and kn_d3d_vp_present_nv12 is fully
+     * synchronous (lock/copy/unlock/StretchRect/Present), so feeding
+     * it here is exactly the single-owner-thread contract kn_d3d.h
+     * demands. NV12 only: the session decoder opens with to_nv12=1. */
+    if (c->present_on && is_nv12 && data) {
+        if (!c->vp && !kn_d3d_permanently_degraded()) {
+            if (kn_d3d_available()) {
+                c->vp = kn_d3d_vp_open((unsigned)w, (unsigned)h,
+                                       "KarnyNow — GFN live (ESC closes)");
+                printf("{\"mode\":\"session\","                       "\"event\":\"video_present_begin\","                       "\"ok\":%d,\"w\":%d,\"h\":%d}\n",
+                       c->vp ? 1 : 0, w, h);
+                fflush(stdout);
+                if (!c->vp) c->present_on = 0;   /* never retry in-run */
+            } else {
+                printf("{\"mode\":\"session\","                       "\"event\":\"video_present_begin\","                       "\"ok\":0,\"note\":\"d3d_unavailable\"}\n");
+                fflush(stdout);
+                c->present_on = 0;
+            }
+        }
+        if (c->vp) {
+            double cp = 0.0, sp = 0.0;
+            int rc = kn_d3d_vp_present_nv12(c->vp, data, (unsigned)sy,
+                                            data + (size_t)sy * (size_t)h,
+                                            (unsigned)suv, &cp, &sp);
+            if (rc == KN_D3D_OK) {
+                c->present_frames++;
+                if (cp + sp > c->present_ms_max)
+                    c->present_ms_max = cp + sp;
+            } else if (rc == KN_D3D_ERR_CLOSED) {
+                /* ESC / WM_CLOSE: the operator closed the window — the
+                 * SESSION keeps running headless (presentation is a
+                 * mirror, not a dependency). */
+                kn_d3d_vp_close(c->vp);
+                c->vp = NULL;
+                c->present_on = 0;
+                printf("{\"mode\":\"session\","                       "\"event\":\"video_present_end\","                       "\"reason\":\"closed\",\"frames\":%llu}\n",
+                       c->present_frames);
+                fflush(stdout);
+            } else {
+                c->present_fails++;
+                c->vp_status = rc;
+                if (c->present_fails == 1ull ||
+                    rc == KN_D3D_ERR_FAULT || rc == KN_D3D_ERR_LOST) {
+                    printf("{\"mode\":\"session\","                           "\"event\":\"video_present_end\","                           "\"reason\":\"error\",\"rc\":%d,"                           "\"frames\":%llu,\"fails\":%llu}\n",
+                           rc, c->present_frames, c->present_fails);
+                    fflush(stdout);
+                    kn_d3d_vp_close(c->vp);
+                    c->vp = NULL;
+                    c->present_on = 0;   /* D7: never retry a fault    */
+                }
+            }
+        }
+    }
     return 0;
 }
 
@@ -3934,6 +4009,48 @@ static int si_console_key(int ch, uint16_t *vk, uint16_t *mods)
                                       return 0; }              /* Ctrl-C    */
     if (ch < 32)                  return -1;                   /* other ctl */
     return kn_input_vk_from_ascii(ch, vk, mods);
+}
+
+/* round N (F24): a JSON-safe, capped copy of a wire body for evidence
+ * lines. Run 34's TEARDOWN came back 400 and NOTHING in any log said
+ * why — the response body was never captured. Non-printables, quotes
+ * and backslashes become escapes or '?'; the cut is marked with an
+ * ellipsis so a truncated body never pretends to be whole. */
+static void knv_json_snip(const char *src, size_t n, char *out, size_t outsz)
+{
+    size_t i = 0, o = 0;
+    const size_t cap = outsz > 4u ? outsz - 4u : 0u;   /* room for "..." */
+    if (!out || outsz == 0u) return;
+    out[0] = '\0';
+    if (!src) return;
+    for (i = 0; i < n && o < cap; ++i) {
+        unsigned char ch = (unsigned char)src[i];
+        if (ch == '"' || ch == '\\') {
+            if (o + 2u > cap) break;
+            out[o++] = '\\';
+            out[o++] = (char)ch;
+        } else if (ch == '\n') {
+            if (o + 2u > cap) break;
+            out[o++] = '\\';
+            out[o++] = 'n';
+        } else if (ch == '\r') {
+            if (o + 2u > cap) break;
+            out[o++] = '\\';
+            out[o++] = 'r';
+        } else if (ch == '\t') {
+            if (o + 2u > cap) break;
+            out[o++] = '\\';
+            out[o++] = 't';
+        } else if (ch >= 0x20u && ch < 0x7fu) {
+            out[o++] = (char)ch;
+        } else if (ch == '\0') {
+            break;                    /* NUL: the body ended early */
+        } else {
+            out[o++] = '?';
+        }
+    }
+    if (i < n) { out[o++] = '.'; out[o++] = '.'; out[o++] = '.'; }
+    out[o] = '\0';
 }
 
 /* ---- the sender -------------------------------------------------------
@@ -7133,6 +7250,12 @@ static int run_session(const char *token, const char *device_id,
         c.rtcp_fb_open = !unified_mode && desc.rtcp_on_sctp;
         c.have_qos_prior = 0;
         c.completed_frame_bytes = 0;
+        c.present_on = g_sess_present;      /* round N (F20) */
+        c.vp = NULL;
+        c.present_frames = 0ull;
+        c.present_fails = 0ull;
+        c.present_ms_max = 0.0;
+        c.vp_status = 0;
         c.last_sender_frame = 0;
         c.decode_available = kn_decode_available();
         if (c.decode_available) {
@@ -7192,6 +7315,9 @@ static int run_session(const char *token, const char *device_id,
         t_start = kn_sock_now_ms();
         t_last_stats = t_start;
         c.fw_sec_t0 = t_start;                /* F22: first bucket */
+        /* round N (F20): the window's messages are pumped on EVERY
+         * media-loop tick, not per frame — a frozen stream must not
+         * freeze the operator's ability to close the window. */
         next_poll_ms = t_start;
         stop_reason = "time";
         while (!g_knv_stop) {
@@ -7209,6 +7335,17 @@ static int run_session(const char *token, const char *device_id,
                     expect_frames) {
                 stop_reason = "expect_frames";
                 break;
+            }
+            if (c.vp) {
+                int prc = kn_d3d_vp_pump(c.vp);
+                if (prc == KN_D3D_ERR_CLOSED) {
+                    kn_d3d_vp_close(c.vp);
+                    c.vp = NULL;
+                    c.present_on = 0;
+                    printf("{\"mode\":\"session\","                           "\"event\":\"video_present_end\","                           "\"reason\":\"closed\",\"frames\":%llu}\n",
+                           c.present_frames);
+                    fflush(stdout);
+                }
             }
             rc = kn_sock_udp_recv(ms, pkt, sizeof pkt,
                                   KN_SOCK_POLL_INTERVAL_MS, &plen, NULL);
@@ -7619,6 +7756,18 @@ static int run_session(const char *token, const char *device_id,
                                                     c.fw_decay_at_ms));
                         fflush(stdout);
                     }
+                }
+                if (c.vp) {
+                    char ovl[64];
+                    /* integer ms: %f's 312-byte worst case trips
+                     * -Werror=format-truncation in a 64-byte overlay */
+                    snprintf(ovl, sizeof ovl,
+                             "dec %llu pres %llu fail %llu max %u ms",
+                             c.frames_out % 1000000000ull,
+                             c.present_frames % 1000000000ull,
+                             c.present_fails % 1000000ull,
+                             (unsigned)(c.present_ms_max + 0.5));
+                    (void)kn_d3d_vp_set_overlay_text(c.vp, ovl);
                 }
                 kn_lctx_init(&p, KN_CH_TRANSPORT, KN_INFO, "session_stats");
                 kn_lctx_i64(&p, "datagrams",
@@ -8101,6 +8250,20 @@ teardown:
      * audio.opus at the draw1→draw2 boundary). */
     sess_audio_file_close(&pump, &ice_st);
 
+    /* round N (F20): the presenter closes with its own evidence line
+     * (frames presented, failures, worst frame cost) before anything
+     * else teardown touches — it owns D3D objects on this thread. */
+    if (c.vp) {
+        kn_d3d_vp_close(c.vp);
+        c.vp = NULL;
+        printf("{\"mode\":\"session\",\"event\":\"video_present_end\","               "\"reason\":\"session_end\",\"frames\":%llu,"               "\"fails\":%llu,\"max_ms\":%.1f}\n",
+               c.present_frames, c.present_fails, c.present_ms_max);
+        fflush(stdout);
+    } else if (c.present_on) {
+        printf("{\"mode\":\"session\",\"event\":\"video_present_end\","               "\"reason\":\"never_opened\",\"frames\":0}\n");
+        fflush(stdout);
+    }
+
     /* Round L (F19): the input evidence, then give the console back. The
      * report comes first so a Ctrl-C draw still states what flew. */
     si_report(&si);
@@ -8165,10 +8328,37 @@ teardown:
         rtc.timeout_ms = 1000;
         trc = kn_rtsp_request(&rtc, "TEARDOWN", sess.rtsps_endpoint, th, 4,
                               NULL, 0, 1, &tresp);
-        printf("{\"mode\":\"session\",\"event\":\"rtsp_teardown\",\"rc\":%d,"
-               "\"status\":%d,\"release_armed\":%d}\n", trc,
-               trc == KN_RTSP_OK ? tresp.status : 0, release_session);
-        fflush(stdout);
+        /* round N (F24): run 34's polite stop got a 400 and no log
+         * carried the reason — from now on a non-2xx TEARDOWN prints
+         * the status text and a capped, JSON-safe body snippet, on
+         * stdout AND in the rtsp knlog channel. */
+        {
+            char textra[320];
+            char tsnip[192];
+            int tbad = (trc == KN_RTSP_OK &&
+                        (tresp.status < 200 || tresp.status >= 300));
+            textra[0] = '\0';
+            if (tbad) {
+                knv_json_snip(tresp.body ? tresp.body : "",
+                              tresp.body_len, tsnip, sizeof tsnip);
+                snprintf(textra, sizeof textra,
+                         ",\"status_text\":\"%s\",\"body\":\"%s\"",
+                         tresp.status_text, tsnip);
+            }
+            printf("{\"mode\":\"session\",\"event\":\"rtsp_teardown\",\"rc\":%d,"
+                   "\"status\":%d,\"release_armed\":%d%s}\n", trc,
+                   trc == KN_RTSP_OK ? tresp.status : 0, release_session,
+                   textra);
+            fflush(stdout);
+            if (tbad) {
+                kn_lctx tb;
+                kn_lctx_init(&tb, KN_CH_RTSP, KN_WARN, "rtsp_teardown_body");
+                kn_lctx_str(&tb, "status_text", tresp.status_text);
+                kn_lctx_str(&tb, "body", tsnip);
+                kn_lctx_i64(&tb, "body_len", (long long)tresp.body_len);
+                kn_log_emit(&tb);
+            }
+        }
         {
             kn_lctx b;
             kn_lctx_init(&b, KN_CH_RTSP,
@@ -8359,6 +8549,7 @@ int main(int argc, char **argv)
     const char *input_check = NULL;      /* --input-check=FILE: parse only */
     int sess_input_live = 0;
     long sess_afk_ms = 0;                /* --input-anti-afk[=MS] */
+    long sess_present = 0;               /* --session-present (F20) */
     long sess_text_gap_ms = 30;          /* --input-text-gap=MS */
     long long sess_app = 0;
     /* queue default 600 s (round XXIII): the R7 runs showed real queues
@@ -8471,6 +8662,8 @@ int main(int argc, char **argv)
             sess_input_live = 1;          /* round L (F19) */
         else if (strcmp(a, "--input-anti-afk") == 0)
             sess_afk_ms = 60000;          /* round L (F19): 1 min default */
+        else if (strcmp(a, "--session-present") == 0)
+            sess_present = 1;            /* round N (F20): live window */
         else if (strncmp(a, "--input-anti-afk=", 17) == 0)
             sess_afk_ms = strtol(a + 17, NULL, 10);
         else if (strncmp(a, "--input-text-gap=", 17) == 0)
@@ -8563,7 +8756,8 @@ int main(int argc, char **argv)
         sicfg.live = sess_input_live;
         sicfg.afk_ms = (unsigned)sess_afk_ms;
         sicfg.text_gap_ms = (unsigned)sess_text_gap_ms;
-        if (lottery_n == 1)
+        if (lottery_n == 1) {
+            g_sess_present = (int)sess_present;
             return run_session(sess_token, sess_device, sess_app,
                                sess_title,
                                sess_cm_host && sess_cm_host[0] ? sess_cm_host
@@ -8573,6 +8767,7 @@ int main(int argc, char **argv)
                                sess_jiggle_ms, sess_au_dir,
                                sess_audio_out, sess_video_out,
                                sess_release, &sicfg, 0L, log_dir);
+        }
         /* Round XLIII (F5): lottery driver. run_session() is re-callable
          * by construction — every stateful static is re-initialised at
          * entry (memset &c, memset &pump + sess_fb_init) and destroyed
@@ -8627,6 +8822,7 @@ int main(int argc, char **argv)
                     fflush(stdout);
                     sess_sleep((uint32_t)(lottery_gap_s * 1000L), NULL);
                 }
+                g_sess_present = (int)sess_present;
                 lrc = run_session(sess_token, sess_device, sess_app,
                                   sess_title, cmh, sess_seconds,
                                   sess_queue_timeout, sess_keep,

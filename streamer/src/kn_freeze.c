@@ -60,6 +60,8 @@ int kn_fw_decay(const kn_fw *fw, unsigned *avg5, unsigned *avg60)
     fw_sums(fw, fw->fill - KN_FW_MIN_FILL + 2u,
             fw->fill - KN_FW_WINDOW, &sb, &g2);
     if (sg != 0ull || g2 != 0ull) return 0;   /* lossy = other family */
+    if (sb / KN_FW_BASELINE < KN_FW_MIN_BASELINE_KBPS)
+        return 0;        /* run N gate: a quiet screen is not a wind-down */
     if (!(sw * 20ull < sb)) return 0;         /* avg5*100 < avg60*60  */
     if (avg5) *avg5 = (unsigned)(sw / KN_FW_WINDOW);
     if (avg60) *avg60 = (unsigned)(sb / KN_FW_BASELINE);

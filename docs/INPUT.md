@@ -812,3 +812,14 @@ if a reference macro must sit in a repo, it carries placeholders;
 (4) never paste or push script bodies — `--input-check` summaries only
 (§10.7 stands). The typed-character COUNTS (29 in run 33/34) are the
 only macro fingerprint that may ever appear in evidence lines.
+
+**Closure (same day):** the operator rotated the password AND, not
+trusting git history surgery, **deleted the entire logs repository and
+recreated it empty** — no commit with the old credential exists
+anywhere upstream. Consequence for future rounds: the upstream
+`karnynow-logs` history restarts at 2026-10-30; whatever runs are
+missing upstream are safe in this workspace's `karnynow-logs/` archive
+(§11's rule that the workspace archive is the only history now bites
+in the operator's favour). Next evidence pull = a FRESH clone, not a
+pull. The operator's standing commitment: macros stay on the rig;
+repos get placeholder bodies only.

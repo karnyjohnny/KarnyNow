@@ -24,6 +24,51 @@
   + §10.3, `docs/INPUT.md` §10.11, `docs/BOOTSTRAP.md` marker,
   `START-HERE.md` run-33/34 rows + §12 + §13.
 
+### Rev 43 slice 2 (post-run-34; shipped in this same interim revision)
+
+- `streamer/src/knvstd_main.c` —
+  - **F24 (teardown-400, measure-first):** new `knv_json_snip()` helper;
+    on a non-2xx `TEARDOWN` the client now prints the HTTP status text
+    plus a body snippet to stdout and emits an `rtsp_teardown_body` WARN
+    line into the RTSP channel log. Run 34's 400 had NO wire body in any
+    log family, so the cause is deliberately still undiagnosed — the
+    next live capture decides. (`cm_release 200 gone:1` still frees the
+    seat, so a 400 is cosmetic-until-proven-otherwise, not a leak.)
+  - **F20 (live presentation in `--session`):** the stage-1 presenter
+    (`kn_d3d_vp_*`, already in `kn_d3d.{h,c}` from the loopback round —
+    see `docs/LOOPBACK.md`) is
+    now wired end to end. New `--session-present` flag (help text, parse,
+    file-scope `g_sess_present` assigned in `main` right before BOTH
+    `run_session` call sites — single-shot and the lottery loop — because
+    `run_session`'s parameter list is already huge); armed per draw as
+    `c.present_on` next to the `c.completed_frame_bytes = 0` reset, with
+    `c.vp = NULL` + present counters reset. The decode callback lazily
+    opens the presenter on the first NV12 frame (CLOSED → headless
+    continue, FAULT/LOST → close and never retry) and presents
+    synchronously; the session pump calls `kn_d3d_vp_pump` once per tick
+    before `kn_sock_udp_recv`; the 1 Hz session_stats beat refreshes the
+    overlay (`dec/pres/fail/max ms`); `video_present_begin`/`video_present_end`
+    event lines bracket the window; teardown prints the present-evidence
+    line before `si_report`. ESC/WM_CLOSE closes the window only — the
+    session continues headless (D7 permanent-degrade path).
+  - Trap hit and fixed while wiring: inside `run_session` the decode
+    context `c` is a VALUE — `c.`, not `c->`; and inserting a statement
+    between `if (lottery_n == 1)` and its single-statement `return`
+    silently un-guarded it (now braced). Overlay printf uses integer ms
+    — `%f`'s 312-byte worst case trips `-Werror=format-truncation` in a
+    64-byte buffer.
+- `streamer/include/kn/kn_freeze.h` + `streamer/src/kn_freeze.c` +
+  `streamer/tests/test_knfreeze.c` — **F22 baseline gate (the run-34
+  loading-valley false positives):** new `KN_FW_MIN_BASELINE_KBPS 1500u`;
+  `kn_fw_decay` now also vetoes when the 60 s baseline mean is under
+  1500 kbps (a cheap-encoded loading screen is not a freeze witness).
+  Test rebaselined to 2000 kbps boundaries + 2 new gate tests →
+  **865 checks** (was 901; the randomized second-implementation
+  agreement shrinks by exactly the gated decisions — expected).
+- No wire-format, summary-key or skeleton change in slice 2: the new
+  lines are channel-log event lines, so the skeleton canon stays
+  **113 == 113** and the stamp stays **L**.
+
 ## Rev 43 verification status (interim)
 
 Sandbox: native battery PASS zero warnings (test_knfreeze 901/901),
@@ -31,9 +76,26 @@ cmake+ctest 26/26 mbedTLS cfg zero warnings, cross-check both mingw
 archs PASS `-Werror`, sandbox_session_e2e 48/48, check_summary_skeleton
 113 == run-33 live, T10 POSIX dry ALL PASS 76, ASan+UBSan clean on the
 new suite. Target (operator, 2026-10-30): **T10 ALL PASS 86** +
-**run 34 = the 900.0 s keeper** (RTSP §41). Pending in-round: F20/F21
-gates, the decay baseline gate, teardown-400 diagnosis, then the stamp
-bump and the final rev-43 target expectations.
+**run 34 = the 900.0 s keeper** (RTSP §41).
+
+Sandbox, slice 2 (F24 + F22 gate + F20/`--session-present`, 2026-10-30):
+native battery PASS zero warnings, cmake+ctest **26/26** zero warnings,
+cross-check both mingw archs PASS `-Werror`, sandbox_session_e2e
+**48/48**, check_summary_skeleton **113 == 113** vs run-34 live stdout
+(summary printf untouched — the new lines are event lines only), T10
+POSIX dry **ALL PASS 76** (zero warnings; the D3D9 presenter legs stay
+skipped win32-only, so the sandbox count does NOT move), test_knfreeze
+standalone **PASS 865 checks / 0 failures**, `knvstd_main.c`
+`gcc -fsyntax-only -Wall -Wextra -Wpedantic` clean. Pending in-round:
+F21 (live WASAPI audio; blocked on the one-time libopus provisioning),
+the live proof of F20/F24 (run 35), then the stamp bump and the final
+rev-43 target expectations. Target expectation for run 35: T10 stays
+**ALL PASS 86**; the skeleton stays 113; with `--session-present` the
+operator sees the D3D9 window open on the first decoded frame
+(`video_present_begin`), the 1 Hz overlay, and `video_present_end` +
+the present-evidence counters at teardown — and if the polite stop
+returns a non-2xx TEARDOWN again, `rtsp_teardown_body` finally carries
+the server's reason text.
 
 ---
 

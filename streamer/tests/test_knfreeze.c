@@ -56,6 +56,7 @@ static int hist_decay(const hist *h, unsigned *a5, unsigned *a60)
         sb += h->kbps[i];
         if (h->gaps[i]) return 0;
     }
+    if (sb / 60u < 1500u) return 0;
     if (!(sw * 20ull < sb)) return 0;
     if (a5) *a5 = (unsigned)(sw / 5u);
     if (a60) *a60 = (unsigned)(sb / 60u);
@@ -114,42 +115,50 @@ int main(void)
      * sum5*20 < 60B i.e. sum5 < 3B; with a flat window of W: 5W*20<60B
      * i.e. W*100 < 60B i.e. W < 0.6B. B=1000: W=599 decays, 600 not. */
     kn_fw_init(&fw);
-    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 1000u, 0u, 0u);
-    for (t = 0; t < 5u; ++t) kn_fw_add(&fw, 600u, 0u, 0u);
+    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 2000u, 0u, 0u);
+    for (t = 0; t < 5u; ++t) kn_fw_add(&fw, 1200u, 0u, 0u);
     CK(kn_fw_decay(&fw, NULL, NULL) == 0, "exactly 60% is NOT decay");
     CK(kn_fw_recovered(&fw) == 0, "60% is not recovered either");
     kn_fw_init(&fw);
-    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 1000u, 0u, 0u);
-    for (t = 0; t < 4u; ++t) kn_fw_add(&fw, 600u, 0u, 0u);
-    kn_fw_add(&fw, 599u, 0u, 0u);
+    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 2000u, 0u, 0u);
+    for (t = 0; t < 4u; ++t) kn_fw_add(&fw, 1200u, 0u, 0u);
+    kn_fw_add(&fw, 1199u, 0u, 0u);
     {
         unsigned a5 = 0, a60 = 0;
         CK(kn_fw_decay(&fw, &a5, &a60) == 1, "sum5*20==sum60-1 decays");
-        CK(a5 == 599u && a60 == 1000u, "boundary means exact");
+        CK(a5 == 1199u && a60 == 2000u, "boundary means exact");
     }
+    /* the run-N baseline gate: a quiet baseline never warns */
+    kn_fw_init(&fw);
+    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 1499u, 0u, 0u);
+    for (t = 0; t < 5u; ++t) kn_fw_add(&fw, 10u, 0u, 0u);
+    CK(kn_fw_decay(&fw, NULL, NULL) == 0, "baseline under 1500 kbps vetoes");
+    kn_fw_init(&fw);
+    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 1500u, 0u, 0u);
+    for (t = 0; t < 5u; ++t) kn_fw_add(&fw, 10u, 0u, 0u);
+    CK(kn_fw_decay(&fw, NULL, NULL) == 1, "baseline exactly 1500 decides");
     /* rearm boundary: sum5*15 >= sum60 i.e. W*75 >= 60B i.e. W >= 0.8B */
     kn_fw_init(&fw);
-    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 1000u, 0u, 0u);
-    for (t = 0; t < 5u; ++t) kn_fw_add(&fw, 799u, 0u, 0u);
+    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 2000u, 0u, 0u);
+    for (t = 0; t < 5u; ++t) kn_fw_add(&fw, 1599u, 0u, 0u);
     CK(kn_fw_recovered(&fw) == 0, "79.9% is not recovered");
-    kn_fw_add(&fw, 804u, 0u, 0u);   /* window now 600..: recompute */
-    /* window = 799*4+804 = 3999+... sums: 3196+804=4000; 4000*15=60000
-     * == sum60=60000 -> recovered */
+    kn_fw_add(&fw, 1604u, 0u, 0u);  /* window = 4*1599+1604 = 8000 */
+    /* 8000*15 = 120000 == sum60 = 120000 -> recovered */
     CK(kn_fw_recovered(&fw) == 1, "sum5*15==sum60 rearms");
     /* a single gap in the span vetoes decay */
     kn_fw_init(&fw);
-    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 1000u, 0u, 0u);
+    for (t = 0; t < 62u; ++t) kn_fw_add(&fw, 2000u, 0u, 0u);
     for (t = 0; t < 4u; ++t) kn_fw_add(&fw, 100u, 0u, 0u);
     kn_fw_add(&fw, 100u, 0u, 1u);
     CK(kn_fw_decay(&fw, NULL, NULL) == 0, "gap in window vetoes");
     kn_fw_init(&fw);
-    for (t = 0; t < 61u; ++t) kn_fw_add(&fw, 1000u, 0u, 0u);
-    kn_fw_add(&fw, 1000u, 0u, 1u);
+    for (t = 0; t < 61u; ++t) kn_fw_add(&fw, 2000u, 0u, 0u);
+    kn_fw_add(&fw, 2000u, 0u, 1u);
     for (t = 0; t < 5u; ++t) kn_fw_add(&fw, 100u, 0u, 0u);
     CK(kn_fw_decay(&fw, NULL, NULL) == 0, "gap in baseline vetoes");
     /* shallow ring vetoes both */
     kn_fw_init(&fw);
-    for (t = 0; t < 66u; ++t) kn_fw_add(&fw, t < 60u ? 1000u : 10u, 0u, 0u);
+    for (t = 0; t < 66u; ++t) kn_fw_add(&fw, t < 60u ? 2000u : 10u, 0u, 0u);
     CK(kn_fw_decay(&fw, NULL, NULL) == 0, "fill 66 vetoes decay");
     CK(kn_fw_recovered(&fw) == 0, "fill 66 vetoes rearm");
     kn_fw_add(&fw, 10u, 0u, 0u);
