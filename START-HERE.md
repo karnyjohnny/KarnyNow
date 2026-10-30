@@ -180,6 +180,9 @@ operator watches and hears live.
 | 33 | M→N | **THE FIRST FULL SUCCESS — LOGIN, WORLD, SWORD, SOUND.** Single Endfield draw (900 s requested), the operator's own 80-event/416 s macro + `--input-anti-afk=60000` + video/audio/release. **Every macro stage landed first try**: Play at t=40 s → **`Endfield.exe` JustLaunched t=44.2 s (first game process ever; `drsProfileName:"Arknights: Endfield"`)** → in-game login typed t≈161–170 s → world entered t≈411–416 s → sword swing (operator watched live-quality video the whole 13.6 min). `input_summary events:80 fired:80 sent:108 (key:86 btn:16 abs:6) gated:0 late_skips:0 build_fail:0 push_fail:0 unmapped:0`, `afk_pulses:14` — **F19 proven at full scale**. Video: 24 424 AUs / 815.689 s = 29.94 fps, 215 MB, **zero gaps/withheld/FEC/NACK/decode errors** (run 32's loss was the launcher, not the line). Audio: 163 728 pkts × 5 ms = 818.68 s = ffmpeg's 13:38.64, `seq_loss 0` — **first content-bearing capture: real stereo game sound, Audacity-verified**. Freeze at 815.2 s: abrupt total silence, `recovery_exhausted` at wall 825.6 s, **no 0x0109, NOT the length timer (1 h declared at rel 1.2 s), NOT loss (zero), NOT idle (input+AFK from t≈1 s)** — and `ctrl_in` still logging at rel 820 s ⇒ control plane alive after media death (run-30 anatomy at 13.6-min scale) ⇒ F22 witness. `rtsp_teardown 200` + `cm_release 200 gone:1` (2nd consecutive clean release). Two cosmetic label bugs found ⇒ F23. Full analysis `docs/RTSP.md` §40, `docs/BUNDLE-AUDIO.md` §10.2, `docs/INPUT.md` §10.10 |
 | 34 | N | **THE FIRST 900-SECOND KEEPER WITH EVERYTHING ON — AND F22/F23 PROVEN LIVE.** Same command as run 33 on the F22/F23 build (T10 on target **ALL PASS 86**, as predicted), faster macro + **ten attack clicks at 20 s spacing** as an idle-eviction control: `stop_reason:"time" wall_ms:900019`, 26 985 AUs @ 29.97 fps, ZERO gaps/loss, `input_summary events:96 fired:96 sent:126 gated:0`, `afk_pulses:15`. **F22's debut: ten `bitrate_decay_warn` episodes, ten recoveries** — loading-valley false positives (baseline 100–1100 kbps; round N adds the avg60 ≥ 1500 kbps gate) plus three genuine mid-gameplay throttling dips healing in 4–42 s; **nothing after 562 s** and the pushed tail is flat (sharpness 8.7–8.8, zero dips; audio −58 dB content to the last packet). The idle/AFK-eviction theory is DEAD: the final 300 s flew anti-AFK pulses only and completed. New anomaly: `rtsp_teardown` **400** on the polite stop (cm_release still 200 gone:1) — round N diagnoses. **Hygiene incident:** the push included `login.txt` WITH plaintext credentials — agent redacted its copies same-turn, operator got the rotate+remove procedure (INPUT §10.11). Analysis `docs/RTSP.md` §41 |
 | 35 | N | **THE FIRST LIVE-PICTURE RUN — THE OPERATOR WATCHED FULL-SCREEN GEFORCE NOW VIDEO FROM THE PURE-C CLIENT, ON DELIBERATELY BAD 2.4 GHz WI-FI, AND IT HELD FOR 744 SECONDS.** Endfield on a Frankfurt rig (185.136.69.134, np-frk-06), run-34 command + `--session-present`: **F20 PROVEN LIVE** — `video_present_end reason:"session_end" frames:22329 fails:0 max_ms:5.0`, operator verdict smooth/stable/clear; 22 329 AUs @ 29.97 fps, **196 420/196 420 datagrams, ZERO gaps/decode errors**, 9 keyframes, idr/pli 41/41, BWE 37 618 kbps at 6 % utilisation (the handicap never bit). Death: `recovery_exhausted` at media **744.3 s** (series 14/14/29/36/122/815.7/900.0/**744.3** — second-longest ever), and the freeze_witness localises it: last ctrl rel 729 110 = **15.2 s BEFORE** last video, audio +2.2 s after, FLAT ramp (abrupt, not the ceiling's decay), cascade ORDER varying per run ⇒ **rig-side staged death**, not network, not client. F22-gate verified live (8 warns / 7 recoveries / the fatal at 743.99 correctly terminal); F23 proven (`input_summary 98/98/124`, failures 0). Audio: 149 461 pkts = 747.3 s, **first non-zero `seq_loss` on record — ONE packet** (0.0007 %, zero consequence), srtp_fail 0, 22.0 MB valid .opus, real content (−54.6 dB mean, in-world gameplay). Teardown on the dead rig = F24's first transport-level failure: `rtsp_teardown rc:-3` TIMEOUT, mbedTLS −0x004E CONN_RESET on the DELETE, `cm_release rc:-2` — **the seat came NOT back**; run 36 may open on a 403 ladder (diagnosis, not damage). Full analysis `docs/RTSP.md` §42 |
+| 36 | N | **F21'S FIRST FLIGHT — TECHNICALLY FLAWLESS, POOL-DEAD.** Stamp N + T10 on target **ALL PASS 89/89** (the 300 s build wall fixed and confirmed). Friday-evening peak: queue ~159 (2 m 36 s), rig 185.136.70.139 (Amsterdam/London pool). `audio_play_begin ok:1 fmt:"44100Hz 2ch float32" swr:1 opus:"libopus 1.5.2"` — the LIVE 48k→44.1k resample path flew; 8092 pkts decoded `decode_fail:0 dropped:0`, presenter fails:0 max_ms:1.9, decode 1107/1107. Death: `recovery_exhausted` at media **37.0 s** (wall 47.1), abrupt (kbps [622,0,…]), 50/50 IDR/PLI unanswered, BWE 41.9 Mbps @1 %, `rtsp_teardown 200` + `cm_release 200 gone:1` CLEAN. Launcher screen only (macro fired:3/98 — died before its t≈40 s Play click). `starved:759` = post-mortem device tail + zero-pre-buffer jitter ⇒ **F25**. Analysis `docs/RTSP.md` §43 |
+| 37 | N | **THE TETHER CONTROL — SAME DEATH, DIFFERENT RIG, ORPHANED SEAT.** Phone tether (5 GHz), queue ~163, rig 80.84.170.154: died at media **13.9 s** — inside the classic 10–13 s band that predates F21 by a dozen builds. 397/397 frames, `decode_fail:0`, teardown 200, but **`cm_release rc:-2` (transport IO — the run-35 CONN_RESET pattern) → SEAT ORPHANED** → the operator's next create ate 403 SESSION_LIMIT and he freed the seat by hand on play.geforcenow.com ⇒ **F26** (one fresh-stream DELETE retry, transport-death-only, `"attempts":N`). Network exonerated from THIS direction: not the Wi-Fi. Analysis `docs/RTSP.md` §43 |
+| 38 | N | **THE SICK RIG, SERVED TWICE — AND THE BROWSER A/B CLOSES THE CASE.** Same Wi-Fi as run 36, queue ~156, and the pool handed out **185.136.70.139 AGAIN** (12 minutes after run 36 froze on it): died at media **12.1 s**, same abrupt signature, 346/346 frames, `decode_fail:0`, teardown 200, `cm_release rc:-2` → orphan again. The operator then RESUMED in the GFN browser on the same network and played perfectly (no lags, no compression) ⇒ the line is innocent from the other direction too; the browser resume re-provisions the stream, which our own evidence says was dead while the rig's RTSP host stack still answered 200. Three draws, two rigs, one freeze family, zero client-plane faults. Analysis `docs/RTSP.md` §43 |
 
 **Round XXXVIII shipped** (target-verified in round XXXIX: **T10 ALL PASS
 79 on Win7**, `test_knbw` reported 387 checks on target = sandbox — the
@@ -1686,3 +1689,83 @@ No wire-format change, no summary-key change. Round N's ship list
 (F20/F21/F22-gate/F24) is now complete; what remains open for the
 round: the run-36 listen, the orphaned-seat/403 question, and the
 teardown-400-vs-timeout family diagnosis (F24 keeps measuring).
+
+## 16. Round-N slice 4 addendum (2026-10-30): runs 36–38 read + F25/F26 shipped — run 39 = the LOTTERY fish
+
+The verdict on the operator's question ("every session died fast — is
+it our program?"): **NO — it is the pool, and the evidence is airtight**
+(`docs/RTSP.md` §43): F21's first flight was technically flawless on
+all three draws (14 386 packets decoded live, `decode_fail:0`,
+`dropped:0`, the 44.1 kHz swr path proven, presenter fails:0); the
+deaths are the freeze family that predates F21 by a dozen builds
+(10–13 s band = runs 23–26/31 verbatim); TWO DIFFERENT rigs died
+identically and the pool handed the SAME sick rig (185.136.70.139) out
+twice in 12 minutes; `rtsp_teardown` answered 200 on all three (host
+stack alive, media stack dead); every client plane kept contract to the
+last millisecond; the wire is identical to run 35's 744 s flight the
+same evening; and the operator's own A/B closed it — run 37 on the
+phone tether died the same way, the GFN browser on the same Wi-Fi
+played perfectly. Friday 19:00–21:00 CET with queues ~160 is simply
+peak-season lottery weather.
+
+Two evidence-driven fixes ship in this slice (no wire change, no
+summary-key change, skeleton **113 == 113 vs run-36's LIVE stdout**):
+
+- **F25 — the playback pre-buffer waterline.** `starved:759/801/802`
+  was mostly the device zero-filling ~8–10 s AFTER each media death
+  plus zero-pre-buffer arrival jitter. The feed engine now primes at
+  **100 ms** of device-rate audio (`kn_audio_feed_plan`, a pure
+  host-tested decision; ring-full bypass included), a post-prime empty
+  pop = ONE `starved` episode + re-arm, `prerolls` counts primings
+  (new field on `audio_play_end`). Cost: +100 ms latency (inaudible).
+  `test_knaudio` 54 → **74 checks**.
+- **F26 — one release retry.** Runs 37/38 orphaned their seats
+  (`cm_release rc:-2`, transport death mid-reclaim — the operator had
+  to free one by hand in the browser and ate a 403 ladder). The DELETE
+  now retries ONCE on a fresh TLS stream after 500 ms, ONLY on
+  `KN_HTTP_ERR_IO`; answered statuses are never retried. The line
+  grows `"attempts":N`.
+
+**Files to sync (slice-4 delta on top of slice 3):**
+
+```
+streamer/include/kn/kn_audio.h          (prerolls + feed_plan contract)
+streamer/src/kn_audio.c                 (the waterline: plan + engine + open_feed)
+streamer/tests/test_knaudio.c           (54 -> 74 checks)
+streamer/src/knvstd_main.c              (F26 retry + prerolls on audio_play_end)
+docs/RTSP.md (§43), docs/AUDIO.md (§F25), docs/BUNDLE-AUDIO.md (§11 add.),
+docs/INTEGRATION.md (rev 45), START-HERE.md
+```
+
+**Rig procedure:** sync → rebuild → T10 (expected **ALL PASS 89**,
+unchanged — no new suites; stamp stays `N`, the `compiled` timestamp
+distinguishes slice 4) → **run 39, and let the lottery do the fishing**
+(no more hand-cranked single draws — each one costs ~10 minutes of
+queue+death+archaeology):
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 ^
+  --session-seconds=900 --lottery=3 --lottery-gap=60 --lottery-stop-on-keeper=1 ^
+  --input-script=build\login.txt --input-anti-afk=60000 ^
+  --session-video-out=logs\video.264 --session-audio-out=logs\audio.opus ^
+  --session-present --session-audio-play --session-release > logs\run39.log
+```
+
+Band deaths exit rc 1 → auto re-draw (F7 owns 403 ladders; F26 guards
+the seat on the way out); a full-length `"time"` keeper exits rc 0 →
+the lottery STOPS (F15). Per-draw files name themselves
+(`video_d<N>.264`, `audio_d<N>.opus`). If the pool is peaking again
+(queue >100 at the first draw), consider a quieter hour — run 35's
+744 s on this build family is the standing proof that the client holds
+when the rig does. What to LISTEN for on a surviving draw (the first
+real audition of F21): game audio from ~t+10 s, smooth; at teardown
+`audio_play_end … decode_fail:0 prerolls:1 starved:≈0` on a healthy
+draw (a few starve episodes tolerated — each is one 100 ms re-prime).
+
+**Sandbox gates at slice-4 close (all re-run after the last edit):**
+native **PASS** (26 legs, zero warnings; knaudio **74**, knopus 105) ·
+cross `-Werror` ×2 **PASS** · ctest **27/27 ×2** · T10 dry **ALL PASS
+79** · T13 **ALL PASS 63** · e2e **48/48 deletes:1** · skeleton
+**113 == 113 vs run-36 live stdout** · ASan/UBSan clean (knaudio) ·
+knvstd clean `-Wformat-truncation=2` at -O0/-O2/-O3. Target: T10
+**89**, stamp **N**, ctest **27 ×2**.

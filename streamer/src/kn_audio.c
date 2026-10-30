@@ -228,6 +228,23 @@ unsigned kn_audio_feed_pop(kn_audio_feed *f, float *dst, unsigned frames)
     return n;
 }
 
+unsigned kn_audio_feed_plan(const kn_audio_feed *f, unsigned avail,
+                            int *primed, unsigned target_frames)
+{
+    unsigned level;
+
+    if (!f || !primed || avail == 0u)
+        return 0u;
+    if (target_frames == 0u || *primed)
+        return avail;                        /* legacy / already primed */
+    level = kn_audio_feed_level(f);
+    if (level >= target_frames || level + 1u >= f->cap) {
+        *primed = 1;                         /* waterline (or ring full) */
+        return avail;
+    }
+    return 0u;                               /* silent pre-roll tick */
+}
+
 static float ka_clamp1(float v)
 {
     if (!(v == v))                       /* NaN: silence, never propagate */
@@ -312,6 +329,8 @@ struct kn_audio {
     int coinit;
     /* F21 feed mode: 0 = synthetic sine (v1), 1 = consume fd */
     int feed;
+    int primed;                        /* F25: waterline state (engine) */
+    unsigned prime_frames;             /* F25: 100 ms at the device rate */
     kn_audio_feed fd;
     float *fd_backing;               /* the ring storage (malloc'd) */
     float *pop_buf;                  /* per-refill float scratch, frames*ch */
@@ -357,14 +376,25 @@ static DWORD WINAPI kn_audio_thread(LPVOID p)
             HRESULT hr = IAudioRenderClient_GetBuffer(a->render, avail, &data);
             if (SUCCEEDED(hr) && data) {
                 if (a->feed) {
-                    /* F21: consume the session ring; the zero-fill of the
-                     * untaken tail IS the underrun. starved only counts
-                     * AFTER the first push — pre-roll silence while the
-                     * stream arms is not a gap (docs/AUDIO.md §F21). */
-                    unsigned got = kn_audio_feed_pop(&a->fd, a->pop_buf,
-                                                     avail);
-                    if (got == 0u && a->fd.pushed > 0ull)
+                    /* F21+F25: consume the session ring behind a 100 ms
+                     * pre-buffer waterline. plan() holds the device on
+                     * silence (NOT counted as starvation) until the ring
+                     * primes; after that a pop that comes back empty is
+                     * an underrun EPISODE: starved++, re-arm the
+                     * waterline. The zero-fill of the untaken tail is
+                     * what keeps the device clock honest. */
+                    int was = a->primed;
+                    unsigned want = kn_audio_feed_plan(&a->fd, avail,
+                                                       &a->primed,
+                                                       a->prime_frames);
+                    unsigned got = want
+                        ? kn_audio_feed_pop(&a->fd, a->pop_buf, want) : 0u;
+                    if (a->primed && !was)
+                        a->stats.prerolls++;
+                    if (want && got == 0u && a->fd.pushed > 0ull) {
                         a->stats.starved++;
+                        a->primed = 0;       /* re-prime behind waterline */
+                    }
                     if (got < avail)
                         memset(a->pop_buf + (size_t)got * a->fd.channels, 0,
                                (size_t)(avail - got) * a->fd.channels *
@@ -580,6 +610,14 @@ kn_audio *kn_audio_open_feed(char *errbuf, size_t errsz)
         kn_audio_close(a);
         return NULL;
     }
+    /* F25: 100 ms pre-buffer waterline, clamped to the usable ring. The
+     * latency is inaudible against GFN's own pipeline and buys arrival
+     * jitter immunity; runs 36-38 showed the ungated ring starving on
+     * every hiccup (starved 759/801/802). */
+    a->primed = 0;
+    a->prime_frames = a->fmt.rate / 10u;
+    if (a->prime_frames > cap - 1u)
+        a->prime_frames = cap - 1u;
     if (ka_start_engine(a, errbuf, errsz) != 0) {
         kn_audio_close(a);
         return NULL;

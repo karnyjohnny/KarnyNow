@@ -551,3 +551,14 @@ silent, never fatal. The summary `"audio"` block and the 113-key
 skeleton are UNCHANGED: playback is event-line evidence. Provisioning:
 T10 stages opus 1.5.2 into `third_party/opus` (SHA-256-pinned release
 tarball, README pin table); run 36 is the first listen.
+
+**Slice-4 addendum (runs 36–38, F25/F26).** The pipe's first three live
+flights decoded 14 386 packets with `decode_fail:0` and `dropped:0`
+(RTSP.md §43.3); the ungated ring's `starved:759/801/802` was mostly
+post-mortem device silence plus zero-pre-buffer jitter ⇒ F25 puts the
+playback consumer behind a 100 ms waterline (`starved` becomes episode
+counts, `prerolls` counts re-arms; docs/AUDIO.md §F25) — the FILE side
+is untouched by design. F26 adds one fresh-stream retry to the
+`cm_release` DELETE on transport death (runs 37/38 orphaned their seats
+with `rc:-2`, costing the operator a manual browser rescue and the next
+create a 403 SESSION_LIMIT); answered statuses are never retried.

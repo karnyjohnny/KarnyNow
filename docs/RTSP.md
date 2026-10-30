@@ -4739,3 +4739,120 @@ rate × session seconds. If opus provisioning failed on the rig the run
 is still valid — `audio_play_begin ok:0 reason:"libopus not linked…"`
 and the `.opus` file carries the audio as before. Evidence both ways
 as always: stdout capture PLUS the `logs/` knlog directory.
+
+## 43. Round N slices 3–4 — RUNS 36/37/38: **F21'S FIRST FLIGHT IS TECHNICALLY FLAWLESS — 14 386 PACKETS DECODED LIVE, ZERO FAILURES, THE 44.1 kHz SWR PATH PROVEN — AND ALL THREE DRAWS STILL DIED IN THE FREEZE FAMILY AT 12–37 s ON A PEAK-FRIDAY POOL (QUEUE ~160), ONE OF THEM A SICK RIG THE POOL HANDED OUT TWICE. THE OPERATOR'S OWN A/B (PHONE TETHER = SAME DEATH; BROWSER ON THE SAME WI-FI = PERFECT) NAMES THE POOL, NOT THE LINE AND NOT THE CLIENT.**
+
+### 43.1 The evening in one table (all three draws stamp N, F21 live, Endfield, macro aboard)
+
+| run | network | queue | rig | wall | media death | cascade (video/audio/ctrl rel_ms) | release |
+|---|---|---|---|---|---|---|---|
+| 36 | 2.4 GHz Wi-Fi | ~159 (2 m 36 s) | **185.136.70.139** (np-ams/lon pool) | 47.1 s | 37.0 s | 37010 / 39615 / 38638 | **200 gone:1 CLEAN** |
+| 37 | **phone tether** | ~163 (2 m 16 s) | 80.84.170.154 (np-ams pool) | 24.0 s | 13.9 s | 13871 / 15949 / 8859 | **rc:-2 IO → ORPHAN** |
+| 38 | 2.4 GHz Wi-Fi | ~156 (2 m 50 s) | **185.136.70.139 AGAIN** | 22.2 s | 12.1 s | 12059 / 14172 / 8861 | **rc:-2 IO → ORPHAN** |
+
+All three: `stop_reason:"recovery_exhausted"`, ABRUPT kbps ramps
+([622,0,…], [571,0,…], [51,0,…]), 50/50 and 25/25-class IDR/PLI volleys
+UNANSWERED, BWE warm (41.9 / 68.0 / 44.7 Mbps at 1–2 % utilisation),
+zero-to-two gaps, `datagrams == authenticated` to the last packet,
+**`rtsp_teardown` 200 on ALL THREE** (the rig's host stack answered
+politely while its media plane was already dead — the run-22 signature
+verbatim). The macro never reached its Play click (fired:3 of 98 each
+time): all three draws sat on the Endfield LAUNCHER screen — the
+historically most fragile draw type (runs 22–26 died in exactly this
+state).
+
+### 43.2 Why this is the pool, not the line, and not the client
+
+1. **The operator ran the A/B himself**: run 37 flew on the 5 GHz phone
+   tether and died the SAME way (13.9 s — inside the classic 10–13 s
+   band); after run 38 he resumed in the GFN browser **on the same
+   2.4 GHz Wi-Fi** and played with no lags and no compression. The
+   network is exonerated from both directions. (The browser resume also
+   does not contradict the sick-rig read: GFN's resume re-provisions the
+   stream — our evidence shows the rig's MEDIA stack dead while its
+   RTSP host stack still answered TEARDOWN 200.)
+2. **Two DIFFERENT rigs died identically** (185.136.70.139 and
+   80.84.170.154) — and the pool handed 185.136.70.139 out TWICE in
+   12 minutes (runs 36 and 38): a sick rig on a peak-Friday pool, not a
+   sick client following us around.
+3. **The signature predates F21 by a dozen builds**: runs 23–26 died at
+   10.4–13.2 s with the same abrupt cut and unanswered IDR/PLI; run 31
+   drew 14/14/29/36/122 s. Runs 37/38 (13.9/12.1 s) are band deaths;
+   run 36 (37.0 s) is a run-31-draw-4 clone. The same wire (F21 adds
+   ZERO messages and changes no timing — playback is a purely local
+   consumer) flew 744.3 s in run 35 ninety minutes earlier and 900.0 s
+   in run 34.
+4. **Every client plane kept contract to the millisecond**: QoS ~20 Hz,
+   RR ~1 Hz, keepalives, batch flushes 0 failed, outbox 0 dropped,
+   pacer nominal, `recv_timeouts = ticks − datagrams − 1` arithmetic
+   exact, decode 1107/1107, 397/397, 346/346 frames with ZERO failures,
+   presenter fails:0 max_ms ≤2.7.
+
+### 43.3 F21's first flight — the numbers that matter
+
+`audio_play_begin ok:1 fmt:"44100Hz 2ch float32" swr:1 opus:"libopus
+1.5.2"` ×3 — the rig's device is 44.1 kHz, so the LIVE RESAMPLE PATH
+(48 kHz arx → swr → 44.1 kHz ring) flew on its first outing. Across the
+three draws: **14 386 packets decoded, `decode_fail:0`, `dropped:0`**,
+3 452 640 frames in / 3 172 065 pushed (the ratio is exactly
+44100/48000), three valid `.opus` files written in parallel
+(file-first ordering held), `audio_close` clean ×3. The one blemish —
+`starved:759/801/802` — is ARITHMETIC, not stutter: the device stayed
+open ~8–10 s past each media death zero-filling silence (the ungated
+ring counted every 10 ms buffer), plus arrival jitter with zero
+pre-buffer target. ⇒ **F25**.
+
+### 43.4 The seat story: two orphans and a manual browser rescue
+
+Run 36 released cleanly (200 gone:1). Runs 37 and 38 both died with
+`cm_release rc:-2` (transport IO — the run-35 CONN_RESET pattern: the
+DELETE hit a connection the reclaiming server had already dropped), so
+BOTH seats orphaned → the operator's next create ate **403
+SESSION_LIMIT** and he had to free the seat by hand on
+play.geforcenow.com (run 37), then the browser kindly offered to RESUME
+the run-38 orphan (which he played). F18's telemetry told the truth
+every time (`note:"the seat may still be held…"`); what was missing is
+a second chance ⇒ **F26**: one retry of the DELETE on a FRESH TLS
+stream after 500 ms, but ONLY on transport death (`KN_HTTP_ERR_IO`) —
+an answered status (2xx/404/4xx) is never retried. The `cm_release`
+line grows `"attempts":N`.
+
+### 43.5 Slice 4 ships: F25 + F26
+
+**F25 — the playback pre-buffer waterline** (`kn_audio_feed_plan`, a
+pure host-tested decision, 74-check `test_knaudio`): the feed engine
+stays on silence until the ring holds **100 ms** at the device rate
+(or is FULL — a faster-than-device source must drain regardless), then
+primes; a post-prime empty pop is one `starved` EPISODE and re-arms the
+waterline (`prerolls` counts primings; `audio_play_end` grows
+`"prerolls":N`). Cost: +100 ms audio latency (inaudible against the
+GFN pipeline); gain: arrival-jitter immunity and honest counters —
+post-mortem tails now cost ONE starve, not 800. **F26** as above. No
+wire change, no summary-key change (skeleton 113 vs run-36's LIVE
+stdout — verified), target T10 stays **89**, ctest stays 27 ×2.
+Sandbox gates re-run green: native PASS (knaudio **74**), cross ×2
+`-Werror`, T10 dry **79**, T13 **63**, e2e **48/48**, ASan/UBSan clean.
+
+### 43.6 Run 39 — stop hand-cranking single draws: let the lottery fish
+
+The evening burned ~10 minutes of operator time per draw on queue +
+death + manual 403 archaeology. That is exactly what F5/F6/F15 built
+the lottery for:
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 ^
+  --session-seconds=900 --lottery=3 --lottery-gap=60 --lottery-stop-on-keeper=1 ^
+  --input-script=build\login.txt --input-anti-afk=60000 ^
+  --session-video-out=logs\video.264 --session-audio-out=logs\audio.opus ^
+  --session-present --session-audio-play --session-release > logs\run39.log
+```
+
+Band deaths exit rc 1 → automatic re-draw (F7 owns any 403 ladder with
+20/40/80 s backoff; F26 now guards the seat on the way out); a
+full-length `"time"` keeper exits rc 0 → the lottery STOPS on it
+(F15). Per-draw files are automatic (`video_d<N>.264`,
+`audio_d<N>.opus` — F13/F16/F17). If the evening is peak again
+(Friday 19:00–21:00 CET, queue ~160), consider a quieter hour — the
+pool's health, not our code, is the binding constraint; run 35's 744 s
+on THIS build family is the proof that the client holds when the rig
+does.

@@ -240,6 +240,60 @@ static void test_feed_ring(void)
     CHECK(kn_audio_feed_pop(&f, NULL, 4) == 0u, "feed pop null");
 }
 
+static void test_feed_plan(void)
+{
+    static float backing[1024];          /* 512 frames x 2 ch = 1024 floats */
+    static float src[2048];
+    kn_audio_feed f;
+    int primed;
+    unsigned cap, i;
+
+    cap = kn_audio_feed_init(&f, backing, 512, 2);
+    CHECK(cap == 512u, "plan init 512");
+    for (i = 0; i < 2048; ++i)
+        src[i] = (float)i * 0.001f;
+
+    /* NULL discipline */
+    primed = 0;
+    CHECK(kn_audio_feed_plan(NULL, 100, &primed, 4800) == 0u, "plan null ring");
+    CHECK(kn_audio_feed_plan(&f, 100, NULL, 4800) == 0u, "plan null primed");
+    CHECK(kn_audio_feed_plan(&f, 0, &primed, 4800) == 0u, "plan zero avail");
+
+    /* target 0 = legacy: no gating, always consume */
+    primed = 0;
+    CHECK(kn_audio_feed_plan(&f, 100, &primed, 0) == 100u, "plan target0 avail");
+    CHECK(primed == 0, "plan target0 leaves primed untouched");
+
+    /* empty ring, target>0: silent pre-roll (0 frames), not primed */
+    primed = 0;
+    CHECK(kn_audio_feed_plan(&f, 100, &primed, 10) == 0u, "plan empty preroll");
+    CHECK(primed == 0, "plan empty stays unprimed");
+
+    /* below waterline: still pre-roll */
+    CHECK(kn_audio_feed_push(&f, src, 5) == 5u, "plan push 5");
+    primed = 0;
+    CHECK(kn_audio_feed_plan(&f, 100, &primed, 10) == 0u, "plan below water");
+    CHECK(primed == 0, "plan below stays unprimed");
+
+    /* at/above waterline: primes and consumes */
+    CHECK(kn_audio_feed_push(&f, src, 5) == 5u, "plan push to 10");
+    primed = 0;
+    CHECK(kn_audio_feed_plan(&f, 100, &primed, 10) == 100u, "plan at water");
+    CHECK(primed == 1, "plan at water primes");
+
+    /* already primed: consumes regardless of level (even empty) */
+    CHECK(kn_audio_feed_pop(&f, src, 10) == 10u, "plan drain 10");
+    primed = 1;
+    CHECK(kn_audio_feed_plan(&f, 100, &primed, 10) == 100u, "plan primed avail");
+    CHECK(primed == 1, "plan primed stays primed");
+
+    /* ring full (level+1==cap) primes even if target is unreachable */
+    CHECK(kn_audio_feed_push(&f, src, 511) == 511u, "plan fill ring");
+    primed = 0;
+    CHECK(kn_audio_feed_plan(&f, 100, &primed, 9999) == 100u, "plan full primes");
+    CHECK(primed == 1, "plan full primed");
+}
+
 static void test_xform(void)
 {
     static const float in[8] = { 0.0f, 1.0f, -1.0f, 0.5f,
@@ -313,6 +367,7 @@ int main(void)
     test_fmt_parse();
     test_gen();
     test_feed_ring();
+    test_feed_plan();
     test_xform();
     return kn_test_summary("test_knaudio");
 }

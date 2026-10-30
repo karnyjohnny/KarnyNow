@@ -110,6 +110,19 @@ unsigned kn_audio_feed_push(kn_audio_feed *f, const float *pcm,
  * channels floats); returns frames taken (0 = empty ring). */
 unsigned kn_audio_feed_pop(kn_audio_feed *f, float *dst, unsigned frames);
 
+/* F25 (round N slice 4): the pre-buffer waterline decision, pure and
+ * host-testable. Feed-mode render tick: with *primed==0 the ring must
+ * reach `target_frames` (or be full — a source faster than the device
+ * must drain regardless) before the engine starts consuming; until then
+ * the device gets silence WITHOUT it counting as starvation. Once
+ * primed, plan returns `avail` and pop's own contract rules. The
+ * caller (engine) flips *primed back to 0 on a post-prime underrun, so
+ * `starved` counts UNDERRUN EPISODES, each re-armed behind the
+ * waterline. target_frames==0 disables gating (legacy behaviour).
+ * Returns the frames to pop now (0 = zero-fill this tick). NULL-safe. */
+unsigned kn_audio_feed_plan(const kn_audio_feed *f, unsigned avail,
+                            int *primed, unsigned target_frames);
+
 /* Current fill in frames (wr - rd, unsigned wrap-safe). */
 unsigned kn_audio_feed_level(const kn_audio_feed *f);
 
@@ -129,6 +142,7 @@ typedef struct kn_audio_stats {
     unsigned queue_ms;                   /* last measured device padding */
     /* F21 feed mode (zero in synthetic mode): */
     unsigned long long push_dropped;     /* frames refused: ring was full */
+    unsigned long long prerolls;         /* F25: ring primings (waterline) */
     unsigned ring_ms;                    /* current ring fill, ms */
     unsigned feed;                       /* 1 = feed mode engine */
 } kn_audio_stats;

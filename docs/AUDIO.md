@@ -211,3 +211,30 @@ handoff, not the network), and concealment is **counted silence** (no
 PLC — `starved`/`dropped`/`decode_fail` tell the truth instead).
 `queue_audio_ms` still reports device padding at the last refill.
 Volume/mute transport keys remain a future TUI item.
+
+### F25 (round N slice 4): the pre-buffer waterline — runs 36–38's `starved` lesson
+
+The first three live flights (RTSP.md §43.3) exposed the ungated ring's
+two counter sins: with the device consuming at exactly the arrival rate
+and NO buffer target, every arrival hiccup emptied the ring (audible
+click), and the ~8–10 s of device time AFTER each media death was
+counted as ~800 individual starvations of silence. F25 fixes both with
+one pure decision, `kn_audio_feed_plan(f, avail, &primed, target)`:
+
+- **unprimed**: consume nothing (silent zero-fill, NOT starvation) until
+  the ring holds `target` frames — the engine sets **100 ms at the
+  device rate** (`rate/10`, clamped to the usable ring) — or until the
+  ring is FULL (`level+1 == cap`: a source faster than the device must
+  drain regardless of the waterline);
+- **primed**: consume normally; a pop that comes back EMPTY is one
+  `starved` EPISODE — the engine re-arms (`primed=0`) and the ring
+  re-primes behind the waterline when audio returns;
+- `prerolls` (new stats counter, on `audio_play_end`) counts primings,
+  so a jittery evening reads as `starved:3 prerolls:4`, not `starved:800`.
+
+`target==0` preserves the legacy ungated behaviour (the planner is
+host-tested both ways; `test_knaudio` 54 → **74 checks**). Cost: +100 ms
+end-to-end audio latency — well below lip-drift perception and tiny
+against GFN's own pipeline. The plan() decision lives in the neutral
+half; the engine branch stays three lines (the kn_freeze discipline:
+pure decisions host-tested, Win32 wiring minimal).

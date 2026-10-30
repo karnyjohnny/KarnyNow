@@ -3663,13 +3663,15 @@ static void sess_audio_play_close(sess_pump *p)
     printf("{\"mode\":\"session\",\"event\":\"audio_play_end\","
            "\"pkts\":%llu,\"frames\":%llu,\"decode_fail\":%llu,"
            "\"pushed\":%llu,\"dropped\":%llu,\"starved\":%llu,"
-           "\"events\":%llu,\"written\":%llu,\"queue_ms\":%u}\n",
+           "\"prerolls\":%llu,\"events\":%llu,\"written\":%llu,"
+           "\"queue_ms\":%u}\n",
            p->play_pkts % 10000000000ull,
            p->play_frames % 10000000000ull,
            p->play_fail % 10000000000ull,
            p->play_pushed % 10000000000ull,
            as.push_dropped % 10000000000ull,
            as.starved % 10000000000ull,
+           as.prerolls % 10000000000ull,
            as.events % 10000000000ull,
            as.frames_written % 10000000000ull,
            as.queue_ms % 100000u);
@@ -3682,6 +3684,7 @@ static void sess_audio_play_close(sess_pump *p)
         kn_lctx_i64(&b, "decode_fail", (long long)p->play_fail);
         kn_lctx_i64(&b, "pushed", (long long)p->play_pushed);
         kn_lctx_i64(&b, "starved", (long long)as.starved);
+        kn_lctx_i64(&b, "prerolls", (long long)as.prerolls);
         kn_log_emit(&b);
     }
     if (p->play_dev) {
@@ -8663,25 +8666,46 @@ teardown:
     }
     if (release_session) {
         if (sess.session_id[0]) {
-            int c_rc = KN_HTTP_ERR_IO, c_status = 0, gone;
+            int c_rc = KN_HTTP_ERR_IO, c_status = 0, gone, attempts = 0;
             /* the poll loop closes its own stream: open a fresh one, the
              * same idiom as the queue-abort cancel above */
-            if (cm_tls) { kn_net_tls_stream_close(cm_tls); cm_tls = NULL; }
-            cm_tls = kn_net_tls_stream_open(poll_host, poll_port, 15000,
-                                            err, sizeof err);
-            if (cm_tls) {
-                cm_io_ctx.s = cm_tls;
-                c_rc = kn_cm_cancel(hio, poll_host, "/", &st,
-                                    sess.session_id, 20000, sess_now, NULL,
-                                    cm_rxb, sizeof cm_rxb, cm_json,
-                                    sizeof cm_json, &c_status);
-                kn_net_tls_stream_close(cm_tls);
-                cm_tls = NULL;
+            for (attempts = 1; attempts <= 2; attempts++) {
+                if (attempts == 2) {
+                    /* F26 (round N slice 4): runs 35/37/38 lost the seat
+                     * to a transport-level DELETE failure (rc:-2, mbedTLS
+                     * CONN_RESET) while the rig was mid-reclaim — and an
+                     * orphaned seat is the next create's 403
+                     * SESSION_LIMIT (the operator had to free it by hand
+                     * in the browser, run 37). One retry on a FRESH
+                     * stream after 500 ms; HTTP-status answers (any
+                     * 2xx/404/4xx) are NEVER retried — only transport
+                     * death with no response at all. */
+                    sess_sleep(500, NULL);
+                    c_status = 0;
+                }
+                if (cm_tls) { kn_net_tls_stream_close(cm_tls); cm_tls = NULL; }
+                cm_tls = kn_net_tls_stream_open(poll_host, poll_port, 15000,
+                                                err, sizeof err);
+                if (cm_tls) {
+                    cm_io_ctx.s = cm_tls;
+                    c_rc = kn_cm_cancel(hio, poll_host, "/", &st,
+                                        sess.session_id, 20000, sess_now,
+                                        NULL, cm_rxb, sizeof cm_rxb, cm_json,
+                                        sizeof cm_json, &c_status);
+                    kn_net_tls_stream_close(cm_tls);
+                    cm_tls = NULL;
+                } else {
+                    c_rc = KN_HTTP_ERR_IO;
+                }
+                if (c_rc != KN_HTTP_ERR_IO)
+                    break;                   /* got an answer (or a parse
+                                              * /protocol error): no retry */
             }
             gone = (c_rc == KN_HTTP_OK &&
                     ((c_status >= 200 && c_status < 300) || c_status == 404));
             printf("{\"mode\":\"session\",\"event\":\"cm_release\",\"rc\":%d,"
-                   "\"http_status\":%d,\"gone\":%d}\n", c_rc, c_status, gone);
+                   "\"http_status\":%d,\"gone\":%d,\"attempts\":%d}\n",
+                   c_rc, c_status, gone, attempts);
             fflush(stdout);
             {
                 kn_lctx b;
@@ -8693,6 +8717,7 @@ teardown:
                 kn_lctx_i64(&b, "rc", c_rc);
                 kn_lctx_i64(&b, "http_status", c_status);
                 kn_lctx_bool(&b, "gone", gone);
+                kn_lctx_i64(&b, "attempts", attempts);
                 if (!gone)
                     kn_lctx_str(&b, "note", "the seat may still be held; the "
                                             "next create can hit 403 "
