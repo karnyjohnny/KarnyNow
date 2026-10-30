@@ -458,3 +458,57 @@ the muxer's granulepos was right all along and the XLIX "20 ms / CELT-FB
 20 ms" label was the only thing that was wrong. Any future decoder or
 playback work (§8's deferred follow-on) must budget **200 packets/s**,
 not 50.
+
+### 10.2 Run 33: the first content-bearing capture (13:38 of real game sound)
+
+Run 33 turned §10.1's "proven as extraction" into proof of content:
+
+- `audio.opus` — **163 728 packets × 5 ms = 818.68 s**, ffmpeg duration
+  `00:13:38.64` (the 5 ms correction holds on the longest capture yet;
+  at §10.1's 20 ms guess this would have "played" 4× too slow),
+  23 575 615 B, `srtp_fail 0`, `seq_loss 0`, `write_errors 0`.
+- The operator opened it in Audacity: **stereo, audible content** — the
+  Endfield loading screen and in-world walking. This is the first time
+  in the project that a capture is not just structurally valid but
+  verifiably real sound, and it is also the first independent proof
+  that the arx pipeline carries content at all (run 32's launcher
+  capture was structurally clean but never content-checked).
+- The freeze at 815.2 s cut BOTH media planes at once (video 24 424 AUs
+  ≈ 29.94 fps and audio ≈ 163.7 k packets over 815.689 s of rtp time)
+  with `seq_loss 0` to the very end — no loss precursor in either
+  direction. Audio-plane evidence for RTSP.md §40.2: whatever kills
+  these sessions, it is not the network.
+- Still owed to close the audio bar with a second implementation: an
+  independent RMS/spectrum decode of a pushable excerpt in the sandbox
+  (run-33 addendum in START-HERE §4 lists the exact ffmpeg cut).
+
+**Round M addendum — the independent decode CLOSED the second-implementation
+bar.** `media/run33_tail.opus` (the pushed last-10 s excerpt) decoded in
+the sandbox with ffmpeg + numpy, no operator ears involved:
+483 840 samples (10.08 s), **mean RMS −60.5 dB, peak −27.3 dB** (run 30's
+silence floor was mean −91.0 / peak −80.8 dB — this capture sits ~30 dB
+above it), 82.6 % of 10 ms windows below −60 dB but p95 −58.5 dB =
+quiet-but-real ambience, **L/R correlation 0.294** with side channel
+−63.1 dB = genuinely decorrelated stereo (not a duplicated mono), and a
+stationary dominant tone at **391 Hz** (G4; 578–582 Hz overtone late)
+present in all ten per-second spectra = an in-world ambient drone, plus
+the operator's own room tone ("dźwięki otoczenia"). Band split: 50.3 %
+low-mid / 28.4 % mid / 17.3 % sub-bass / 3.9 % above 2 kHz — a muffled
+environmental bed, exactly what a standing character hears. The audio
+plane is hereby certified **content-bearing by two independent
+implementations** (operator's Audacity + sandbox numpy decode). Its
+freeze-side behaviour (cut ~11 s after video, no decay of its own) is
+in RTSP.md §40.4.
+
+### 10.3 Run 34: content to the last packet of a 900-second keeper
+
+The pushed `media/audio_trimmed.opus` (true last 10 s — the Opus leg of
+the operator's bat script carries real timestamps, unlike the Annex-B
+video leg) decodes at **mean −58.1 dB / peak −28.8 dB, L/R correlation
+0.380**, flat −57…−59 dB in every 2 s bucket: ambient game bed, healthy,
+to the final packet of the first 900 s keeper. The video leg of the same
+script used `-r 25` on a 30 fps stream, stretching the timeline 1.2×
+(the "last 10 s" cut is really the last 250 frames ≈ 8.3 s); harmless
+for the tail check (sharpness flat 8.7–8.8, zero dips — RTSP.md §41.1)
+but the corrected script ships with the run-34 addendum in
+START-HERE §13: **`-r 30`**, or `-f h264 -r 30 -i` form.

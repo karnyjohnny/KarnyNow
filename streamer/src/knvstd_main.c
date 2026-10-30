@@ -30,6 +30,7 @@
 
 #include "kn/kn_audio.h"
 #include "kn/kn_arx.h"   /* round XLVIII (F11): bundle-audio rx */
+#include "kn/kn_freeze.h" /* round M (F22): freeze-witness ring */
 #include "kn/kn_ogg.h"   /* round XLVIII (F11): OggOpus capture file */
 #include "kn/kn_cert.h"
 #include "kn/kn_dtls.h"
@@ -2092,6 +2093,22 @@ typedef struct dec_ctx {
     uint32_t au_last_ts;
     long long au_drift_ms, au_drift_min_ms, au_drift_max_ms;
     unsigned long long au_ts_backwards;
+
+    /* ---- round M (F22): the freeze-witness ring (kn_freeze.h) ----
+     * The media loop is the only writer: per-completed-frame bytes and
+     * IDR counts accumulate in the current 1 s bucket here and are
+     * folded into the ring on the session_stats beat. The decay
+     * decision (kn_fw_decay) makes a rig-side wind-down — run 33's
+     * 3.1 -> 0.5 Mbps over ~10 s at zero gaps — warn LIVE, and the ring
+     * renders onto the terminal freeze_witness line. */
+    kn_fw      fw;
+    uint64_t   fw_sec_bytes;
+    unsigned   fw_sec_idr;
+    uint64_t   fw_sec_t0;
+    unsigned long long fw_prev_gaps;
+    uint64_t   fw_last_video_ms;
+    unsigned   fw_decay_warned;
+    uint64_t   fw_decay_at_ms;
 } dec_ctx;
 
 static uint8_t g_dec_qbytes[DEC_QUEUE_CAP][DEC_AU_CAP];
@@ -2142,6 +2159,11 @@ static void dec_frame_in_cb(const kn_rx_frame *f, void *ud)
      * bytes_received is the CUMULATIVE completed-frame byte count. */
     c->last_sender_frame = f->frame_index;
     c->completed_frame_bytes += (unsigned long long)f->bytes_len;
+    /* round M (F22): this frame's bytes/IDR-ness join the live 1 s
+     * bucket the session_stats beat folds into the freeze ring. */
+    c->fw_sec_bytes += (uint64_t)f->bytes_len;
+    if (f->keyframe) c->fw_sec_idr++;
+    c->fw_last_video_ms = c->now_ms;
 
     /* ---- AU wall-vs-RTP telemetry (round XXXVIII evidence) ----
      * The RTP timestamp is the SENDER's 90 kHz clock; c->now_ms is our
@@ -3220,6 +3242,14 @@ typedef struct {
     int      audio_armed, audio_srtp_derived, audio_file_on;
     unsigned audio_prof;
     int      input_version;          /* -1 until the rig's 0x020e lands */
+    /* round M (F22): freeze-witness cross-thread latches — the pump
+     * worker writes them (audio emit, ctrl_in beat), the media loop
+     * reads them once at the terminal freeze_witness line. Plain
+     * volatile stores of aligned 64-bit words: one writer, one reader,
+     * teardown-time only. */
+    volatile uint64_t fw_last_audio_ms;
+    volatile uint64_t fw_last_ctrl_ms;
+    volatile unsigned fw_ctrl_msgs;
     unsigned activation_sent;        /* latch: the chain flies once */
     unsigned activation_attempts;
     /* Round XLI.1: volatile mirror of `activation_sent` for the media
@@ -3260,6 +3290,7 @@ static void sess_audio_emit(void *ctx, const uint8_t *payload, size_t len,
                             uint32_t samples48)
 {
     sess_pump *p = (sess_pump *)ctx;
+    p->fw_last_audio_ms = kn_sock_now_ms();   /* F22 cascade latch */
     if (p->audio_file_on)
         (void)kn_ogg_mux_packet(&p->ogg, payload, len, samples48);
 }
@@ -3911,7 +3942,7 @@ static int si_console_key(int ch, uint16_t *vk, uint16_t *mods)
 static int si_send(sess_input *si, sess_fb_outbox *fb, uint64_t origin_us,
                    int kind, uint16_t vk, uint16_t mods, int down,
                    int32_t a, int32_t b, uint16_t w, uint16_t h,
-                   unsigned btn)
+                   unsigned btn, const char *src)
 {
     uint8_t buf[KN_INPUT_CMD_MAX];
     uint64_t ts = kn_sock_now_us() - origin_us;
@@ -3962,11 +3993,17 @@ static int si_send(sess_input *si, sess_fb_outbox *fb, uint64_t origin_us,
     }
     if (!si->first_logged) {
         si->first_logged = 1u;
+        /* round M (F23): the PER-EVENT source, not the configured one.
+         * Run 33's first send was the immediate first anti-AFK pulse but
+         * the line said "script" (the configured source) — the exact
+         * misread that cost an hour of macro-timeline archaeology. */
         printf("{\"mode\":\"session\",\"event\":\"input_first_send\","
                "\"kind\":%d,\"sid\":%d,\"bytes\":%d,\"ts_us\":%llu,"
-               "\"source\":\"%s\"}\n", kind, sid, n,
+               "\"source\":\"%s\",\"configured\":\"%s\"}\n",
+               kind, sid, n,
                (unsigned long long)ts,
-               si->source ? si->source : "script");
+               src ? src : "script",
+               si->source ? si->source : "none");
         fflush(stdout);
     }
     return 0;
@@ -4008,7 +4045,7 @@ static size_t si_tick(sess_input *si, sess_fb_outbox *fb, uint64_t origin_us,
             continue;
         }
         if (si_send(si, fb, origin_us, e->kind, e->vk, e->mods, e->down,
-                    e->a, e->b, e->w, e->h, e->btn) == 0)
+                    e->a, e->b, e->w, e->h, e->btn, "script") == 0)
             sent++;
         si->next++;
     }
@@ -4026,10 +4063,10 @@ static size_t si_tick(sess_input *si, sess_fb_outbox *fb, uint64_t origin_us,
                 continue;
             }
             if (si_send(si, fb, origin_us, SI_KEY, vk, mods, 1,
-                        0, 0, 0, 0, 0) == 0)
+                        0, 0, 0, 0, 0, "live") == 0)
                 sent++;
             if (si_send(si, fb, origin_us, SI_KEY, vk, mods, 0,
-                        0, 0, 0, 0, 0) == 0)
+                        0, 0, 0, 0, 0, "live") == 0)
                 sent++;
             si->live_keys++;
         }
@@ -4038,10 +4075,10 @@ static size_t si_tick(sess_input *si, sess_fb_outbox *fb, uint64_t origin_us,
     /* 3. the anti-AFK pulse (the reference's F13 down+up) */
     if (si->afk_ms && now_ms >= si->next_afk_ms) {
         if (si_send(si, fb, origin_us, SI_KEY, KN_INPUT_VK_ANTI_AFK, 0, 1,
-                    0, 0, 0, 0, 0) == 0)
+                    0, 0, 0, 0, 0, "afk") == 0)
             sent++;
         if (si_send(si, fb, origin_us, SI_KEY, KN_INPUT_VK_ANTI_AFK, 0, 0,
-                    0, 0, 0, 0, 0) == 0)
+                    0, 0, 0, 0, 0, "afk") == 0)
             sent++;
         si->afk_pulses++;
         si->next_afk_ms = now_ms + si->afk_ms;
@@ -4087,7 +4124,9 @@ static void si_report(const sess_input *si)
         /* WARN when input was armed but NOT ONE message flew: that is the
          * run-31 shape (channel live, zero discrete input) and it is the
          * single most diagnostic fact a draw can report. */
-        kn_lctx_init(&b, KN_CH_INPUT, si->sent ? KN_INFO : KN_WARN,
+        kn_lctx_init(&b, KN_CH_INPUT,
+                     (!si->sent || si->build_fail || si->push_fail)
+                         ? KN_WARN : KN_INFO,
                      "input_summary");
         kn_lctx_str(&b, "script", si->script);
         kn_lctx_str(&b, "source", si->source ? si->source : "none");
@@ -4109,11 +4148,37 @@ static void si_report(const sess_input *si)
         kn_lctx_u64(&b, "late_skips", (unsigned long long)si->skipped_late);
         kn_lctx_u64(&b, "unmapped_chars",
                     (unsigned long long)si->live_unmapped);
-        if (!si->sent)
+        /* round M (F23): the run-32/run-33 lesson. The old note claimed
+         * "gated==0 means the media loop never ticked" — run 32 ticked
+         * 668 AUs with the gate latched and STILL flew nothing (the
+         * macro's first t_ms was past the draw's death), and run 33 flew
+         * everything with gated==0. Key the explanation off fired and
+         * gated, and name the scheduling miss explicitly. */
+        if (!si->sent) {
+            if (si->gated)
+                kn_lctx_str(&b, "note",
+                            "armed but NOTHING flew and gated>0: the "
+                            "activation chain never latched "
+                            "enable-input(true); every due event waited");
+            else if (si->next < si->n)
+                kn_lctx_str(&b, "note",
+                            "armed, gate open, media loop ticked, but no "
+                            "event came due before the draw died: a "
+                            "SCHEDULING MISS — the next event's t_ms is "
+                            "past the draw's media lifetime (compare "
+                            "video_stream_end.aus with the script "
+                            "timeline); not a wiring bug");
+            else
+                kn_lctx_str(&b, "note",
+                            "armed but the input tick never fired: the "
+                            "media loop never ticked (aus==0) or the "
+                            "timeline was empty");
+        } else if (si->build_fail || si->push_fail) {
             kn_lctx_str(&b, "note",
-                        "input was armed but nothing flew: gated>0 means the "
-                        "activation chain never latched enable-input(true); "
-                        "gated==0 means the media loop never ticked");
+                        "some armed events failed to build or push: see "
+                        "build_fail/push_fail — the wire layer or the "
+                        "outbox rejected them");
+        }
         kn_log_emit(&b);
     }
 }
@@ -4726,6 +4791,8 @@ static void sess_ctrl_service(sess_pump *p)
     p->st.term_resumable = p->sctl_term_resumable;
     if (now_ms >= p->next_ctrl_log_ms) {
         p->next_ctrl_log_ms = now_ms + 30000u;
+        p->fw_last_ctrl_ms = now_ms;          /* F22 cascade latch */
+        p->fw_ctrl_msgs = p->st.ctrl_msgs;
         sess_ctrl_refresh_hist(p);
         printf("{\"mode\":\"session\",\"event\":\"ctrl_in\",\"t_ms\":%llu,"
                "\"rel_ms\":%llu,"
@@ -7124,6 +7191,7 @@ static int run_session(const char *token, const char *device_id,
         next_ka_ms = 0;
         t_start = kn_sock_now_ms();
         t_last_stats = t_start;
+        c.fw_sec_t0 = t_start;                /* F22: first bucket */
         next_poll_ms = t_start;
         stop_reason = "time";
         while (!g_knv_stop) {
@@ -7507,6 +7575,51 @@ static int run_session(const char *token, const char *device_id,
             if (now_ms - t_last_stats >= 1000u) {
                 kn_lctx p;
                 t_last_stats = now_ms;
+                /* round M (F22): fold the elapsed second into the
+                 * freeze-witness ring (video kbps from completed-frame
+                 * bytes, IDR count, gap count), then ask the ring
+                 * whether a rig-side wind-down is in progress RIGHT
+                 * NOW — run 33's ramp was visible here for ten whole
+                 * seconds and nothing said so. */
+                {
+                    uint64_t fspan = now_ms - c.fw_sec_t0;
+                    unsigned fkbps = fspan > 0u
+                        ? (unsigned)((c.fw_sec_bytes * 8ull) / fspan)
+                        : 0u;
+                    unsigned fgap = (unsigned)(
+                        v.packet_gap_recoveries - c.fw_prev_gaps);
+                    unsigned a5 = 0, a60 = 0;
+                    kn_fw_add(&c.fw, fkbps, c.fw_sec_idr, fgap);
+                    c.fw_sec_bytes = 0ull;
+                    c.fw_sec_idr = 0u;
+                    c.fw_prev_gaps = v.packet_gap_recoveries;
+                    c.fw_sec_t0 = now_ms;
+                    if (!c.fw_decay_warned && kn_fw_decay(&c.fw, &a5, &a60)) {
+                        kn_lctx dw;
+                        c.fw_decay_warned = 1u;
+                        c.fw_decay_at_ms = now_ms;
+                        printf("{\"mode\":\"session\","                               "\"event\":\"bitrate_decay_warn\","                               "\"rel_ms\":%llu,\"avg5_kbps\":%u,"                               "\"avg60_kbps\":%u,\"pct\":%u,"                               "\"gaps_total\":%llu}\n",
+                               (unsigned long long)(now_ms - t_start),
+                               a5, a60,
+                               a60 ? (unsigned)((a5 * 100u) / a60) : 0u,
+                               (unsigned long long)
+                               (v.packet_gap_recoveries % 1000000000ull));
+                        fflush(stdout);
+                        kn_lctx_init(&dw, KN_CH_TRANSPORT, KN_WARN,
+                                     "bitrate_decay_warn");
+                        kn_lctx_i64(&dw, "avg5_kbps", (long long)a5);
+                        kn_lctx_i64(&dw, "avg60_kbps", (long long)a60);
+                        kn_log_emit(&dw);
+                    } else if (c.fw_decay_warned &&
+                               kn_fw_recovered(&c.fw)) {
+                        c.fw_decay_warned = 0u;
+                        printf("{\"mode\":\"session\","                               "\"event\":\"bitrate_decay_recovered\","                               "\"rel_ms\":%llu,\"warned_for_ms\":%llu}\n",
+                               (unsigned long long)(now_ms - t_start),
+                               (unsigned long long)(now_ms -
+                                                    c.fw_decay_at_ms));
+                        fflush(stdout);
+                    }
+                }
                 kn_lctx_init(&p, KN_CH_TRANSPORT, KN_INFO, "session_stats");
                 kn_lctx_i64(&p, "datagrams",
                             (long long)(datagrams % 10000000000ll));
@@ -7651,6 +7764,60 @@ static int run_session(const char *token, const char *device_id,
             /* Per-sid entries only; the summary format wraps them in
              * braces so an empty buffer still yields valid JSON ({}) —
              * run 20 caught the missing braces (invalid summary JSON). */
+            /* round M (F22): the freeze witness. A recovery_exhausted
+             * draw arrives PRE-ASSEMBLED from here on: the last 10 s of
+             * encoder ramp (kbps/idr/gaps arrays), and the three-plane
+             * cascade order (last video AU, last audio packet, last
+             * control message, all rel_ms). Run 33 needed four log
+             * families plus a pushed .264 and an operator's eyes to
+             * reconstruct exactly this; the next one prints it. */
+            if (strcmp(stop_reason, "recovery_exhausted") == 0) {
+                char ramp[512];
+                kn_bw_feedback bwf2;
+                kn_lctx fw;
+                uint64_t wnow = kn_sock_now_ms();
+                uint64_t lvid = c.fw_last_video_ms >= t_start
+                              ? c.fw_last_video_ms - t_start : 0ull;
+                uint64_t laud = pump.fw_last_audio_ms >= t_start
+                              ? (uint64_t)pump.fw_last_audio_ms - t_start
+                              : 0ull;
+                uint64_t lctl = pump.fw_last_ctrl_ms >= t_start
+                              ? (uint64_t)pump.fw_last_ctrl_ms - t_start
+                              : 0ull;
+                if (kn_fw_ramp(&c.fw, ramp, sizeof ramp) < 0 || !ramp[0])
+                    strcpy(ramp, "\"kbps\":[],\"idr\":[],\"gaps\":[]");
+                memset(&bwf2, 0, sizeof bwf2);
+                (void)kn_rx_video_bw_report(&v, 0, &bwf2);
+                printf("{\"mode\":\"session\","                       "\"event\":\"freeze_witness\","                       "\"stop_reason\":\"%s\",\"rel_ms\":%llu,"                       "\"last_video_rel_ms\":%llu,"                       "\"last_audio_rel_ms\":%llu,"                       "\"last_ctrl_rel_ms\":%llu,\"ctrl_msgs\":%u,"                       "\"cping_sent\":%llu,\"cpong_matched\":%llu,"                       "\"gaps\":%llu,\"withheld\":%llu,"                       "\"qos_bwe_kbps\":%lld,\"qos_util_pct\":%lld,"                       "\"decay_warned\":%u,\"decay_rel_ms\":%llu,%s}\n",
+                       stop_reason,
+                       (unsigned long long)(wnow - t_start),
+                       (unsigned long long)lvid,
+                       (unsigned long long)laud,
+                       (unsigned long long)lctl,
+                       (unsigned)pump.fw_ctrl_msgs,
+                       (unsigned long long)ctrl_ping.pings_sent,
+                       (unsigned long long)ctrl_ping.pongs_matched,
+                       (unsigned long long)
+                       (v.packet_gap_recoveries % 1000000000ull),
+                       (unsigned long long)
+                       (v.withheld_frames % 1000000000ull),
+                       (long long)bwf2.estimate_kbps,
+                       (long long)bwf2.utilization_percent,
+                       c.fw_decay_warned,
+                       (unsigned long long)(c.fw_decay_warned
+                                            ? c.fw_decay_at_ms - t_start
+                                            : 0ull),
+                       ramp);
+                fflush(stdout);
+                kn_lctx_init(&fw, KN_CH_TRANSPORT, KN_ERROR,
+                             "freeze_witness");
+                kn_lctx_i64(&fw, "last_video_rel_ms", (long long)lvid);
+                kn_lctx_i64(&fw, "last_audio_rel_ms", (long long)laud);
+                kn_lctx_i64(&fw, "last_ctrl_rel_ms", (long long)lctl);
+                kn_lctx_i64(&fw, "decay_warned",
+                            (long long)c.fw_decay_warned);
+                kn_log_emit(&fw);
+            }
             int d;
             kn_decode_stream_stats(c.stream, &dst);
             for (d = 1; d < 24; ++d) {

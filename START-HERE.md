@@ -1,4 +1,4 @@
-# START HERE — KarnyNow entry point and living handoff (created at the close of round XXXVIII, 2026-10-27; updated at round L close, 2026-10-29)
+# START HERE — KarnyNow entry point and living handoff (created at the close of round XXXVIII, 2026-10-27; updated at round M close — the run-33 read, 2026-10-29)
 
 > **You are an agent continuing this project.** This file replaces
 > `docs/archive/PROJECT-STATE.md` as the living handoff document.
@@ -83,6 +83,29 @@ rig sits at Ubisoft Connect because the GFN *browser* types the
 credentials into the stream, and until now our client could not type at
 all.
 
+**Round M read RUN 33 — THE FIRST FULL SUCCESS (`docs/RTSP.md` §40):**
+one Endfield draw, the operator's 80-event macro, anti-AFK 60 s,
+video+audio+release all on. The macro clicked Play at t=40 s,
+**`Endfield.exe` JustLaunched at t=44.2 s — the first game process in
+project history** — typed the in-game login (t≈161–170 s), entered the
+world (t≈411–416 s) and swung the sword, all on the first try:
+`input_summary events:80 fired:80 sent:108 gated:0 late_skips:0
+build_fail:0 push_fail:0` + `afk_pulses:14`. Media survived **815.7 s**
+(rtp) — 24 424 AUs at 29.94 fps with ZERO gaps/FEC/NACK, and
+`audio.opus` = 163 728 packets × 5 ms = **13:38.6 of real stereo game
+sound** (operator-verified in Audacity; first content-bearing capture
+ever). The freeze family still came: abrupt total media silence at
+815.2 s (requested 900 s) with **the control plane still delivering at
+rel 820 s**, no 0x0109, no length-timer match (1 h declared at rel
+1.2 s), zero loss — the signature is media-plane-only teardown, cause
+unknown. Clean `rtsp_teardown 200` + `cm_release 200 gone:1`. Media
+survival series: 14 / 14 / 29 / 36 / 122 / 815.7 / **900.0 s KEEPER
+(run 34)**. Stage 3's input
+bar is MET LIVE; what remains is the presentation half — round N ships
+F20 (live D3D9 video in `--session`), F21 (live WASAPI audio), F22
+(freeze witness), F23 (two label fixes); run 34 is the first run the
+operator watches and hears live.
+
 ## 2. Reading order for a fresh agent
 
 1. **This file** — state, next steps, agreements, traps.
@@ -91,18 +114,23 @@ all.
 3. **`docs/BOOTSTRAP.md`** — the project map: mission, stage gates,
    logging spec (§7), decision register D1–D13, risk register, research
    provenance. Still authoritative for philosophy and stage definitions.
-4. **`docs/RTSP.md` §35–§38** — the four most recent rounds' records
+4. **`docs/RTSP.md` §35–§40** — the most recent rounds' records
    (runs 28/28b's keepers + the stage-2 closure; runs 29/29g's ≈600 s
    cut — **read §37.4 before believing §36's "ceiling" wording, XLIX
    withdrew it**; run 30's audio flight + the silence finding + F12–F15;
-   **§38 = run 31 + round L: the orphaned-seat anatomy, the `.264`
-   verdict with its ffprobe evidence, and the F16–F19 contracts**).
+   §38 = run 31 + round L: the orphaned-seat anatomy, the `.264`
+   verdict with its ffprobe evidence, and the F16–F19 contracts;
+   §39 = run 32: the first typing run and the scheduling-miss lesson;
+   **§40 = RUN 33: the first full success — login, world, sword, real
+   sound, and the 815 s freeze with the control plane still alive**).
    §1–§34 are the run-by-run history of the live protocol work.
-5. **`docs/INTEGRATION.md` rev 41 (the top block)** — the current delta:
-   new/changed files, integration traps, gate results. Older revs below
-   it are superseded history. For the audio stage specifically,
-   **`docs/BUNDLE-AUDIO.md`** is the complete contract + run-30
-   reaction matrix.
+5. **`docs/INTEGRATION.md` rev 42 (the top block)** — the current delta
+   (analysis-only: run 33's read; rev 41 below it is the last CODE
+   delta, F16–F19). Older revs are superseded history. For the audio
+   stage specifically, **`docs/BUNDLE-AUDIO.md`** is the complete
+   contract + run-30 reaction matrix + §10.2 (run 33's first
+   content-bearing capture). For input, **`docs/INPUT.md` §10.10** is
+   F19's live proof at macro scale.
 6. **The layer doc for whatever you touch**: `docs/RX.md` (receive
    pipeline), `docs/SRTP.md`, `docs/FEC.md`, `docs/GS.md` (video
    framing), `docs/DTLS.md`, `docs/SCTP.md`, `docs/INPUT.md`
@@ -124,7 +152,7 @@ all.
    recovery document; historical only. `docs/archive/analiza/` — the
    round 0–3 analyses (Polish), incl. the byte-level NVST spec (04).
 
-## 3. Current state (as of round L close, 2026-10-29)
+## 3. Current state (as of round M close, 2026-10-29)
 
 **Live progress (R7 runs against the real production cloud):**
 
@@ -149,6 +177,8 @@ all.
 
 | 31 | XLIX→L | **FOUR DRAWS, FOUR `recovery_exhausted` — AND TWO OF OUR OWN FIXES CAUGHT BY THEIR OWN EVIDENCE.** The interleaved A/B (`--lottery=4 --lottery-gap=60 --session-jiggle=100 --lottery-stop-on-keeper=0`, Legion) flew all four draws as designed: `lottery_arm` ×4 with the jiggle alternating 100/0/100/0, `audio_close` ×4 (**F12 proven live**), every draw flown despite survivors (**F15 proven**) — and media survival was 14–122 s, so the ≈600 s question got **NO RESULT** again (no draw lived long enough to reach it). Audio was digital silence once more (−91 dB) for the run-30 reason: 0x010a again shows only `upc.exe`/`UplayService` — **the Ubisoft login wall**, which the operator then explained (retracting XLIX's "Legion launches" note): play.geforcenow.com's web client *types the credentials into the stream*, so the browser is in the game in seconds while our client, which sent **zero discrete input messages**, is handed the launcher's login dialog (`au_00001_k.264` shows it). Video itself was flawless: **5655 AUs, 0 failures**. Two self-inflicted wounds surfaced: **F13's per-draw audio path was mangled** (delivered as `audio_d1_d1us` … `audio_d4_d4us` — doubled suffix AND no `.opus` extension, from an overlapping `memcpy` ASan flagged on the rig) ⇒ F16; and **no TEARDOWN ever reached the wire**, so each draw orphaned its seat and the next create ate a **403 SESSION_LIMIT** + 20/40/80 s backoff ⇒ F18. The input CHANNEL was live-proven (activation 8/8 messages, 0 build failures) — only the *content* was missing ⇒ F19 — full analysis `docs/RTSP.md` §38 |
 | 32 | L→M | **THE FIRST TYPING RUN: EVERYTHING FLEW EXCEPT THE TYPING.** Endfield (107057914), the operator's own 80-event/416 s macro, one draw with video+audio+release all on. **T10 on target = ALL PASS 84** (the rev-41 suites-list catch is the only reason `test_kndrawpath` ran on Win7). **F17 proven where it counts**: `video.264` 3 679 210 B, 668/668 frames decode, and the operator WATCHED it — Endfield launcher + animations from t≈0. **F16 proven**: `audio.opus` correctly named, size == `audio_close.bytes`. **F18 PROVEN**: `rtsp_teardown rc:0 status:200` + `cm_release status:200 gone:1` — the first seat this project ever gave back, zero 403 ladders. **F19 armed but silent**: `input_script_loaded` 80 events `unmapped:0`, gate latched at 0.83 s, and `input_summary fired:0 gated:0 sent:0` — the draw died at **29.0 s of media** (39.2 s wall, `recovery_exhausted`, the first LOSSY freeze: 17 gaps / 191 withheld / 31 FEC / 51 NACK, BWE 24–42 Mbps) **before the macro's first timestamp**. Audio silent again (the launcher makes no sound; peak 1 LSB). 0x010a: `Launcher.exe → Games.exe (cmsId 107057914) → QtWebEngineProcess.exe` mislabeled "EA Desktop" — the Qt Endfield launcher UI; canon confirmed by pixels + cmsId. Lesson + fix: the login UI is on screen from t≈1 s ⇒ **run 33's macro starts at t≈6–12 s** with retries and `--input-anti-afk=60000` (INPUT §10.9, RTSP §39) |
+| 33 | M→N | **THE FIRST FULL SUCCESS — LOGIN, WORLD, SWORD, SOUND.** Single Endfield draw (900 s requested), the operator's own 80-event/416 s macro + `--input-anti-afk=60000` + video/audio/release. **Every macro stage landed first try**: Play at t=40 s → **`Endfield.exe` JustLaunched t=44.2 s (first game process ever; `drsProfileName:"Arknights: Endfield"`)** → in-game login typed t≈161–170 s → world entered t≈411–416 s → sword swing (operator watched live-quality video the whole 13.6 min). `input_summary events:80 fired:80 sent:108 (key:86 btn:16 abs:6) gated:0 late_skips:0 build_fail:0 push_fail:0 unmapped:0`, `afk_pulses:14` — **F19 proven at full scale**. Video: 24 424 AUs / 815.689 s = 29.94 fps, 215 MB, **zero gaps/withheld/FEC/NACK/decode errors** (run 32's loss was the launcher, not the line). Audio: 163 728 pkts × 5 ms = 818.68 s = ffmpeg's 13:38.64, `seq_loss 0` — **first content-bearing capture: real stereo game sound, Audacity-verified**. Freeze at 815.2 s: abrupt total silence, `recovery_exhausted` at wall 825.6 s, **no 0x0109, NOT the length timer (1 h declared at rel 1.2 s), NOT loss (zero), NOT idle (input+AFK from t≈1 s)** — and `ctrl_in` still logging at rel 820 s ⇒ control plane alive after media death (run-30 anatomy at 13.6-min scale) ⇒ F22 witness. `rtsp_teardown 200` + `cm_release 200 gone:1` (2nd consecutive clean release). Two cosmetic label bugs found ⇒ F23. Full analysis `docs/RTSP.md` §40, `docs/BUNDLE-AUDIO.md` §10.2, `docs/INPUT.md` §10.10 |
+| 34 | N | **THE FIRST 900-SECOND KEEPER WITH EVERYTHING ON — AND F22/F23 PROVEN LIVE.** Same command as run 33 on the F22/F23 build (T10 on target **ALL PASS 86**, as predicted), faster macro + **ten attack clicks at 20 s spacing** as an idle-eviction control: `stop_reason:"time" wall_ms:900019`, 26 985 AUs @ 29.97 fps, ZERO gaps/loss, `input_summary events:96 fired:96 sent:126 gated:0`, `afk_pulses:15`. **F22's debut: ten `bitrate_decay_warn` episodes, ten recoveries** — loading-valley false positives (baseline 100–1100 kbps; round N adds the avg60 ≥ 1500 kbps gate) plus three genuine mid-gameplay throttling dips healing in 4–42 s; **nothing after 562 s** and the pushed tail is flat (sharpness 8.7–8.8, zero dips; audio −58 dB content to the last packet). The idle/AFK-eviction theory is DEAD: the final 300 s flew anti-AFK pulses only and completed. New anomaly: `rtsp_teardown` **400** on the polite stop (cm_release still 200 gone:1) — round N diagnoses. **Hygiene incident:** the push included `login.txt` WITH plaintext credentials — agent redacted its copies same-turn, operator got the rotate+remove procedure (INPUT §10.11). Analysis `docs/RTSP.md` §41 |
 
 **Round XXXVIII shipped** (target-verified in round XXXIX: **T10 ALL PASS
 79 on Win7**, `test_knbw` reported 387 checks on target = sandbox — the
@@ -814,6 +844,10 @@ tiny-AES-c, crypto-algorithms-sha1, usrsctp, mbedTLS 3.6.0 (+framework).
 > (Agent side: run 31's analysis + the F16–F19 contracts live in
 > `docs/RTSP.md` §38, `docs/INPUT.md` §9 and `docs/INTEGRATION.md`
 > rev 41; round state is §3 above.)
+>
+> **RUN 32 AND RUN 33 HAPPENED — this section's run-32 plan is
+> historical. The live instructions are §12 (run-33 addendum): three
+> small ffmpeg artifacts to push, then the round-N build.**
 
 **The one-sentence plan for run 32:** the rig is parked at the Ubisoft
 login prompt because our client never typed anything — so this run
@@ -1372,3 +1406,96 @@ logs/                   ALL logs/evidence (gitignored): knvstd --log-dir
   the only history), and analyzes from there. No more `.txt` renames,
   no 10-file limit; lottery runs APPEND across draws, so the pushed
   `logs/` directory is whole-run evidence by construction.
+
+## 12. Run-33 addendum (round M): the three artifacts we still want, and the round-N plan
+
+Run 33's logs are analyzed (`docs/RTSP.md` §40); the 210 MB video and
+23 MB audio stayed on the rig (too big to push — correct call). Three
+SMALL derived artifacts would close the last verification gaps; each
+command is one line in `cmd.exe` from the repo root (ffmpeg is already
+on the rig — it produced the ffprobe quotes):
+
+```
+:: 1) last 10 s of video before the freeze — what was on screen when the
+::    media died (mid-action or a static frame?)  ~4 MB
+ffmpeg -f h264 -r 30 -sseof -10 -i logs\video.264 -c copy logs\run33_tail.mp4
+
+:: 2) 30 s of audio around world entry (t=420 s) — for the independent
+::    RMS/spectrum decode in the sandbox (the second-implementation bar
+::    for "audible audio")  ~0.5 MB
+ffmpeg -ss 420 -t 30 -i logs\audio.opus -c copy logs\run33_audio_excerpt.opus
+
+:: 3) three frames: login form (t=165 s), first world view (t=415 s),
+::    sword (t=425 s)  ~1-2 MB each as PNG
+ffmpeg -f h264 -r 30 -ss 165 -i logs\video.264 -frames:v 1 logs\run33_f_login.png
+ffmpeg -f h264 -r 30 -ss 415 -i logs\video.264 -frames:v 1 logs\run33_f_world.png
+ffmpeg -f h264 -r 30 -ss 425 -i logs\video.264 -frames:v 1 logs\run33_f_sword.png
+```
+
+Push them to `karnynow-logs` (PNG/MP4/Opus are not gitignored; no
+`add -f` needed). None of these are blocking — they are confirmation
+artifacts for docs that already record the operator's first-hand
+verification.
+
+**ADDENDUM (same day): the artifacts ARRIVED** — `media/run33_tail.mp4`
+(last 10 s; the operator had to re-mux through `temp.mkv` because raw
+Annex-B has no timestamps, then `-ss`/cut off the mp4 — expected, and
+the note "use `-f h264 -r 30` as the input format" stands),
+`media/run33_tail.opus` (last 10 s of audio), `media/run33_f_login.png`
++ `media/run33_f_world.png` (the sword frame was skipped — no matter).
+The operator also reported **eight "heartbeat" quality beats in the
+last seconds, seen while watching**. Measured and confirmed, and it is
+the freeze's missing witness: **the beats are eight forced IDRs at
+0.533 s spacing on a bitrate target collapsing 3.1 → 0.5 Mbps over the
+final ~10 s at PERFECT 30 fps pacing, while our QoS reported 34 Mbps
+free / 3 % util / 0 gaps** — a rig-side orderly wind-down; the teardown
+was phased (video cut first, audio ~11 s later, control heartbeats
+last). The audio excerpt passed an independent sandbox decode: −60.5 dB
+mean / −27.3 dB peak (30 dB above run 30's silence), decorrelated
+stereo, a stationary 391 Hz ambient drone — content certified twice.
+Full forensics: `docs/RTSP.md` §40.4; audio: `docs/BUNDLE-AUDIO.md`
+§10.2 addendum. Round N's F22 therefore ships with a live
+`bitrate_decay_warn` detector so the next wind-down announces itself.
+
+**Round N (next code round), in order of value:**
+
+| fix | what | why now |
+|---|---|---|
+| **F20** | live D3D9 presentation inside `--session`: route the session decoder's frames into the stage-1 present path (G1 window) | the operator watched run 33 through a *file* afterwards; run 34 should be watched LIVE — this is the biggest remaining stage-3 gap and the skeleton already passes `d3d.present` on the target (0.31 ms mean) |
+| **F21** | live WASAPI playback of the arx Opus pipeline (`kn_audio` decode → device) | same argument for sound; the synthetic-PCM selftest already passes on the target |
+| **F22** | freeze witness: on `rx_recovery` terminal, emit ONE `freeze_witness` line (last media rel_ms per plane, last ctrl_in rel_ms + msg count, WSS state, pings/pongs, BWE, q_depth) | run 33 proved the control plane outlives the media by ≥4 s but the evidence is scattered across four log families; the next freeze should arrive pre-assembled |
+| **F23** | the two run-33 label fixes: `input_first_send` per-event source; `input_summary` WARN note keyed off `fired:0` not `gated:0` | cosmetic, cheap, prevents the next misread |
+
+Gates as always: two-tier (sandbox battery + target T10/T13), zero
+warnings, skeleton-summary frozen at 113 keys unless a fix adds one
+(F22 adds exactly one line family — the skeleton test gets its key).
+Run 34 = F20+F21 live: the operator WATCHES and HEARS the session in
+real time, macro flying, release on.
+
+## 13. Run-34 addendum (round N): the corrected media script, and the credential procedure
+
+The operator's bat script re-encodes the timestamp-less Annex-B video
+with **`-r 25`** — a 30 fps stream stretched 1.2× (the "last 10 s" cut
+becomes ~8.3 s real). Corrected, from the rig's repo root:
+
+```
+@echo off
+:: 1. video -> MP4 at the TRUE rate (Annex-B has no timestamps: give it 30)
+ffmpeg -y -f h264 -r 30 -i video.264 -c:v libx264 -crf 20 -preset fast temp_video.mp4
+:: 2. cut everything but the last 10 s (mp4 index makes -sseof exact)
+ffmpeg -y -sseof -10 -i temp_video.mp4 -c copy video_trimmed.mp4
+:: 3. audio 1:1 (opus carries real timestamps; -sseof is exact here)
+ffmpeg -y -sseof -10 -i audio.opus -c copy audio_trimmed.opus
+echo Sukces!
+pause
+```
+
+**Credential procedure (issued to the operator, tracked here):**
+1. rotate the Endfield/account password immediately (rotation is what
+   defuses the leaked git history);
+2. delete `run34_logs/login.txt` from the logs repository (a new commit
+   is enough; history rewrite optional and only after rotation);
+3. the macro lives ONLY on the rig (`build\login.txt`); reference
+   macros in any repo carry `type <PLACEHOLDER>` lines;
+4. standing rule unchanged: chat and pushes carry `--input-check`
+   summaries and counter lines, never script bodies (INPUT §10.7).

@@ -957,3 +957,17 @@ Ask these early; they change design decisions and are cheap to answer:
 3. tylko posiadane gry i tak używam gn pod gry free2play.
 4. oczywiśie osobne okno streamu, tam będzie całe przechwytywanie klawiszy, myszy i tak dalej. po za tym tui python a screamer C, wiec lepiej odzielić je. 
 5. nie wiem. 
+
+**Run 33 marker (2026-10-29): the first game process, the first login,
+the first world, the first real sound.** `Endfield.exe` JustLaunched at
+rel 44.2 s after the macro's Play click; 80/80 events fired (108 wire
+messages, zero gated/late/failed); 13:38 of content-bearing stereo audio
+(Audacity-verified by the operator) and 29.94 fps of zero-loss video for
+815.7 s; clean teardown + release. G3's input bar is MET LIVE; the audio
+bar is met as extraction+content (independent decode pending an excerpt).
+Stage 3's remaining bar is the presentation half: F20 live D3D9 video and
+F21 live WASAPI audio inside `--session` — the skeletons of §3/§5 already
+pass their selftests on the target (`present mean 0.31 ms`, synthetic
+PCM), run 34 is the first run the operator watches and hears live. The
+freeze family arrived at 815.2 s with the control plane still alive
+(RTSP.md §40.2) — F22 instruments the witness.

@@ -4312,3 +4312,254 @@ the idle-policy hypothesis while the login attempt happens. Same app,
 same `--session-release`, one draw. If the draw survives the freeze
 family for once, run 33 is the first typed login in the project's
 history — and the first capture with sound in it.
+
+## 40. Round M read — RUN 33: **THE CLIENT LOGGED IN, ENTERED THE WORLD AND SWUNG THE SWORD — FIRST GAME PROCESS, FIRST CONTENT-BEARING AUDIO, FIRST 13-MINUTE DRAW. THE FREEZE FAMILY ALSO CAME, AT 815 s, WITH THE CONTROL PLANE STILL ALIVE**
+
+Run 33 (2026-10-29, stamp **L**, queue 75→17 on the Warsaw pool) is the
+run the whole project has been pointing at since the first `.c` file.
+The operator's verdict, verbatim in spirit: 14 minutes of sharp video,
+the macro's login → game boot → world entry → sword swing worked **first
+try**, and `audio.opus` opened in Audacity as **real stereo sound** —
+game loading and walking in the world. The numbers agree:
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914
+  --session-seconds=900 --lottery-gap=60 --lottery-stop-on-keeper=0
+  --input-script=build\login.txt --input-anti-afk=60000
+  --session-video-out=logs\video.264 --session-audio-out=logs\audio.opus
+  --session-release > logs\run33.log
+```
+
+(single draw — `--lottery` absent; the two lottery knobs without it are
+inert and harmless.)
+
+### 40.1 The timeline, from the rig's own notifications and the input counters
+
+| rel | event |
+|---|---|
+| 0.29 s | `input_activation sent:8 failed:0 version:3 ready:1` — gate open |
+| ~1.2 s | first **anti-AFK** pulse (VK 0x7C) — `next_afk_ms` starts at 0, so the first pulse flies on the first armed tick; 14 pulses over the draw |
+| 1.2 s | `SESSION_LENGTH_TIMER` → `beforeEventMS:3599101` = **one hour** declared by the server (same as run 25) — the 815 s end is NOT a length cap |
+| 40.0 s | macro's first event: `mouse 1100 630` + click = the launcher's **Play** pill |
+| **44.2 s** | **`Endfield.exe` JustLaunched** — `drsProfileName:"Arknights: Endfield"`, `cmsId:107057914`, parent `Games.exe`; children `UnityCrashHandler64.exe`, `nvngx_update.exe` ×3. **FIRST GAME PROCESS IN PROJECT HISTORY.** The app-id canon is now triple-proven: cmsId + DRS profile + pixels |
+| 161–170 s | macro clicks the two fields and types e-mail + password (58 key messages), clicks submit — the **in-game** login form, not the launcher's |
+| 290 s | click (1195, 75) |
+| 411–416 s | centre-screen click ×3 — world entry; the operator's "sword swing" follows |
+| 815.2 s | media goes silent (below) |
+| end | `rtsp_teardown` rc 0 **status 200** + `cm_release` **200 gone:1** — second consecutive clean seat release |
+
+`input_summary`: **`events:80 fired:80 sent:108 key:86 btn:16 abs:6
+gated:0 late_skips:0 build_fail:0 push_fail:0 unmapped:0`**,
+`afk_pulses:14`. Every scheduled event fired, nothing was late, nothing
+was gated — F19's wire layer is now proven at macro scale, not just at
+KAT scale. (One label bug to fix in round N: `input_first_send` printed
+`source:"script"` for what was actually the first anti-AFK pulse — the
+line reports the *configured* source, not the per-event one; and the
+`input_summary` WARN note text still overstates the `gated:0` case.
+Both are cosmetic; the counters themselves are right.)
+
+### 40.2 Media and audio: a PERFECT 13.6-minute path, then the freeze
+
+- Video: **24 424 AUs / 815.689 s = 29.94 fps**, 215 296 698 B,
+  `gaps 0`, `withheld 0`, `fec_repaired 0`, `nack 0`, `decode_errors 0`,
+  `datagrams 243 190 = authenticated`, 9 keyframes, drift −151 ms with a
+  single +885 ms excursion (a load-stage stutter, `ts_backwards 0`).
+  **Zero loss for thirteen and a half minutes** — run 32's 3 % was the
+  launcher's busy splash, not the line. ffmpeg's `25 fps, 60 tbr` on the
+  raw `.264` is its container guess for timestamp-less Annex-B; the true
+  rate is 30 fps and the audio clock (below) is the ruler. To watch at
+  correct speed: `ffmpeg -f h264 -r 30 -i video.264 -c copy out.mp4`.
+- Audio: **163 728 packets × 5 ms = 818.68 s = 13:38.68**, exactly
+  ffmpeg's `00:13:38.64` (the §39.4/§10.1 5 ms correction, confirmed on
+  the longest capture yet), 23 575 615 B, `srtp_fail 0`, `seq_loss 0`,
+  `write_errors 0`, `red_packets == packets`. And for the first time the
+  content is REAL: the operator heard game loading and footsteps in
+  Audacity. Independent RMS/spectrum verification is pending a pushable
+  excerpt (START-HERE §4 run-33 addendum).
+- The freeze, same family as every dead draw so far: steady 30 fps to
+  t=814.7 s → **total media silence at 815.2 s** (video AND audio,
+  `dg 130 → 0` in one stats tick) → `progress_stall` 819.5 →
+  `rx_recovery recover` (idle 5008 ms) → `terminal` (idle 5007 ms) →
+  `E_SESSION_RECOVERY_EXHAUSTED` at wall 825.6 s, **74 s short of the
+  900 s the operator asked for**. No `0x0109`, no polite termination, no
+  loss precursor, no congestion (`q_depth 0`, BWE 34 Mbps, utilization
+  3 %).
+- **The control plane outlived the media**: the last `ctrl_in` line
+  (rel 820.0 s, +17 messages since rel 790 s) lands AFTER the media
+  died — SCTP heartbeats/process notifications kept flowing while the
+  encoder went silent. That is run 30's anatomy at 13.6-minute scale:
+  whatever kills these sessions kills the media path only, and does it
+  without telling anyone.
+- What the freeze is NOT, now measured: not the length timer (1 h
+  declared at rel 1.2 s), not idle/no-input (anti-AFK pulsed every 60 s
+  from t≈1 s and the macro flew 108 messages — and runs 28/28b died at
+  360 s with zero input, so input neither saves nor kills reliably),
+  not loss (zero), not our client (we kept acknowledging to the end).
+  Remaining suspect: a rig/VM-side media-path teardown or migration that
+  signals nothing. Round N adds a freeze-witness line (F22) so the next
+  one arrives with the control-plane state attached.
+
+### 40.3 Where this leaves the stage plan
+
+Stage 3's input half is CLOSED: G3's keyboard/mouse bar is met live
+(login typed, world entered), the activation chain, the gate, the sid
+routing and the anti-AFK pulse have all flown on real traffic. The
+audio stage is closed as extraction AND now has a content-bearing
+sample. What remains between the operator and a *client* is the
+presentation half: **live D3D9 presentation of the session stream
+(F20)** and **WASAPI playback of the arx pipeline (F21)** — both exist
+as offline skeletons from stage 1 (`d3d.present` selftest: present mean
+0.31 ms on the target's Intel HD; WASAPI synthetic PCM) and now need
+wiring into `--session`. Plus the freeze witness (F22) and the two
+label fixes (F23). Run 34 = the first run the operator WATCHES and
+HEARS live instead of reading about afterwards.
+
+### 40.4 Pre-freeze forensics from the pushed media (round M addendum): the "heartbeat" was an IDR storm on a collapsing bitrate target — and the teardown was PHASED, video first
+
+The operator pushed four derived artifacts to
+`karnynow-logs/run33_logs/media/` (`run33_tail.mp4` = the last 10 s,
+re-muxed/re-encoded because raw Annex-B carries no timestamps —
+`-f h264 -r 30` is the correct way in; `run33_tail.opus` = the last 10 s
+of audio; two PNG frames) together with a first-hand observation:
+*in the last seconds before the freeze the quality pulsed like a
+heartbeat, eight beats*. Measured, that observation is exactly right,
+and it turns "abrupt silence" into a **ten-second wind-down with a
+signature**:
+
+- **The eight beats are eight forced IDR keyframes.** The whole 811 s
+  stream carried ONE keyframe (fi 1) — then fi **24302, 24318, 24334,
+  24350, 24366, 24382, 24398, 24414** at RTP t = 811.62 / 812.16 /
+  812.68 / 813.22 / 813.75 / 814.28 / 814.82 / 815.35 s: eight IDRs at
+  exactly **16 frames = 0.533 s** apart, the last one 0.34 s before the
+  final AU. In the tail file each IDR lands as a sharpness dip
+  (per-frame |laplacian| sawtooth: 10.9 healthy → 4.0–4.9 on the beat →
+  partial recovery), matching the operator's eight beats one-for-one.
+- **The bitrate target was collapsing for ~10 s, with PERFECT pacing.**
+  Per-second encoder bitrate: 3.1 Mbps @800 s → 2.1 @808 → 1.4 @810 →
+  1.0 @812 → 0.72 @814 → 0.50 @815 (21 AUs) → nothing. Yet every second
+  still delivered exactly 30 AUs and the mean ts delta stayed 3000
+  ticks: frames kept arriving on time, just smaller and smaller. The
+  IDRs themselves shrank 6.5 → 4.8 KB (1.4–1.7× their following P-frames
+  — a 720p intra at 1.5× inter cost is QP through the roof), and the
+  extracted frames show it: the healthy frame is crisp (quest HUD
+  readable, textures clean), the last-IDR frame is the same scene
+  crushed into macroblocks. Blurry + tiny = rate control squeezing,
+  not a static screen encoding cheap.
+- **Our feedback did NOT cause it.** The last five `session_stats`
+  lines (through the final media tick) report `qos_bwe_kbps` 30 057 /
+  28 592 / 39 331 / 37 072 / 34 247 with `qos_util_pct` 2–5 and
+  `gaps=0` — we told the server the line was wide open the entire
+  decay. Combined with zero loss/FEC/NACK on the wire, the wind-down
+  was decided rig-side, against our reports, not by them.
+- **Our own 50 IDR/PLI requests were post-mortem.** `kf_request`
+  episode 1 attempt 1 is logged right after `progress_stall`
+  (wall ≈ 820 s) and attempt 50 at the terminal — seconds AFTER the
+  eight server-side IDRs were captured. The storm was not a response
+  to us.
+- **The teardown was PHASED: video → audio → control.** Wall clock
+  (media.log): last video AU ≈ 22:16:13Z; last `ctrl_in` (rel 820.04 s,
+  +17 msgs since rel 790 s, `0101` heartbeats 774→791) ≈ 22:16:17Z;
+  audio writes continued to `audio_close` at 22:16:24.175Z — the
+  818.68 s audio file (163 728 × 5 ms, `seq_loss 0`) spans ~11 s PAST
+  video's last AU. The audio tail excerpt carries a steady ambient
+  tone (dominant 391 Hz in every one of its 10 s, envelope
+  autocorrelation r = 0.17 = no heartbeat) right up to its own end:
+  audio never degraded, it was simply cut last.
+- **No process died with it.** The last `sctl_010a` burst is at rel
+  52.9 s (`UnityCrashHandler64`+`nvngx_update` at game boot); between
+  rel 790 s and 820 s the `010a` count is unchanged (73) — nothing new
+  launched or crashed during the wind-down.
+
+Freeze model after round M: a rig-side, ORDERLY media wind-down —
+encoder bitrate target ramped to ~zero over ~10 s with forced-IDR
+pulses at 0.53 s, then the video plane cut, audio ~11 s later, control
+plane last (heartbeats to teardown) — executed against a client that
+reported 34 Mbps free, zero loss, live input, and 1 h of declared
+session budget. It is neither crash, congestion, idle policy nor
+length cap; the closest consistent picture is a server-side
+preemption/eviction sequence on the Free-tier pool. Round N's F22 now
+also carries a **live decay detector**: the session pump keeps a
+1 Hz ring of video kbps (AU bytes) and, when the 5 s mean drops below
+60 % of the preceding 60 s mean while `gaps==0`, emits
+`bitrate_decay_warn` — so the next wind-down announces itself in real
+time — and the terminal `freeze_witness` line prints the last 10 s
+kbps ramp, IDR count, last-media/last-ctrl/last-audio rel_ms together.
+
+## 41. Round N read — RUN 34: **THE FIRST 900-SECOND KEEPER WITH INPUT, VIDEO, AUDIO AND RELEASE — AND F22'S LIVE DEBUT: TEN DECAY EPISODES, TEN RECOVERIES, ZERO DEATHS**
+
+Run 34 (2026-10-30, stamp L+F22/F23 build, T10 on target **ALL PASS 86**
+exactly as predicted) repeated run 33's command verbatim on Endfield
+with a FASTER macro (`run34_logs/login.txt`: login at t≈72–77 s, world
+click t≈330 s) plus the operator's new anti-idle leg: **ten left-click
+attacks every 20 s from t=420 s to t=600 s**, meant to test whether the
+run-33 heartbeat was an AFK eviction. It was not — and the draw proved
+it by simply never dying:
+
+```
+summary stop_reason:"time" wall_ms:900019 datagrams:267302 authenticated:267302
+        aus:26985 (= 29.97 fps x 900 s) gaps:0 withheld:0 fec:0 nack:0
+        keyframes:1 decode_errors:0   feedback pushed:30336 dropped:0
+input_summary events:96 fired:96 sent:126 (key:88 btn:32 abs:6)
+              gated:0 late_skips:0 build_fail:0 push_fail:0  afk_pulses:15
+```
+
+Third full-length keeper in project history (after 28/28b) and the
+first one with input flying, both captures on and the seat released.
+Media survival series: 14 / 14 / 29 / 36 / 122 / 815.7 / **900.0 (time)**.
+
+### 41.1 F22 live: the decay detector caught ten episodes, and every one recovered
+
+`bitrate_decay_warn` / `bitrate_decay_recovered` pairs (rel_ms,
+avg5/avg60 kbps, pct): 90.6→163.1 (658/1113, 59 %), 169.1→182.2
+(121/254), 184.2→199.3 (83/171), 202.3→207.3 (51/108), 212.4→217.4
+(44/107), 228.5→233.5 (9/100), 238.5→240.5 (9/107), 337.1→379.4
+(1607/3559, 45 %), 457.9→461.9 (1356/2759), 557.3→562.4 (1581/2692).
+Read against the per-30 s bitrate profile they split into two honest
+classes: the 90–240 s cluster sits inside the launcher/login/loading
+valley (baseline 100–1100 kbps — a STATIC SCREEN encodes cheap; the
+detector cannot tell starvation from stillness at those levels), while
+the 337/457/557 s episodes are genuine mid-gameplay throttling dips
+that recovered in 4–42 s with zero loss. **Nothing warned after
+562 s**: the last 340 s are flat 2.3–3.2 Mbps, the pushed tail's
+per-frame sharpness is 8.7–8.8 with ZERO dips below 85 % of median
+(run 33's tail sawtoothed to 32 %), and the audio tail decodes at
+−58 dB with real content to the last packet. Run 33's fatal signature
+— unrecovered decay plus the 0.533 s IDR storm — was simply absent.
+Round N refines the detector with a baseline gate (warn only when
+avg60 ≥ 1500 kbps) so loading valleys stop crying wolf; the fatal
+family (run 33: baseline 2.7 Mbps) stays fully inside the net.
+
+### 41.2 What run 34 does to the freeze theories
+
+- **Idle/AFK eviction: dead.** The macro ended at 600 s; the final
+  300 s flew anti-AFK pulses ONLY (15 pulses over the draw) and the
+  draw completed its full budget. Run 33 died at 815 s with the same
+  pulse cadence and real input earlier. AFK-only is neither fatal nor
+  protective; and the ten decay episodes recovered without any
+  correlation to discrete input (episodes 1–8 recovered during loading
+  with the macro still pending, 9–10 during the attack leg, run 33's
+  single episode never recovered despite pulses). The reference's
+  anti-idle brag is beside the point: nothing here was ever an idle
+  kick — the rig throttles and (usually) recovers on its own schedule.
+- **The wind-down family is a rig-side episode, usually transient.**
+  Run 34 shows the same encoder-starvation physics as run 33's last
+  ten seconds occurring repeatedly and healing; run 33's death was the
+  one episode that did not. Cause of the non-recovery remains open
+  (F22's witness will carry the next one).
+- **New anomaly — `rtsp_teardown` status 400** (release_armed 1) on the
+  polite time-stop, versus 200 on run 33's recovery exit; the CloudMatch
+  leg still freed the seat (`cm_release` 200 gone:1, zero 403 ladders
+  afterwards), so no orphan — but the TEARDOWN contract now has a
+  second status to explain; round N diagnoses it against the RTSP
+  state machine (suspect: TEARDOWN sent while the server still counts
+  the session playing vs. after its own recovery reset).
+
+### 41.3 Hygiene incident (recorded, procedure issued)
+
+The operator pushed `run34_logs/login.txt` with the macro INCLUDING the
+plaintext `type` lines (e-mail + password) into the logs repository.
+The agent redacted its workspace archive copy and deleted the scratch
+clone's copy the same turn; the operator received a step-by-step
+rotation + removal procedure (INPUT.md §10.11). No credential appears
+in any KarnyNow file, log line or doc; the `input_summary` key counts
+(29 typed chars) remain the only trace, by design.

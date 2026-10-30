@@ -1,3 +1,96 @@
+# INTEGRATION NOTES — Round N INTERIM, rev 43 (**F22+F23 SHIPPED AND PROVEN LIVE BY RUN 34 — THE FIRST 900-SECOND KEEPER WITH INPUT, VIDEO, AUDIO AND RELEASE.** F22 = `kn_freeze.{h,c}` (the 72 s freeze-witness ring: pure integer decay/rearm decisions, `test_knfreeze` **901 checks** as the 26th suite, pinned by a second implementation + exact boundary sums + ramp text) wired into the media loop: per-completed-frame byte/IDR accumulation, a 1 Hz ring fold on the session_stats beat, a LIVE `bitrate_decay_warn` when the 5 s mean drops under 60 % of the 60 s baseline at zero gaps (+`bitrate_decay_recovered` on rearm), and a terminal `freeze_witness` line on `recovery_exhausted` carrying the last-10 s kbps/idr/gaps ramp plus the video/audio/control cascade rel_ms, pings/pongs and BWE — run 33's whole four-log-family reconstruction as ONE line. F23 = `input_first_send` reports the PER-EVENT source (`source:"afk","configured":"script"` printed live in run 34) and the `input_summary` WARN note is keyed off fired/gated honestly (names the run-32 scheduling miss). Gates: native battery PASS (26 suites, zero warnings), ctest **26/26** (mbedTLS cfg), cross x86_64+i686 PASS under `-Werror`, E2E 48/48, skeleton **113 == 113** vs run-33 stdout, T10 dry **ALL PASS 76**, ASan/UBSan clean; **operator's target T10 = ALL PASS 86 exactly as predicted**. Run 34 then proved both fixes live: ten decay episodes caught and recovered (loading-valley false positives ⇒ round N adds the avg60 ≥ 1500 kbps baseline gate; three genuine mid-gameplay dips healed in 4–42 s), flat tail, `stop_reason:"time"` at 900.0 s, `input_summary 96/96/126`; NEW anomaly `rtsp_teardown` **400** on the polite stop (cm_release still 200 gone:1 — round N diagnoses); **credential incident**: the push carried `login.txt` with plaintext `type` lines — agent redacted workspace copies same-turn, rotation+removal procedure issued (INPUT §10.11). STILL TO SHIP IN ROUND N: F20 (live D3D9 presentation in `--session`), F21 (live WASAPI playback; needs the one-time libopus provisioning), the decay baseline gate, the teardown-400 diagnosis; rev 43 closes with them and the stamp bump. No wire-format or summary-key change: skeleton stays 113, stamp stays L until round N closes.)
+
+## Rev 43 changed files (round N interim)
+
+- **NEW** `streamer/include/kn/kn_freeze.h` + **NEW** `streamer/src/kn_freeze.c`
+  — F22's ring and its three pure decisions (`kn_fw_add`,
+  `kn_fw_decay`, `kn_fw_recovered`, `kn_fw_ramp`); permille-free
+  integer boundaries: decay ⇔ sum5*20 < sum60 at zero gaps over the
+  65 s span; rearm ⇔ sum5*15 >= sum60; MIN_FILL 67.
+- **NEW** `streamer/tests/test_knfreeze.c` (**901 checks**) — 26th
+  suite: second-implementation replay over 400 randomized seconds,
+  boundary sums, gap vetoes, shallow-ring vetoes, exact ramp JSON
+  (brace-less by contract; the witness printf owns the braces),
+  small-buffer honesty, NULL no-ops.
+- `streamer/src/knvstd_main.c` — F22 wiring (dec_ctx ring bucket +
+  per-frame hook + 1 Hz fold + decay/recovered lines + terminal
+  `freeze_witness` with cascade latches from new volatile
+  `sess_pump.fw_last_audio_ms/fw_last_ctrl_ms/fw_ctrl_msgs`) and F23
+  (`si_send` gains the per-event `src`; WARN note rewrite).
+- `CMakeLists.txt`, `tools/build_native_tests.sh`, `tools/cross_check.sh`,
+  `tests/T10_build_and_test.py` — the 26th-suite registration
+  (target T10 84 → **86**, dry 72/74 → **76**).
+- Docs: `docs/RTSP.md` §40.4 + §41, `docs/BUNDLE-AUDIO.md` §10.2 addendum
+  + §10.3, `docs/INPUT.md` §10.11, `docs/BOOTSTRAP.md` marker,
+  `START-HERE.md` run-33/34 rows + §12 + §13.
+
+## Rev 43 verification status (interim)
+
+Sandbox: native battery PASS zero warnings (test_knfreeze 901/901),
+cmake+ctest 26/26 mbedTLS cfg zero warnings, cross-check both mingw
+archs PASS `-Werror`, sandbox_session_e2e 48/48, check_summary_skeleton
+113 == run-33 live, T10 POSIX dry ALL PASS 76, ASan+UBSan clean on the
+new suite. Target (operator, 2026-10-30): **T10 ALL PASS 86** +
+**run 34 = the 900.0 s keeper** (RTSP §41). Pending in-round: F20/F21
+gates, the decay baseline gate, teardown-400 diagnosis, then the stamp
+bump and the final rev-43 target expectations.
+
+---
+
+# INTEGRATION NOTES — Round M delta, rev 42 (**ANALYSIS-ONLY — RUN 33 = THE FIRST FULL SUCCESS: THE CLIENT LOGGED IN, BOOTED THE GAME, ENTERED THE WORLD AND CAPTURED 13:38 OF REAL SOUND.** One Endfield draw (107057914, 900 s requested) with the operator's own 80-event/416 s macro, `--input-anti-afk=60000`, video+audio+release. **F19 proven at full scale**: `input_summary events:80 fired:80 sent:108 (key:86 btn:16 abs:6) gated:0 late_skips:0 build_fail:0 push_fail:0 unmapped:0`, `afk_pulses:14` — the macro clicked Play at t=40 s, **`Endfield.exe` JustLaunched at t=44.2 s (first game process in project history; `drsProfileName:"Arknights: Endfield"`, parent `Games.exe`)**, typed the in-game login at t≈161–170 s, entered the world at t≈411–416 s and swung the sword — the operator watched every stage land on a perfect-quality stream. **Video**: 24 424 AUs / 815.689 s = 29.94 fps, 215 296 698 B, ZERO gaps/withheld/FEC/NACK/decode errors over 13.6 min (run 32's loss was the launcher's splash, not the line). **Audio**: 163 728 packets × 5 ms = 818.68 s = ffmpeg's 13:38.64, `seq_loss 0`, `srtp_fail 0` — **the first content-bearing capture of the project: real stereo game sound, Audacity-verified by the operator** (independent sandbox RMS pending a pushable 30 s excerpt — START-HERE §12). **The freeze family came anyway**: abrupt total media silence at 815.2 s (74 s short of the requested 900), `progress_stall` → `rx_recovery recover/terminal` → `recovery_exhausted` at wall 825.6 s, NO 0x0109, and three theories now MEASURED DEAD: not the length timer (`SESSION_LENGTH_TIMER beforeEventMS:3599101` = 1 h, declared at rel 1.2 s), not loss (zero on both planes all session), not idle (real input + anti-AFK from t≈1 s; runs 28/28b kept 360 s with ZERO input). **The control plane outlived the media**: last `ctrl_in` at rel 820.0 s (+17 msgs since rel 790 s) — run 30's anatomy at 13.6-minute scale; `ctrl_ping_stop pings:407 pongs:0` as always. Clean exit: `rtsp_teardown 200` + `cm_release 200 gone:1` (second consecutive). Two cosmetic label bugs caught ⇒ round N's F23 (`input_first_send` reports the configured source, not the per-event one — run 33's first send at 1.17 s was the immediate first anti-AFK pulse, `next_afk_ms` starting at 0; and the `input_summary` WARN note must key off `fired:0`, not `gated:0`). **NO CODE MOVED IN ROUND M** — no wire-format, module, KAT or summary-key change; the skeleton canon stays **113 == 113**, stamp stays **L**, target expectations stay T10 **ALL PASS 84** / T13 bare 51 / mb 63. Full analysis: `docs/RTSP.md` §40, `docs/BUNDLE-AUDIO.md` §10.2, `docs/INPUT.md` §10.10, `docs/BOOTSTRAP.md` run-33 marker, `START-HERE.md` §3/§12. Round N = F20 live D3D9 presentation in `--session` + F21 live WASAPI playback + F22 the `freeze_witness` line + F23 the label fixes; run 34 = the first run the operator WATCHES and HEARS live.)
+
+## Rev 42 changed files (round M)
+
+Documentation only — every change is an append or an in-place row:
+
+- `docs/RTSP.md` — **§40** (new): run 33's full read — the timeline
+  table from the rig's own 0x010a notifications, the input counters,
+  the perfect 13.6-minute media path, the freeze anatomy with the
+  control-plane-outlives-media fact, the three dead theories, and the
+  stage-plan consequence (presentation half = round N).
+- `docs/BUNDLE-AUDIO.md` — **§10.2** (new): the first content-bearing
+  capture; the 5 ms/packet math confirmed on the longest file yet
+  (163 728 × 5 ms = 818.68 s = 13:38.64); zero-loss freeze evidence;
+  the still-owed independent RMS decode.
+- `docs/INPUT.md` — **§10.10** (new): F19 proven at macro scale
+  (80/80 fired, 108 sent, zero gated/late/failed); the anti-AFK
+  first-pulse quirk documented (`next_afk_ms=0` ⇒ first pulse on the
+  first armed tick, `afk_pulses ≈ ceil(elapsed/interval)+1`); the two
+  F23 label bugs; credential hygiene held (§10.7 rule followed).
+- `docs/BOOTSTRAP.md` — run-33 marker appended to §12: stage 3's input
+  bar MET LIVE, audio bar met as extraction+content, remaining bar =
+  the presentation half (F20/F21), run 34 = watch+hear live.
+- `START-HERE.md` — title/header dates → round M; §1 gets the run-33
+  paragraph; §3 table gets the **run-33 row**; §4 gets the "superseded
+  by §12" pointer; **§12 (new)**: the three pushable ffmpeg artifacts
+  (tail MP4, 30 s audio excerpt, 3 PNG frames — exact one-line
+  commands) and the round-N plan table (F20–F23 with gates).
+
+## Rev 42 verification status
+
+Nothing to gate: no `.c`/`.h`/`.py`/`.txt`-fixture moved. The sandbox
+battery, cross-checks and ctest baselines from round L stand unchanged
+(25 suites, zero warnings, 113 == 113, T10 dry ALL PASS 72 / Win7 84,
+T13 bare 51 / mb 63, E2E 48/48). The round-M evidence base is
+`karnynow-logs/run33_logs/` (run33.log 4.3 MB, transport.jsonl/log,
+wire_session.log, input/media/app knlog families, diag zips) — the
+210 MB `video.264` and 23 MB `audio.opus` stayed on the rig by size;
+their ffprobe/ffmpeg metadata is quoted verbatim in §40/§10.2 and the
+derived excerpts are requested in START-HERE §12. **Same-day addendum:**
+the excerpts arrived (`run33_logs/media/`: 10 s tail MP4, 10 s tail
+Opus, 2 PNG frames) together with the operator's "eight heartbeat
+beats" observation; §40.4 of RTSP.md records the measurement — the
+beats are eight server-forced IDRs at 0.533 s on a ~10 s encoder
+bitrate collapse (3.1 → 0.5 Mbps) at perfect 30 fps pacing while our
+QoS said 34 Mbps free and gaps 0 (wind-down is rig-side, not our
+feedback); teardown was phased (video → audio ~11 s later → control
+heartbeats last); the audio tail passed an independent sandbox decode
+(−60.5 dB mean, decorrelated stereo, stationary 391 Hz drone). Still
+no code moved: rev 42 remains documentation-only, and F22's spec grows
+a live `bitrate_decay_warn` detector.
+
+---
+
 # INTEGRATION NOTES — Round L delta, rev 41 (**RUN 31 = THE RETRACTION ROUND, AND IT IS OUR OWN CAPTURE THAT PROVES THE OPERATOR RIGHT.** Four interleaved A/B draws on Watch Dogs: Legion (100361011) — `--session-seconds=900 --lottery=4 --lottery-gap=60 --session-jiggle=100 --lottery-stop-on-keeper=0 --session-audio-out=audio.opus` — and **every draw died `recovery_exhausted`, rc 1 ×4**, `lottery_summary {"draws":4,"of":4,"last_rc":1}`: wall 25.8 / 24.4 / 46.1 / 132.3 s = media (`au_clock.rtp_ms`) **16.19 / 13.96 / 35.96 / 122.23 s**, drift −465 / −5 / −7 / −6 ms, **487 / 420 / 1080 / 3668 AUs**, **1776 / 1485 / 3614 / 11263 datagrams = `authenticated` exactly**, gaps 0, decode_errors 0, frames_failed 0, `recovery.attempts` 1. **SO THE JIGGLE A/B HAS NO RESULT**: draws 1/3 flew the jiggle (`feedback.jiggle` 230 / 439) and 2/4 were OFF, all four died the same way, and the longest draw reached a fifth of the ≈600 s region the A/B was designed to probe — survival is still the rig-side lottery and the interleaved design stays available for a run that draws keepers. **THE LOGIN WALL, MEASURED FROM OUR OWN TRAFFIC:** all **64** `sctl_010a` notifications were decoded (F2's 2400-hex cap truncated none) and their **46** `processName` entries are **Ubisoft Connect and nothing else** — `UplayWebCore.exe` ×26, `UplayService.exe` ×16, `upc.exe` ×4, **ZERO game binaries on any of the four draws** (`drsProfileName` "Ubisoft Connect" ×26 / "Ultimate Paintball Challenge" ×4 — the known misclassification, `shortName:"uplay"`, `cmsId:18761111`, chain `nvcontainer.exe → upc.exe → UplayService/UplayWebCore`). That is the operator's retraction of the XLIX "Legion launches with our client" claim, confirmed from the capture: play.geforcenow.com's web client **types the credentials INTO THE STREAM**, so the browser is at the game in seconds while our client — which sent not one keystroke — is handed the launcher's login dialog (`au_00001_k.264` *is* that dialog), and the audio is silent for run 30's reason: nothing that makes sound ever ran. **THE ORPHANED SEATS, MEASURED:** the string `TEARDOWN` appears **ZERO times in any run-31 log** (XLIX's teardown was fire-and-forget with no event line, so there was no way to tell), and draws **2, 3 and 4** each walked the full CloudMatch 403 SESSION_LIMIT ladder — `cm_create_backoff` attempt 1/2/3 = **20 s / 40 s / 80 s** — i.e. **140 s of dead queue time on three of four draws (≈7 min of the run) because the previous draw never gave its seat back.** **F13 CAUGHT BY ITS OWN DELIVERABLES:** the four audio files arrived as `audio_d1_d1us`, `audio_d2_d2us`, `audio_d3_d3us`, `audio_d4_d4us` — **no `.opus` extension at all** — sized 199 510 / 176 601 / 406 292 / 1 309 966 B, matching the four `audio_close` `bytes=` counters exactly (F12 fired on every draw: pages 82/73/164/525, `srtp_fail` 0 ×4, `write_errors` 0 ×4, `seq_loss` 0/0/**1**/0, 40 023 packets total with `red_packets == packets`), so **the payloads are intact and only the NAME was mangled**: `strrchr()` returned a pointer INTO the destination buffer and the following `memcpy()` was an overlapping copy (UB, ASan `memcpy-param-overlap` on the rig). **THE ".264 — ONLY THE FIRST FILE WORKS" QUESTION, ANSWERED WITH THE SHIPPING BINARY** (`logs/f17_video_proof_L.txt`): the single-AU dumps are not corrupt — `au_00001_k.264` is the keyframe and carries its own SPS/PPS so ffmpeg decodes it, while every later file is one P-frame with no parameter sets, which no decoder can start on (`Invalid data found when processing input`); the second cause is that run 31 flew four draws into ONE `--session-au-dir`, so draw 2's `au_00001_k.264` silently replaced draw 1's. **THE INPUT CHANNEL IS LIVE:** `input_activation {"sent":8,"failed":0,"bytes":170,"version":3,"attempt":1,"ready":1}` on all four draws — and not one discrete input message after it. Ships **F16** (`streamer/src/kn_drawpath.c` + `kn/kn_drawpath.h`: the per-draw naming rule as ONE pure, alias-free, in-place-safe module — locals for suffix and extension, `memmove` for every write — now used by the audio path, the video path and the AU names; `test_kndrawpath` **1051 checks**, the 21st suite, pinned three ways: the run-31 case verbatim, a SECOND independent `snprintf` builder across a path × draw matrix, and honest degradation on a too-small buffer), **F17** (`--session-video-out=F.264` / `--replay-video-out=F.264` — ONE **continuous** per-draw Annex-B stream `video_d<N>.264` with every decoded AU appended in order, PLUS draw-numbered single-AU names `au_d<N>_%05u_%c.264`, both legs through the new shared writer `knv_dump_au()` so live and replay can never drift; host proof: the repo's 60-frame clip → `video.264` 42 944 B, ffprobe/ffmpeg **60 frames OK** where `au_00002_p.264` fails), **F18** (the TEARDOWN is now **ALWAYS logged with its real rc/status** — `rtsp_teardown` — and `--session-release` (default **OFF**) follows it with the CloudMatch `DELETE v2/session/{id}` over a **freshly opened** TLS stream, 2xx or 404 = gone, `cm_release` line + knlog with a "the seat may still be held" note when it is not) and **F19** (**REAL INPUT**: `--input-script=FILE` timeline replay, `--input-live` console forwarding, `--input-anti-afk[=MS]` = the reference's own VK 0x7C pulse, `--input-text-gap=MS`, and `--input-check=FILE` — parse and report a script with **no session at all**, rc 2 on any parse error; five discrete builders in `kn_input.c` — key, mouse button, mouse absolute, mouse relative, wheel — byte-exact against the Rust goldens at `nvst_input.rs:1868-1911`, `test_kninput` **548 → 794 checks**, `tools/input_reference.py` self-proving before it emits: *"8/8 activation goldens + 2/2 discrete-input (relative-mouse, key-down) Rust goldens byte-exact, 21 discrete vectors, 7 parser vectors, 7 cursor vectors, 17 named commands"*). Everything flies through the gate the jiggle already uses (nothing before the activation chain's `enable-input(true)`), keys/buttons/wheel route to **sid 0** (ControlReliable) and mouse motion to **sid 6** (ControlPartial, 300 ms PR-SCTP), timestamps ride `pump.origin_us`. **No summary-key change** — the skeleton canon is still **113 == 113**, re-validated against run 31's REAL stdout — and no change to any wire format that already flew. Stamp **L**. Target T10 expectation moves **82 → 84** (this round caught that cmake *builds* every suite while T10 *runs* only the ones its own list names: `test_kndrawpath` is now in `suites` AND `required_bins`). Run 32 = **the login run**: `--input-script=login.txt --session-video-out=video.264 --session-audio-out=audio.opus --session-release`.)
 
 ## Rev 41 changed files (round L)
@@ -342,7 +435,8 @@
   the scheduling lesson `docs/INPUT.md` §10.9 and `docs/RTSP.md` §39
   turn into run 33's early timeline. Analysis-only delta: no code
   moved between rev 41 and this confirmation, so no rev 42 is opened
-  yet — round M starts when run 33 lands.
+  yet — round M starts when run 33 lands. **(It landed: run 33 = the
+  first full success; rev 42 is opened at the top of this file.)**
 * What settles it, in order: (1) `input_summary` with `sent > 0` and
   `gated` small — the client typed; (2) `video_d1.264` decoded with
   ffprobe — did the launcher dialog give way to a game screen; (3) a game

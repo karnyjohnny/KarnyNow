@@ -747,3 +747,68 @@ The rules that follow, for every future script:
    `note` string on the WARN line predates run 32 and overstates the
    `gated:0` case as "the media loop never ticked" — the triple above is
    the correct reading; the note text is queued for correction.)
+
+### 10.10 Run 33: the macro logged in, booted the game and entered the world — F19 proven at full scale
+
+Run 33 (2026-10-29, Endfield, app 107057914) is F19's live proof:
+
+```
+input_summary events:80 fired:80 sent:108 key:86 btn:16 abs:6 rel:0 wheel:0
+              gated:0 late_skips:0 build_fail:0 push_fail:0 unmapped:0
+afk_pulses:14 (every 60 s from t≈1 s)
+```
+
+- Every scheduled event fired on time (zero `late_skips`), the gate
+  admitted all of them (zero `gated`), and the byte builders produced
+  zero failures — 108 messages = 58 typing keys (29 chars ×2) + 28
+  anti-AFK keys (14 pulses ×2) + 16 button + 6 absolute-mouse.
+- The operator watched the results land: launcher **Play** at t=40 s →
+  `Endfield.exe` JustLaunched at t=44.2 s (the first game process in
+  project history, §40.1 in RTSP.md); the in-game login fields clicked
+  and typed at t≈161–170 s; world-entry clicks at t≈411–416 s; sword
+  swung. **Pixel-accurate absolute mouse (1080p viewport) and keyboard
+  text entry both work against the real GFN rig.**
+- Anti-AFK first-pulse quirk (by design, now documented): `next_afk_ms`
+  starts at 0, so the FIRST pulse flies on the first armed tick (here
+  ~1.2 s), then every 60 s. Harmless — an extra VK 0x7C pair early —
+  but it means `afk_pulses ≈ ceil(elapsed/interval)+1`, and it is what
+  `input_first_send` reported at 1.17 s in run 33.
+- Two label bugs queued for round N (F23, cosmetic only):
+  1. `input_first_send ... source:"script"` printed the *configured*
+     source when the first send was actually an anti-AFK pulse — the
+     per-event source should be reported.
+  2. The `input_summary` WARN note claims `gated:0` with `aus>0` means
+     "script never armed" — after F19's gate latch it can also mean
+     "everything was admitted" (run 33: `aus 24424`, `gated 0`,
+     `fired 80`). The note must key off `fired:0`, not `gated:0`.
+- Credential hygiene held: only `--input-check` summaries and counters
+  entered the repo; the pasted live credentials were rotated before the
+  run per §10.7. (The typed character count in run 33 — 29 — matches
+  e-mail+password; no characters are logged anywhere.)
+
+### 10.11 Run 34: the attack macro flew 96/96 — and a credential incident with its procedure
+
+Run 34's macro (`run34_logs/login.txt`, operator's v2) compressed the
+login to t≈72–77 s, world entry to t≈330 s and added **ten left-click
+attacks at 20 s spacing (t=420–600 s)** as an idle-eviction control.
+Result: `events:96 fired:96 sent:126 (key:88 btn:32 abs:6) gated:0
+late_skips:0 build_fail:0 push_fail:0`, `afk_pulses:15` — the 32 btn
+messages are exactly the 6 login/world clicks + 10 attacks (16 clicks
+× down/up), and F23's relabelled first-send line printed
+`source:"afk", configured:"script"` live, as designed. The draw kept
+the full 900 s (RTSP.md §41).
+
+**The incident:** the same push delivered the macro file WITH the
+plaintext credentials (`type <e-mail>`, `type <password>`) into the
+public logs repository — the one thing §10.7 forbids. Immediate agent
+actions: workspace archive copy redacted to `type <EMAIL-REDACTED>` /
+`type <PASSWORD-REDACTED>`, scratch clone copy deleted, no credential
+quoted in any doc. Operator procedure issued (chat, step-by-step):
+(1) rotate the Endfield/account password NOW — rotation is what makes
+the leaked history harmless; (2) delete `run34_logs/login.txt` from the
+logs repo (new commit; history rewrite optional AFTER rotation);
+(3) from now on the macro lives ONLY on the rig as `build\login.txt`;
+if a reference macro must sit in a repo, it carries placeholders;
+(4) never paste or push script bodies — `--input-check` summaries only
+(§10.7 stands). The typed-character COUNTS (29 in run 33/34) are the
+only macro fingerprint that may ever appear in evidence lines.

@@ -382,7 +382,7 @@ def main():
     # build/. Retry missing targets explicitly before any binary is launched.
     required_bins = ["test_knfec", "test_knring", "test_knaudio", "test_kngs",
                      "test_knselftest", "knvstd", "test_kndiag", "test_knlog",
-                     "test_knsrtp", "test_kndrawpath"]
+                     "test_knsrtp", "test_kndrawpath", "test_knfreeze"]
     missing = [name for name in required_bins if not os.path.isfile(exe(name))]
     if missing and configure_ok:
         log("\nmissing build outputs: %s" % ", ".join(name + ".exe" for name in missing))
@@ -423,7 +423,11 @@ def main():
               # pure string code, so it runs identically on the target and
               # in the sandbox — but it MUST be in this list or the target
               # never executes it (cmake builds it either way).
-              "test_kndrawpath"]
+              "test_kndrawpath",
+              # round M (F22): the freeze-witness ring — same story: pure
+              # integer math, identical on both machines, and only this
+              # list decides whether the target runs it.
+              "test_knfreeze"]
     for t in suites:
         rc, out, _ = run([exe(t)])
         ok = rc == 0 and "PASS" in out
