@@ -1613,7 +1613,23 @@ stays the honest stub.
    `test_knopus` **105** (NEW), `test_knaudio` **54** (was 22);
    everything else unchanged (`test_knfreeze` 901, `test_kninput` 794,
    `test_kndrawpath` 1051, `audio.vectors` 188/0). If T10 reports
-   anything else, re-sync and redo;
+   anything else, re-sync and redo.
+   **Target finding (the rig's first slice-3 T10, 2026-10-30 19:31):
+   VERDICT FAIL (1/89) — the ONE failure was `ninja build` hitting the
+   old 300 s wall (`rc=-999` TIMEOUT), not a compile error**: the
+   vendored opus adds ~230 translation units (SSE/SSE2/SSE4.1/AVX2
+   dispatch variants) on top of mbedtls + usrsctp, and a cold build on
+   the rig simply outgrew the timeout. Every binary built anyway and
+   **every suite PASSED on the rig — including `test_knopus: 105
+   checks, max |diff| 0 LSB` (the REAL vector battery on vendored
+   libopus 1.5.2 = F21's decode path is target-proven bit-exact) and
+   `test_knaudio: 54`**; cmake reported `Opus: vendored
+   third_party/opus (F21 live playback ON)`. The fix ships in the same
+   slice: T10's build legs now carry 1800 s/900 s/600 s timeouts and a
+   timeout keeps the child's partial output (the zero-warning scan is
+   never vacuous again). After re-syncing `tests/T10_build_and_test.py`,
+   the re-run is incremental (the rig's tree is already fully built)
+   and must come out **ALL PASS 89**;
 3. **check the stamp**: the first line of the run log must now be
    `{"mode":"build","compiled":"...","round":"N"}` — slice 2 shipped
    without the bump (run 35 flew stamped `L`), so `L` on the log means

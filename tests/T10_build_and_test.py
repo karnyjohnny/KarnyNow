@@ -86,8 +86,13 @@ def run(cmd, cwd=ROOT, timeout=300):
                            stderr=subprocess.STDOUT, timeout=timeout)
         out = p.stdout.decode("utf-8", "replace")
         rc = p.returncode
-    except subprocess.TimeoutExpired:
-        out = "TIMEOUT after %ds" % timeout
+    except subprocess.TimeoutExpired as exc:
+        # keep whatever the child managed to print: a timeout must not
+        # blank the evidence (the zero-warning scan reads this text)
+        partial = exc.output or b""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        out = "TIMEOUT after %ds\n%s" % (timeout, partial)
         rc = -999
     except OSError as exc:
         out = "OSError: %s" % exc
@@ -415,14 +420,14 @@ def main():
     if have_ffmpeg:
         cfg_cmd.append("-DKN_FFMPEG_PREFIX=" + FFMPEG_PREFIX)
     if dependencies_ok:
-        rc, out, _ = run(cfg_cmd)
+        rc, out, _ = run(cfg_cmd, timeout=600)
     else:
         rc, out = -1, "Required source dependencies are unavailable."
         log(out)
     check(rc == 0, results, "cmake configure")
     configure_ok = rc == 0
     if rc == 0:
-        rc, out, _ = run(["cmake", "--build", "build"])
+        rc, out, _ = run(["cmake", "--build", "build"], timeout=1800)
     else:
         rc, out = -1, "Skipped because configure failed."
         log(out)
@@ -439,7 +444,8 @@ def main():
     missing = [name for name in required_bins if not os.path.isfile(exe(name))]
     if missing and configure_ok:
         log("\nmissing build outputs: %s" % ", ".join(name + ".exe" for name in missing))
-        retry_rc, _, _ = run(["cmake", "--build", "build", "--target"] + missing)
+        retry_rc, _, _ = run(["cmake", "--build", "build", "--target"] + missing,
+                             timeout=900)
         if retry_rc != 0:
             check(False, results, "rebuild missing executable targets")
     for name in required_bins:

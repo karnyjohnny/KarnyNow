@@ -52,6 +52,28 @@
   marker), `docs/AUDIO.md` (§F21), `docs/RTSP.md` (§42),
   `docs/BUNDLE-AUDIO.md` (§11), `START-HERE.md` (run-35 row + §15).
 
+## Rev 44 target finding (the rig's first slice-3 T10, 2026-10-30 19:31)
+
+**VERDICT FAIL (1/89) — and the ONE failure is the harness's own wall,
+not the build**: `cmake --build` hit T10's 300 s leg timeout
+(`rc=-999`). A cold rig build with the vendored opus (~230 extra TUs
+across the SSE/SSE2/SSE4.1/AVX2 dispatch variants, on top of mbedtls +
+usrsctp, on a Core-2-era machine whose `cmake --fresh` configure alone
+takes 54 s) outgrew the old wall; ninja was killed at the finish line —
+EVERY required binary existed and **all 26 suites PASSED on the rig**,
+headlined by `test_knopus: 105 checks, 0 failures, max |diff| 0 LSB`
+(the REAL 85-vector battery against vendored libopus 1.5.2 — F21's
+decode path is **target-proven bit-exact**) and `test_knaudio: 54`.
+cmake: `Opus: vendored third_party/opus (F21 live playback ON)`,
+FFmpeg enabled (`libavcodec 63.2.100`, decode.synthetic 60/60),
+`_WIN32_WINNT 0x0601`, SubsystemVersion (6,1), bundle 139 721 B.
+Fix (this rev): build-leg timeouts raised (configure 600 s, build
+1800 s, missing-target retry 900 s) and `run()` now preserves the
+child's PARTIAL output on timeout — the `zero compiler warnings` scan
+was vacuous after a timeout (it saw only the TIMEOUT banner), which
+this rev treats as a harness-honesty bug, not a cosmetic one. Re-run
+after re-sync is incremental and expected **ALL PASS 89**.
+
 ## Rev 44 gate canon (sandbox, at slice-3 close)
 
 native battery **PASS** (26 legs, zero warnings; new baselines
