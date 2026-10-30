@@ -4968,3 +4968,120 @@ stdout** · ASan/UBSan clean · knvstd `-Wformat-truncation=2` clean at
 -O0/-O2/-O3. Target expectations unchanged: **T10 89, stamp N, ctest
 27 ×2**. Run 40 = the tether A/B lottery (or a quiet-hours re-fly),
 command identical to run 39's.
+
+## 45. Round N slice 4b — RUNS 40 + 40g (the network A/B): **THE TETHER VERDICT IS IN — IT IS NOT WI-FI, NOT THE ACCESS LINE, NOT THE NETWORK AT ALL. BOTH PATHS MEASURED PERFECT (owd <10 ms, `queue_delay_us` 1.7 ms, gaps 0, withheld 0, `seq_loss` 0, operator's ping/pathping 0 % on every hop) AND THE DEATHS CAME ANYWAY — THE FREEZE FAMILY, CLEAN-PATH VARIANT. AND THE LOTTERY PRODUCED THE MOST DISTURBING DATA POINT OF THE PROJECT: TWO ADJACENT RIG IPs (185.136.70.135 AND 185.136.70.136), ON TWO DIFFERENT ACCESS NETWORKS 26 MINUTES APART, DIED AT THE SAME SESSION-RELATIVE INSTANT — VIDEO 82.18 s vs 82.09 s, 89 ms APART, CTRL SILENT AT 68.77 s vs 68.32 s. THAT IS NOT COINCIDENCE: EITHER ONE PHYSICAL HOST WAS HANDED OUT TWICE BEHIND TWO FRONTEND IPs, OR SOMETHING DETERMINISTIC KILLS AT THAT PHASE.**
+
+### 45.1 The three draws
+
+**Run 40** (2.4 GHz Wi-Fi, single draw, rig **185.136.70.135**): wall
+92.3 s. Launcher screen 0–13 s (~470 d/s), the macro's Play click at
+11 s, Endfield `JustLaunched` telemetry at 26.5 s (0x010a:
+`nvngx_update.exe`, parent `Endfield.exe` ×3), login screen rendered
+from ~43 s (d/s climbs 150→360), server 1-Hz 0x0101 heartbeats stop at
+**68.8 s**, the macro types the e-mail at 72 s / password at 75 s /
+clicks Login at 77 s (`fired:72/98` = the script completed exactly
+through the Login click; the next event is at 220 s), video falls to
+15 d/s at t=82 and to **zero at 82.2 s**, audio 84.4 s,
+`recovery_exhausted` at 92.3 s, teardown 200, release `200 gone:1
+attempts:1`. The operator watched the freeze "while the login was
+being typed".
+
+**Run 40g draw 1** (USB tether, 5 GHz LTE, rig **185.136.70.136**):
+a frame-by-frame replay of run 40 — same launcher plateau, same
+13 s drop to ~90 d/s, same 43 s climb, Endfield `JustLaunched` at
+24.1 s, heartbeats stop at **68.3 s**, `fired:72/98`, video zero at
+**82.09 s** (absolute 22:15:37Z vs run 40's 21:49:28Z — 26 minutes
+apart), wall 92.2 s. Video bytes differ (12.74 vs 14.04 MB) — two
+encoder instances, but the death clocks match to 89 ms.
+
+**Run 40g draw 2** (rig **80.84.173.144**): died at video 10.24 s —
+BEFORE the Play click (11 s), BEFORE any game launch (its 0x010a burst
+is the bare launcher stack: `Launcher.exe`, `Games.exe`,
+`QtWebEngineProcess.exe` at 437 ms, then silence), with NO input
+delivered to a living session (`fired:3` = the 10 s mouse move + the
+two 11 s clicks pushed into the corpse during the recovery window).
+The operator saw "a moment after the launcher click" — the clicks
+fired on schedule at wall 11/11.5 s while the video had already been
+dead since 10.2 s. Ctrl last at 8.8 s.
+
+### 45.2 What the A/B settles, and the block ledger
+
+The tether changed NOTHING: identical death on a measured-clean LTE
+path (127 Mbps, 0 % loss, 6 ms idle latency). Both 2.4 GHz and tether
+sessions show textbook-perfect transport (owd <10 ms all session,
+`queue_delay_us` 1.7 ms, jitter 0.6 ms, gaps/withheld/`seq_loss` all
+ZERO, FEC/NACK never needed). **The access network is exonerated; run
+39's congestion signature did not repeat — tonight's deaths are the
+abrupt freeze family on clean paths.**
+
+The block ledger is now damning. **185.136.70.x: five draws, five
+deaths** (.139 twice = runs 36/38, .137 = run 39 d1, .135 = run 40,
+.136 = run 40g d1). **80.84.17x: three draws, three deaths** (.154 =
+run 37, .153 = run 39 d2, .144 = run 40g d2). The afternoon keeper
+(run 35, 744 s, macro 98/98 — full launch, login, gameplay attacks)
+flew on **185.136.69.134** — the neighbouring, healthy block. The
+Friday-evening lottery keeps fishing from two sick /24s, and the
+.135/.136 death-clock match says those two frontends are very likely
+ONE sick physical host, reproducibly failing ~82 s into a session
+~5 s after the game's Login click — with its control plane already
+silent from 68 s, before the typing even began.
+
+### 45.3 The operator's audio hypothesis, audited honestly
+
+The operator observed that the deaths began with the audio playback
+implementation (F21), while the macro's debut (run 35, pre-F21) was
+perfect: full launch, login typed in, gameplay with character attacks,
+744 s. The correlation is real — **8 of 8 draws since F21 died; the
+one perfect macro run flew without playback**. But the mechanism audit
+says:
+
+1. **F21 is provably zero-wire** (rev 45: the run 36–38 wire is
+   byte-identical in structure to run 35's; playback adds no packet,
+   no feedback field, no timing dependency on the send path). A
+   client-side WASAPI consumer cannot reach the rig.
+2. **The audio plane was healthy to the end both tonight** —
+   `decode_fail:0`, `dropped:0`, `starved:1`, `prerolls:1` (F25a's
+   first live print ✓), audio outlived video by 2.2 s (the ring's
+   buffered tail), `queue_ms:89`. The loop held 205 Hz; RR/acks/QoS/
+   keepalives kept contract (rr 92, acks 2466, qos 1800, ka 31).
+3. **The freeze family predates audio playback** — run 22 froze at
+   t+30–45 s with no audio at all; run 30 died at 75/197 s with audio
+   ARMED but not playing; runs 36–38 died 12–37 s = in the post-Play
+   /game-launch window, and draw 40g-2 died at 10 s with no input and
+   no game — so neither input nor game launch nor audio is NECESSARY.
+4. **The confound is the evening**: every post-F21 flight flew at the
+   Friday peak (queues 110–163); run 35 flew in the afternoon on the
+   healthy .69 block.
+
+Still — correlations deserve experiments, not arguments. **Run 41 =
+the falsification test, zero code**: replay run 35's exact
+configuration AT NIGHT — same lottery, same macro, audio still
+RECORDED to file, `--session-audio-play` REMOVED:
+
+```
+knvstd.exe --session --session-token=<TOKEN> --session-app=107057914 ^
+  --session-seconds=900 --lottery=2 --lottery-gap=60 --lottery-stop-on-keeper=1 ^
+  --input-script=build\login.txt --input-anti-afk=60000 ^
+  --session-video-out=logs\video.264 --session-audio-out=logs\audio.opus ^
+  --session-present --session-release > logs\run41.log
+```
+
+(the run-39/40 command minus `--session-audio-play`). **Interpretation:
+dies the freeze death → audio playback formally exonerated, the
+evening-pool verdict stands, and the remedy is quiet hours or a
+different pool region; survives to a keeper → F21 is somehow involved
+after all and the client-side timing audit reopens (nothing in the
+counters suggests how, which is why this run matters).** A parallel
+browser control strengthens it: if the operator keeps a GFN browser
+session on Endfield open on the same network the same evening and it
+ALSO freezes → the pool, beyond any doubt.
+
+Also noted from the payloads: `SESSION_LENGTH_TIMER` grants
+`beforeEventMS ≈ 3 599 000` (the full hour) on both draws — the deaths
+are no session cap. The macro milestone map (from the operator's
+copy): Play click 11 s, Endfield launched ~24–26 s, login screen
+~43 s, e-mail 72 s, password 75 s, Login click 77 s, dialog 220 s,
+in-game 330 s, attack loop every 20 s from 420 s. Tonight's `fired:72`
+on both 82-s deaths = the script had just completed the Login click.
+F26a confirmed live: `attempts:1` on the clean release. Skeleton
+untouched at **113** (docs-only slice).

@@ -49,6 +49,32 @@ run-39's LIVE stdout** · ASan/UBSan clean · knvstd
 **N** — the rig should RECOMPILE before run 40 so `prerolls`/`attempts`
 tell the truth.
 
+## Rev 45 slice 4b (2026-10-30 night): RUNS 40/40g — THE NETWORK A/B IS DECIDED: NOT WI-FI, NOT THE ACCESS LINE; TWO ADJACENT RIG IPs DIED 89 ms APART IN SESSION-RELATIVE TIME
+
+Docs-only slice (no code; the rig keeps the slice-4a build, stamp N,
+skeleton 113). Run 40 (2.4 GHz) + run 40g (USB tether, lottery ×2)
+died the abrupt freeze death on measured-PERFECT paths (owd <10 ms,
+`queue_delay_us` 1.7 ms, gaps/withheld/`seq_loss` all zero; operator's
+concurrent ping/pathping 0 % loss every hop) — the tether changed
+nothing, run 39's congestion signature did not repeat. The datum of
+the night: **185.136.70.135 and 185.136.70.136**, on different
+networks 26 minutes apart, died at video **82.18 vs 82.09 s** (ctrl
+silent from 68.8/68.3 s, before the macro's 72-s typing; both
+`fired:72/98` = just past the game's Login click at 77 s) — one sick
+physical host behind two frontends, or a deterministic phase kill.
+Block ledger: 185.136.70.x = 5/5 deaths; 80.84.17x = 3/3; the
+afternoon 744-s keeper (run 35) flew on healthy 185.136.69.134. Draw
+40g-2 died at 10.2 s with no input and no game launched: the freeze
+family needs none of {input, game, audio, bad network}. F25a/F26a
+first live prints confirmed (`prerolls:1 starved:1 decode_fail:0`,
+`attempts:1`); `SESSION_LENGTH_TIMER` grants the full hour (no cap).
+The operator's audio-playback correlation (8/8 draws died since F21;
+run 35 pre-F21 was perfect through gameplay) is audited honestly in
+RTSP §45.3 — F21 is zero-wire and the freeze family predates it (run
+22) — and gets a zero-code falsification: **RUN 41 = run 35's config
+at night minus `--session-audio-play`** (audio still file-recorded).
+Full analysis: RTSP §45; state + next steps: START-HERE §19.
+
 ## Rev 45 changed files (round N slice 4)
 
 - `streamer/include/kn/kn_audio.h` — `kn_audio_stats.prerolls`;

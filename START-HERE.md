@@ -1826,3 +1826,54 @@ knvstd `-Wformat-truncation=2` clean -O0/-O2/-O3. Target: T10 **89**,
 stamp **N** (unchanged binaries are fine — but a recompile stamps the
 F25a/F26a fixes; rebuild on the rig before run 40 so `prerolls` and
 `attempts` tell the truth), ctest **27 ×2**.
+
+---
+
+## 19. Round-N slice 4b addendum (2026-10-30 night): runs 40/40g read — THE TETHER A/B IS DECIDED: **NOT THE NETWORK.** Two adjacent rig IPs died 89 ms apart in session-relative time. Run 41 = the audio-playback falsification test (zero code).
+
+**Runs 40 (2.4 GHz) + 40g (USB tether, lottery ×2), stamp N build with
+F25a/F26a (T10 re-verified 89/89):** all three draws died the abrupt
+FREEZE death on **measured-perfect paths** (owd <10 ms,
+`queue_delay_us` 1.7 ms, gaps/withheld/`seq_loss` ALL ZERO; the
+operator's concurrent ping/pathping: 0 % loss every hop; speedtests
+clean). The tether changed nothing → **the access network is
+exonerated; run 39's congestion signature did NOT repeat.** Full read:
+**RTSP.md §45**.
+
+**The disturbing datum:** rig **185.136.70.135** (run 40, Wi-Fi) and
+rig **185.136.70.136** (run 40g d1, tether) died at video **82.18 s vs
+82.09 s** — 89 ms apart, 26 minutes apart in absolute time, on
+different networks — with ctrl (the server's 1-Hz heartbeat) silent
+from **68.8/68.3 s**, i.e. BEFORE the macro typed the e-mail (72 s).
+Both had `fired:72/98` = the macro had just completed the game's Login
+click (77 s). Either one physical host sits behind both frontends and
+fails reproducibly ~5 s after the Login click, or something
+deterministic kills at that session phase. **Block ledger:
+185.136.70.x = 5 draws / 5 deaths (.139×2, .137, .135, .136);
+80.84.17x = 3 / 3 (.154, .153, .144); the afternoon 744-s keeper flew
+on the healthy neighbour block 185.136.69.134.** Draw 40g-2
+(80.84.173.144) died at 10.2 s — before the Play click (11 s), before
+any game launch, with no input delivered to a living session: the
+freeze family needs neither input nor game nor audio nor bad network.
+
+**The operator's audio hypothesis** (deaths began with F21 playback;
+the pre-F21 macro debut run 35 was perfect through launch + login +
+gameplay attacks): correlation real (8/8 draws since F21 died), but
+mechanism audit says F21 is zero-wire (rev 45 wire identity), the
+audio plane was healthy to the end (`starved:1 prerolls:1
+decode_fail:0` — F25a's first live print ✓), the freeze family
+predates playback (run 22: t+30–45 s, no audio; run 30: arm-only),
+and the confound is the Friday evening (every post-F21 flight; run 35
+flew in the afternoon). **Correlations get experiments: RUN 41 = run
+35's exact config at night MINUS `--session-audio-play`** (audio still
+recorded to file) — command + interpretation matrix: RTSP §45.3. Dies
+→ audio formally exonerated, evening-pool verdict stands (remedy:
+quiet hours). Survives → F21 timing audit reopens. Optional parallel
+browser control on the same network strengthens it. F27 (in-session
+STUN probe) stays QUEUED but its priority drops: tonight's paths were
+provably clean — the probe would only re-confirm.
+
+**Files changed in slice 4b: DOCS ONLY** — `docs/RTSP.md` (§45),
+`START-HERE.md` (this §19), `docs/INTEGRATION.md` (rev 45 slice 4b).
+No code, no binary change; the rig keeps the slice-4a build (stamp N).
+Skeleton **113**. Gates: unchanged from slice 4a (all green).
