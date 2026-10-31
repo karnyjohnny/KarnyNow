@@ -3461,3 +3461,6 @@ the attribute scan (the `;;` quirk KAT caught it).
   tests\T13_udp_e2e.py` (expect ALL PASS 55 — first Winsock execution
   of the live modes; watch the `rcvbuf_actual` line: Windows should
   apply the full 8 MiB). No GPU/T11 rerun needed (no graphics touched).
+
+## Slice 4f - run 44 forensics + shift experiment prepared (docs only, no code delta)
+Run 44 (build Oct 31 09:05:56, T10 ALL PASS): 5/5 draws dead, no keeper; every stop correctly named ctrl_dead by F30 (~8 s earlier than the old verdict); F31 cascade lines show a constant ~10.2 s ctrl->video drain across all five deaths; F22 ctrl latch proven to be a beat artifact and superseded for dating. Morning queue 10-15: time-of-day variable closed. Longest death yet: 1070 s with flawless audio (decode_fail 0 on 214 540 packets). Prepared login_shift.txt (workspace root; login block +60 s only; token-identical to login_1h.txt, monotonic, 338 lines) for run 45's game-phase vs session-clock discrimination. Media policy: raw captures stay on the rig; logs are sufficient; operator trim recipe remains the on-demand path. No code changes this slice; next sync = docs only (RTSP section 49, START-HERE section 23, this slice) + login_shift.txt (outside repo).

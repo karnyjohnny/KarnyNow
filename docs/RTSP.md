@@ -5318,3 +5318,37 @@ Run 44 protocol (one command, hour goal): the run-42 command with
 `death_cascade` per dead draw tells us ctrl-first or media-first
 without hand-computation; a draw that passes ~120 s is a healthy-rig
 draw and its fate at the hour wall is the whole question.
+
+---
+
+## 49. Run 44 (2026-10-31, ~08:0xZ, small morning queue 10-15): 5/5 draws dead, no keeper — and F30/F31 PROVEN LIVE on the first flight that carried them (build Oct 31 09:05:56 local; T10 ALL PASS; playback ON, hour macro)
+
+### Every draw: `stop_reason:"ctrl_dead"` — the F30 watchdog fired on all five, ~8 s sooner than the old recovery-exhausted verdict, and the lottery re-drew each time (rc 1 x5) as designed
+
+| draw | rig | video died | true ctrl died (F31) | cascade delta | fired | audio |
+|---|---|---|---|---|---|---|
+| 1 | 77.111.249.146 | 1070.0 s | 1059.7 s | 10.3 s | 144 | 214 540 pkts, decode_fail 0, starved 4 (all recovered) |
+| 2 | 80.250.96.37 | 82.6 s | 72.3 s | 10.2 s | 72 | decode_fail 0 |
+| 3 | 80.250.98.39 | 431.7 s | 421.6 s | 10.1 s | 80 | decode_fail 0 |
+| 4 | 80.250.98.40 | 99.9 s | 89.5 s | 10.4 s | 72 | decode_fail 0 |
+| 5 | 80.84.172.146 | 62.1 s | 52.0 s | 10.1 s | 3 | decode_fail 0, starved 0 |
+
+### The findings the new instrumentation bought
+1. **CONSTANT CASCADE: ctrl dies, video follows exactly ~10.1-10.4 s later, audio ~2 s after video — on all five draws.** A fixed server-side drain/timeout (~10 s) between control-plane death and media-pipeline shutdown. This is the first truly quantitative shape of the kill.
+2. **F22's "last_ctrl" was a 30 s-beat artifact — corrected by F31.** Draw 4: F22 latch said ctrl last at 99.0 s while the per-message latch says 89.5 s. All pre-run-44 ctrl timings in this log (68.773, 428.8, ...) are beat stamps, not message stamps. The death_cascade lines are the truth.
+3. **Max gaps before death stay tiny** (video 116-476 ms, ctrl/hb 1.0-1.2 s = normal 1 Hz jitter, audio 55-291 ms) — every draw was perfectly healthy up to the instant of the kill. No pre-death degradation of any plane, ever, in the abrupt class.
+4. **Time-of-day is dead as a variable**: small morning queue (10-15, best positioning all week) still went 0/5. Deaths happen at every hour, every queue depth.
+5. **Phase repeats per host**: .39 died at video 433.2 s (run 43c) and 431.7 s (run 44 d3) — same rig, 1.5 s apart across nights. The 82 s class now spans three frontends (.135 82.18, .136 82.09, .96.37 82.57, ctrl 68-72 s each). Yet keeper/run 35/run 41 sailed through those same phases — so the phase is a per-host-state property, not universal.
+6. **Longest flight yet still died the same way**: draw 1 lasted 17.8 min with playback + attacks to 1060 s, audio flawless (214 k pkts, 0 decode fail), then the identical ctrl -> +10.3 s -> video cascade.
+7. **Watchdog arithmetic verified live**: every stop fired at video-death + 2.0 s (the video-dark leg of the condition), i.e. ~8 s before the old verdict — exactly per design.
+
+### Run 45: the SHIFT EXPERIMENT (macro-only, no code)
+The one remaining client-side discriminator: are the repeatable death phases (82 s class, 432 s class) bound to the GAME's login/auth phase or to the session clock? `login_shift.txt` (workspace root, placeholders — operator inserts real credentials as with login_1h.txt) moves ONLY the 11 login-block events +60 s (email 132 s, password 135 s, Login click 137 s); Play click, 220 s dialog, 330 s center click and the 20 s attack loop are untouched. Validated: token-identical to login_1h.txt, monotonic, span 10 000 -> 3 580 500 ms, 338 lines.
+
+Interpretation table for run 45:
+- Deaths in the 82 s class MOVE to ~142 s (video) / ~132 s (ctrl) => game-phase-bound: the login/auth moment itself triggers the kill on susceptible rigs. Macro surgery continues (delay, reorder, or skip parts).
+- Deaths STAY at ~68-82 s despite login not happening until 130 s => session-clock-bound: pool-side scheduled action; nothing in our macro or client controls it, and the keeper hunt is pure lottery (as the ledger says).
+- Either way: same command, `--input-script=build\login_shift.txt`, lottery=5/3600.
+
+### Media policy (operator decision, endorsed)
+Raw .264/.opus are NOT pushed (size + laptop-side trim cost). The logs are sufficient: audio decode_fail=0 on every draw ever recorded, and the cascade lines now date deaths to the millisecond without media. When media forensics are truly needed, the operator's trim recipe (h264 -> mp4 @ -r 30 truth, -sseof on mp4 index, opus 1:1 -sseof) is correct and stays the on-demand path.
