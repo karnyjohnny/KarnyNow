@@ -75,6 +75,72 @@ RTSP §45.3 — F21 is zero-wire and the freeze family predates it (run
 at night minus `--session-audio-play`** (audio still file-recorded).
 Full analysis: RTSP §45; state + next steps: START-HERE §19.
 
+## Rev 45 slice 4c (2026-10-30 late night): RUN 41 — PLAYBACK EXONERATED BY THE PRE-REGISTERED FALSIFICATION; THE REAL VARIABLE IS BLOCK HEALTH
+
+Docs-only slice. Run 41 (run 35's config at night, `--session-audio-play`
+removed; rig 80.250.98.36, a fourth /24) flew 552 s of media — full
+login → game → attack-loop macro arc, `fired:94/98`, decode
+16 568/16 568 — then died the SAME decay-and-freeze death run 35 died
+(owd spike 267 ms, bitrate collapse, ctrl silent 549.0 s, video zero
+552 s). Playback therefore is not the death cause (§45.3 matrix); the
+playback/fast-death correlation is a confound of block health — the
+sick blocks (185.136.70.x 5/5, 80.84.17x 3/3) die at 10–92 s in any
+config, and the only two healthy-block flights in history are the two
+no-playback ones (run 35's 744 s, run 41's 552 s). Operator-captured
+last-10-s media shows crisp gameplay (in-game ping 22 ms) → ~4 s
+quality collapse → final artifacted gameplay frame, no dialog: the
+rig's encoder died around a healthy game. F26 released the seat after
+`rtsp_teardown rc:-3` (`cm_release 200 gone:1 attempts:1`). Run 42 =
+playback ON, `--lottery=4`: a draw past ~120 s of media is a
+healthy-block draw and its fate at the 9–12-minute wall closes the
+last client-side question. RTSP §46, START-HERE §20. Skeleton 113,
+no code, gates unchanged.
+
+## Rev 45 slice 4d (2026-10-31): RUN 42 — FIRST FULL-LENGTH KEEPER WITH PLAYBACK AND GAMEPLAY (900.0 s, macro 98/98, `starved:0`); THE POOL'S DEATHS ARE A PER-SESSION COIN FLIP
+
+Docs-only slice. Run 42 (`--lottery=4`, playback ON): three dead draws
+(209 s abrupt / 30 s early / 265 s decay-freeze; three different
+blocks; all clean-path with exact client arithmetic) auto-re-drawn,
+then **draw 4 on 80.250.98.36 — the IP run 41 lost at 552 s — ran the
+full 900 s** (`stop:"time"`, 27 000/27 000 decoded, gaps 0, one
+keyframe, IDR/PLI never needed, presenter fails:0, 15 min of playback
+with `starved:0 prerolls:1 decode_fail:0 dropped:0`, macro 98/98, F26
+released the seat after the first-ever bye `status:400`). This one
+draw closes the last three confounds at once — playback (the keeper
+had it), block (same /24 gave a 20-s death at .37 one draw earlier),
+time-of-day (01:20–01:35 local Friday night) — leaving the pool's
+deaths as a per-session rig-state coin flip beyond client instruments
+(F27 stays parked). The trimmed keeper film ends on crisp gameplay,
+in-game ping 1 ms: our own timer stopped a healthy session. Next:
+**run 43 = `--session-seconds=3600`** (the SESSION_LENGTH_TIMER grants
+the hour; the old ~600-s cut only hit input-idle sessions). RTSP §47,
+START-HERE §21. Skeleton 113, no code, gates unchanged.
+
+## Rev 45 slice 4e (2026-10-31): RUN 43 READ + OPENNOW AUDIT + F30/F31 SHIP (ctrl-plane watchdog + the `death_cascade` log kind)
+
+Run 43: three manual SINGLE draws (no lottery) of the hour command,
+all dead on clean paths (11.2 s ctrl-first; 331.2 s and 433.2 s after
+the 9-s encoder decay — the operator's on-screen "pulsing"). The
+operator's verdict adopted: 1 keeper in 4 commands is a lottery
+ticket, not a product; run 44 = one command with `--lottery=5
+--session-seconds=3600`. OpenNOW line-by-line audit: our liveness
+surface equals the reference (0x0200@3 s byte-exact, RR@1 s, QoS@50 ms,
+WSS ping@2 s, ping v6, cursor plane); the reference's extras (0x109
+termination→resumable→resume, 0x112 pacing-mode, keepalive health
+accounting) cover messages absent from all fourteen draws — no
+missing message explains the silent deaths. **F30**: 0x0101 silence
+≥8 s with video dark ≥2 s → `stop_reason:"ctrl_dead"`, rc 1 (lottery
+re-draws), ~5 s sooner, shape named; recoverable stalls keep
+heartbeats so D8 recovery is untouched; knlog `E_SESSION_CTRL_DEAD`.
+**F31**: `death_cascade` line on every non-natural stop — per-plane
+message-exact `last_rel/maxgap/maxgap_at` for video/audio/ctrl/hb
+(new volatile latches per ctrl record, heartbeat, audio packet; F22's
+30 s ctrl beat was too coarse). Files: `streamer/src/knvstd_main.c`,
+docs (RTSP §48, START-HERE §22, this slice). Gates green: native ·
+cross ×2 · ctest 27/27 ×2 · T10 dry 79 · T13 63 · e2e 48/48 · skeleton
+113 vs three live summaries · knvstd -O0/2/3 -Werror. Rig rebuild
+before run 44 (T10 89, stamp N).
+
 ## Rev 45 changed files (round N slice 4)
 
 - `streamer/include/kn/kn_audio.h` — `kn_audio_stats.prerolls`;

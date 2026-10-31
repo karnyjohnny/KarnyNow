@@ -2134,6 +2134,8 @@ typedef struct dec_ctx {
     uint64_t   fw_sec_t0;
     unsigned long long fw_prev_gaps;
     uint64_t   fw_last_video_ms;
+    uint64_t   fw_video_maxgap_ms;    /* F31: longest video silence (ms) */
+    uint64_t   fw_video_maxgap_at_ms; /* F31: abs ms when that gap began */
     unsigned   fw_decay_warned;
     uint64_t   fw_decay_at_ms;
 
@@ -2204,6 +2206,14 @@ static void dec_frame_in_cb(const kn_rx_frame *f, void *ud)
      * bucket the session_stats beat folds into the freeze ring. */
     c->fw_sec_bytes += (uint64_t)f->bytes_len;
     if (f->keyframe) c->fw_sec_idr++;
+    {   /* F31: per-AU video silence latch (maxgap + where it began) */
+        uint64_t vg = c->fw_last_video_ms
+                      ? c->now_ms - c->fw_last_video_ms : 0ull;
+        if (vg > c->fw_video_maxgap_ms) {
+            c->fw_video_maxgap_ms    = vg;
+            c->fw_video_maxgap_at_ms = c->fw_last_video_ms;
+        }
+    }
     c->fw_last_video_ms = c->now_ms;
 
     /* ---- AU wall-vs-RTP telemetry (round XXXVIII evidence) ----
@@ -3366,6 +3376,19 @@ typedef struct {
     volatile uint64_t fw_last_audio_ms;
     volatile uint64_t fw_last_ctrl_ms;
     volatile unsigned fw_ctrl_msgs;
+    /* F30/F31 (slice 4e): per-MESSAGE latches. F22's fw_last_ctrl_ms is
+     * a 30 s-throttled beat latch; the watchdog and the death_cascade
+     * line need message-exact silence dating, so these update on every
+     * ctrl record (hist cb), every 0x0101 heartbeat and every audio
+     * packet, from the threads that already own those paths. */
+    volatile uint64_t fw_c2_last_ms;
+    volatile uint64_t fw_c2_maxgap_ms;
+    volatile uint64_t fw_c2_maxgap_at_ms;
+    volatile uint64_t fw_hb_last_ms;
+    volatile uint64_t fw_hb_maxgap_ms;
+    volatile uint64_t fw_hb_maxgap_at_ms;
+    volatile uint64_t fw_a2_maxgap_ms;
+    volatile uint64_t fw_a2_maxgap_at_ms;
     unsigned activation_sent;        /* latch: the chain flies once */
     unsigned activation_attempts;
     /* Round XLI.1: volatile mirror of `activation_sent` for the media
@@ -3411,7 +3434,16 @@ static void sess_audio_emit(void *ctx, const uint8_t *payload, size_t len,
                             uint32_t samples48)
 {
     sess_pump *p = (sess_pump *)ctx;
-    p->fw_last_audio_ms = kn_sock_now_ms();   /* F22 cascade latch */
+    {   /* F22 latch + F31 per-packet audio silence dating */
+        uint64_t anow = kn_sock_now_ms();
+        uint64_t ag = p->fw_last_audio_ms ? anow - p->fw_last_audio_ms
+                                          : 0ull;
+        if (ag > p->fw_a2_maxgap_ms) {
+            p->fw_a2_maxgap_ms    = ag;
+            p->fw_a2_maxgap_at_ms = p->fw_last_audio_ms;
+        }
+        p->fw_last_audio_ms = anow;           /* F22 cascade latch */
+    }
     if (p->audio_file_on)
         (void)kn_ogg_mux_packet(&p->ogg, payload, len, samples48);
     /* round N slice 3 (F21): the live-playback consumer chain — decode
@@ -4635,8 +4667,27 @@ static void sess_ctrl_hist_cb(void *ctx, uint16_t code,
                               const uint8_t *payload, size_t plen)
 {
     sess_pump *p = (sess_pump *)ctx;
+    uint64_t mnow;
+    uint64_t mg;
     (void)payload; (void)plen;
     kn_input_hist_add(&p->ctrl_hist, code);
+    /* F30/F31: message-exact ctrl-plane latch on EVERY record... */
+    mnow = kn_sock_now_ms();
+    mg = p->fw_c2_last_ms ? mnow - p->fw_c2_last_ms : 0ull;
+    if (mg > p->fw_c2_maxgap_ms) {
+        p->fw_c2_maxgap_ms    = mg;
+        p->fw_c2_maxgap_at_ms = p->fw_c2_last_ms;
+    }
+    p->fw_c2_last_ms = mnow;
+    /* ...and the rig's 1 Hz 0x0101 renderer heartbeat in particular. */
+    if (code == 0x0101u) {
+        uint64_t hg = p->fw_hb_last_ms ? mnow - p->fw_hb_last_ms : 0ull;
+        if (hg > p->fw_hb_maxgap_ms) {
+            p->fw_hb_maxgap_ms    = hg;
+            p->fw_hb_maxgap_at_ms = p->fw_hb_last_ms;
+        }
+        p->fw_hb_last_ms = mnow;
+    }
 }
 
 /* a compact "020e:input-version,0200:keepalive" rendering for evidence */
@@ -7692,6 +7743,22 @@ static int run_session(const char *token, const char *device_id,
                 c.now_ms = now_ms;
                 (void)kn_rx_video_poll(&v, now_ms, dec_frame_in_cb, &c);
                 dec_drain_events(&c);
+                /* Round N slice 4e (F30): the ctrl-plane watchdog. The
+                 * rig's renderer heartbeat (0x0101, 1 Hz) is the first
+                 * plane to die in the ctrl-first freeze family (runs
+                 * 35/39/40/40g/43a/43c), and no session in project
+                 * history ever recovered from >=8 s of heartbeat
+                 * silence with video already dark for >=2 s. Verdict
+                 * now lands ~5 s sooner (skip the second recovery
+                 * window) and names the shape: "ctrl_dead". A
+                 * recoverable stall keeps heartbeats flowing, so the
+                 * IDR/FEC recovery path is untouched by this. */
+                if (pump.fw_hb_last_ms && c.fw_last_video_ms &&
+                    now_ms - pump.fw_hb_last_ms >= 8000ull &&
+                    now_ms - c.fw_last_video_ms >= 2000ull) {
+                    stop_reason = "ctrl_dead";
+                    break;
+                }
                 /* Round XLI (D8): the poll path is the only source of
                  * RECOVERY_TIMEOUT / PROGRESS_RECOVERY events, so this
                  * is where the bounded recovery contract can terminate
@@ -8202,7 +8269,8 @@ static int run_session(const char *token, const char *device_id,
              * control message, all rel_ms). Run 33 needed four log
              * families plus a pushed .264 and an operator's eyes to
              * reconstruct exactly this; the next one prints it. */
-            if (strcmp(stop_reason, "recovery_exhausted") == 0) {
+            if (strcmp(stop_reason, "recovery_exhausted") == 0 ||
+                strcmp(stop_reason, "ctrl_dead") == 0) {
                 char ramp[512];
                 kn_bw_feedback bwf2;
                 kn_lctx fw;
@@ -8217,6 +8285,57 @@ static int run_session(const char *token, const char *device_id,
                               : 0ull;
                 if (kn_fw_ramp(&c.fw, ramp, sizeof ramp) < 0 || !ramp[0])
                     strcpy(ramp, "\"kbps\":[],\"idr\":[],\"gaps\":[]");
+                /* F31: the death_cascade line — message-exact silence
+                 * dating per plane, so the next archaeology never has
+                 * to hand-compute a cascade from 1 s beats again. */
+                {
+                    uint64_t wnow2 = kn_sock_now_ms();
+                    uint64_t lhb  = pump.fw_hb_last_ms >= t_start
+                                  ? pump.fw_hb_last_ms - t_start : 0ull;
+                    uint64_t lc2  = pump.fw_c2_last_ms >= t_start
+                                  ? pump.fw_c2_last_ms - t_start : 0ull;
+                    uint64_t rel_at = (uint64_t)0;
+                    (void)wnow2; (void)rel_at;
+                    printf("{\"mode\":\"session\","
+                           "\"event\":\"death_cascade\","
+                           "\"stop_reason\":\"%s\",\"at_rel_ms\":%llu,"
+                           "\"video_last_rel\":%llu,\"video_maxgap\":%llu,"
+                           "\"video_maxgap_at\":%llu,"
+                           "\"audio_last_rel\":%llu,\"audio_maxgap\":%llu,"
+                           "\"audio_maxgap_at\":%llu,"
+                           "\"ctrl_last_rel\":%llu,\"ctrl_maxgap\":%llu,"
+                           "\"ctrl_maxgap_at\":%llu,"
+                           "\"hb_last_rel\":%llu,\"hb_maxgap\":%llu,"
+                           "\"hb_maxgap_at\":%llu}\n",
+                           stop_reason,
+                           (unsigned long long)(wnow2 >= t_start
+                                                ? wnow2 - t_start : 0ull),
+                           (unsigned long long)lvid,
+                           (unsigned long long)c.fw_video_maxgap_ms,
+                           (unsigned long long)(c.fw_video_maxgap_at_ms
+                                                >= t_start
+                                                ? c.fw_video_maxgap_at_ms
+                                                  - t_start : 0ull),
+                           (unsigned long long)laud,
+                           (unsigned long long)pump.fw_a2_maxgap_ms,
+                           (unsigned long long)(pump.fw_a2_maxgap_at_ms
+                                                >= t_start
+                                                ? pump.fw_a2_maxgap_at_ms
+                                                  - t_start : 0ull),
+                           (unsigned long long)lc2,
+                           (unsigned long long)pump.fw_c2_maxgap_ms,
+                           (unsigned long long)(pump.fw_c2_maxgap_at_ms
+                                                >= t_start
+                                                ? pump.fw_c2_maxgap_at_ms
+                                                  - t_start : 0ull),
+                           (unsigned long long)lhb,
+                           (unsigned long long)pump.fw_hb_maxgap_ms,
+                           (unsigned long long)(pump.fw_hb_maxgap_at_ms
+                                                >= t_start
+                                                ? pump.fw_hb_maxgap_at_ms
+                                                  - t_start : 0ull));
+                    fflush(stdout);
+                }
                 memset(&bwf2, 0, sizeof bwf2);
                 (void)kn_rx_video_bw_report(&v, 0, &bwf2);
                 printf("{\"mode\":\"session\","                       "\"event\":\"freeze_witness\","                       "\"stop_reason\":\"%s\",\"rel_ms\":%llu,"                       "\"last_video_rel_ms\":%llu,"                       "\"last_audio_rel_ms\":%llu,"                       "\"last_ctrl_rel_ms\":%llu,\"ctrl_msgs\":%u,"                       "\"cping_sent\":%llu,\"cpong_matched\":%llu,"                       "\"gaps\":%llu,\"withheld\":%llu,"                       "\"qos_bwe_kbps\":%lld,\"qos_util_pct\":%lld,"                       "\"decay_warned\":%u,\"decay_rel_ms\":%llu,%s}\n",
@@ -8474,6 +8593,12 @@ static int run_session(const char *token, const char *device_id,
                         "not revive it — a dead rig draw; the recovery "
                         "block in the stdout summary and the transport "
                         "channel date the freeze";
+            } else if (strcmp(stop_reason, "ctrl_dead") == 0) {
+                fcode = "E_SESSION_CTRL_DEAD";
+                fwhy  = "the rig's 1 Hz renderer heartbeat (0x0101) went "
+                        "silent for >=8 s with video already dark >=2 s "
+                        "(F30 watchdog): a ctrl-first dead-rig draw; the "
+                        "death_cascade line dates every plane";
             } else if (strcmp(stop_reason, "server_termination") == 0) {
                 fcode = "E_SESSION_SERVER_TERMINATION";
                 fwhy  = "the server sent the 0x109 termination latch";

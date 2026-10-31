@@ -5085,3 +5085,236 @@ in-game 330 s, attack loop every 20 s from 420 s. Tonight's `fired:72`
 on both 82-s deaths = the script had just completed the Login click.
 F26a confirmed live: `attempts:1` on the clean release. Skeleton
 untouched at **113** (docs-only slice).
+
+## 46. Round N slice 4c — RUN 41, THE FALSIFICATION FLIGHT (playback OFF, night 23:11, rig **80.250.98.36** — a FOURTH block): **IT DIED. WITHOUT AUDIO PLAYBACK. 552 s OF MEDIA, THE FULL LOGIN → GAME → ATTACK-LOOP ARC, THEN THE SAME DECAY-AND-FREEZE DEATH RUN 35 DIED (ctrl silent 549.0 s, video zero 549–552 s, `decay_warned:1` at 548.6 s after a one-second 267 ms owd spike and a 421→153 d/s bitrate collapse). PER THE PRE-REGISTERED MATRIX (§45.3), AUDIO PLAYBACK IS FORMALLY EXONERATED AS THE DEATH CAUSE — AND THE UNIFIED PICTURE IS NOW BLOCK HEALTH, NOT PLAYBACK: THE TWO NO-PLAYBACK NIGHT/NOON FLIGHTS (.69.134 = 744 s, .98.36 = 552 s) ARE THE ONLY TWO THAT EVER DREW HEALTHY BLOCKS; EVERY PLAYBACK DRAW (9 of 9) HIT THE SICK BLOCKS (185.136.70.x, 80.84.17x) THAT DIE AT 10–92 s IN ANY CONFIGURATION. PLAYBACK HAS NEVER BEEN TESTED ON A HEALTHY BLOCK. THE OPERATOR'S CAPTURED LAST-10-SECOND MEDIA CLOSES THE VISUAL CASE: CRISP GAMEPLAY WITH AN IN-GAME PING OF 22 ms AT t≈542 s, A ~4 s QUALITY COLLAPSE, AND A FINAL HEAVILY-ARTIFACTED GAMEPLAY FRAME — NO DIALOG, NO TERMINATION SCREEN, THE RIG'S ENCODER SHRANK AND STOPPED MID-GAME WHILE THE GAME'S OWN NETCODE WAS HEALTHY.**
+
+### 46.1 The flight
+
+Command = run 39/40's minus `--session-audio-play` (audio still armed
+and file-recorded: `audio_arm … file:1`, `audio_close pages=2318
+packets=111145`, no `audio_play_begin` — the falsification flew
+exactly as designed). Single draw, rig **80.250.98.36** (new /24 —
+the pool's fourth), media 552.6 s, wall 562.8 s.
+
+The macro's whole arc completed: Play 11 s, Endfield launch ~25 s,
+e-mail 72 s / password 75 s / Login click 77 s, dialog click 220 s,
+in-game click 330 s, the 20-s attack loop from 420 s through 540 s —
+`fired:94/98` (the four 580/600-s attacks never got their turn),
+`afk_pulses:10`, `push_fail:0`. Telemetry stayed clean all the way:
+one 12-frame withheld stall at ~t=118 s recovered by 2 IDR/PLI
+(`gaps:1 withheld:12` for the WHOLE session), `fec_repaired:2`,
+decode **16 568/16 568, `frames_failed:0`**, presenter `fails:0
+max_ms:2.2`, `qos_bwe_kbps` 30.7 M util 9 %, owd 0.3–10 ms — and then
+the end: a single 267 ms owd spike at t=538, the bitrate collapsing
+421→330→244→215→187→170→156→153 over t=539–548, heartbeats' last
+record at **549.0 s**, video to 2 d/s at 549 and zero at 550–552,
+audio tail 554.9 s, `recovery_exhausted` 562.8 s. The shape is run
+35's late death to the letter (decay_warned → ctrl silent ~4–15 s →
+video zero), 192 s earlier.
+
+Teardown detail: `rtsp_teardown rc:-3` (the RTSP bye never completed
+on the dead stream — expected, logged) but **F26's CloudMatch DELETE
+released the seat anyway: `cm_release 200 gone:1 attempts:1`** — the
+guard earned its keep on its second live outing.
+
+### 46.2 The captured last 10 seconds (operator-supplied media)
+
+`video_trimmed.mp4` (1280×720, 30 fps, 10.0 s) and
+`audio_trimmed.opus` (48 kHz stereo, 10.0 s, ~260 kb/s) are the
+session's final decametre, muxed from the recorded streams:
+
+* **t≈+0.5 s (session ~543 s)**: crisp gameplay — the character in a
+  town plaza, quest HUD ("Daily: Missing Robots"), party bar, and the
+  GAME's own netcode ping **22 ms** in the corner: the game server
+  link was healthy four seconds before the encoder died.
+* **the decay**: frame quality degrades visibly second by second
+  (the 421→153 d/s collapse in pictures — exactly the operator's
+  "jakość siada, potem staje").
+* **final delivered frame (~552 s)**: still gameplay, heavily
+  artifacted. **No dialog, no "session ended" card, no error screen**
+  — the rig's encoder shrank its output and stopped mid-game.
+* **audio**: RMS fades smoothly −38 → −52 dB over the window — game
+  sound alive and thinning to the end, never a hard cut, never
+  silence-before-death. (The fade is the GAME's audio thinning with
+  the collapsing scene, not our ring: `decode_fail:0`, `starved`
+  clean.)
+
+This is the first death observed in the GAMEPLAY phase (all earlier
+freezes died in launcher/login) and the first with the game's own
+ping visible: **the game was fine; the rig's streaming stack died
+around it.**
+
+### 46.3 The unified picture, and the one test left
+
+Block-health ledger after run 41:
+
+| block | draws | fate |
+|---|---|---|
+| 185.136.70.x (.139×2, .137, .135, .136) | 5 | fast freeze 12–82 s |
+| 80.84.17x (.154, .153, .144) | 3 | fast freeze 10–37 s |
+| 185.136.69.134 | 1 | 744 s, decay-freeze (run 35, noon, no playback) |
+| 80.250.98.36 | 1 | 552 s, decay-freeze (run 41, night, no playback) |
+
+Playback vs no-playback is now revealed as a CONFOUND of block
+health: every playback draw happened to hit a sick block; the two
+no-playback draws are the only two healthy-block flights in project
+history. The death mechanism itself (decay → ctrl silence → video
+zero) is identical in both classes and occurs WITHOUT playback —
+which is what run 41 was built to prove. What playback has never
+been tested against is a HEALTHY block. **Run 42 = playback back ON,
+`--lottery=4`**: any draw that passes ~120 s of media is a
+healthy-block draw (sick blocks have NEVER passed 92 s), and its fate
+at the 9–12-minute wall is the last open question on the client side.
+If such a draw also dies the decay-freeze death, the long-haul wall
+is universal to our client and the browser control decides whether it
+is universal to GFN sessions; if it keeps living, the pool's healthy
+rags simply outlast our 900-s timer and the project's remaining
+mystery dissolves into "the pool is sick at peak".
+
+Skeleton untouched at **113**; docs-only slice (RTSP §46, START-HERE
+§20, INTEGRATION slice 4c); gates unchanged (all green at slice 4a).
+
+## 47. Round N slice 4d — RUN 42 (playback ON, `--lottery=4`): **THE PRODUCT WORKED. THREE DEAD DRAWS AUTO-RE-DRAWN, AND THE FOURTH — ON THE VERY IP THAT DIED AT 552 s IN RUN 41 (80.250.98.36) — RAN THE FULL 900 s: `stop_reason:"time"`, aus 27 000 = 30 fps × 900 s EXACTLY, 27 000/27 000 DECODED, `frames_failed:0`, gaps 0, withheld 0, ONE keyframe, IDR/PLI NEVER NEEDED, `datagrams==authenticated==332 744`, PRESENTER fails:0 max 2.7 ms, AND FIFTEEN MINUTES OF LIVE AUDIO PLAYBACK WITH `starved:0 prerolls:1 decode_fail:0 dropped:0` — F25 PROVEN AT SESSION SCALE. THE OPERATOR-TRIMMED LAST-10-SECOND FILM ENDS ON CRISP GAMEPLAY WITH AN IN-GAME PING OF 1 ms: THE SESSION WAS HEALTHY WHEN OUR TIMER STOPPED IT. WITH THIS DRAW THE LAST THREE CONFOUNDS DIE TOGETHER: PLAYBACK (the keeper HAD it), BLOCK (same /24 gave a 20-s death at .37 four draws earlier; same IP died at 552 s in run 41), AND TIME-OF-DAY (the keeper flew 01:20–01:35 LOCAL ON A FRIDAY NIGHT). THE POOL'S DEATHS ARE A PER-SESSION COIN FLIP — RIG STATE AT DRAW TIME — UNCORRELATED WITH EVERYTHING WE CONTROL.**
+
+### 47.1 The four draws (23:53:27Z → 00:35:00Z, queues 8–28)
+
+| # | rig | wall | video death | shape | macro |
+|---|---|---|---|---|---|
+| 1 | 80.84.174.146 | 209.3 s | 199.1 s (ctrl 188.5) | abrupt freeze, decay 0, qd 0.5 ms | fired 72 |
+| 2 | 80.250.98.37 | 30.3 s | 20.0 s (ctrl 8.9) | early freeze (run-36 shape) | fired 3 |
+| 3 | 77.111.249.145 | 265.3 s | 255.1 s (ctrl 249.0) | decay→freeze @252.2 s | fired 75 |
+| 4 | **80.250.98.36** | **900.0 s** | — `stop:"time"` | **KEEPER** | **fired 98/98** |
+
+Every death kept the clean-path signature (gaps 0/withheld 0 on d1–d3
+too; qd 0.4–4.5 ms) and the exact client arithmetic; d1–d3 died in the
+now-familiar two shapes (abrupt; decay→freeze) at three different
+session ages on three different blocks — including the 80.250.98.x
+/24 that produced the keeper one draw after its .37 sibling died at
+20 s, and including the very .36 that run 41 lost at 552 s without
+playback. **Block health, playback, hour-of-day: all three confounds
+are now dead.** What remains is per-session rig state — something the
+pool hands out with the seat.
+
+### 47.2 The keeper, subsystem by subsystem
+
+* **Video**: 27 000 AUs = 30.000 fps for 900.0 s, one keyframe, zero
+  IDR/PLI ever needed, `fec_repaired:2`, `lossy_frames:1`,
+  `queue_delay_us` 10 069 / jitter 452 µs at util 13 % — the path
+  carried ~32.5 Mbps of estimates with room to spare.
+* **Audio (F21+F25 at scale)**: 180 144 packets, `seq_loss:2`
+  (0.001 %, RED-covered), and the playback engine's first
+  quarter-hour: **`starved:0`** (the waterline never had to re-prime
+  after the initial `prerolls:1`), `decode_fail:0`, `dropped:0`,
+  `queue_ms:89`, 88 686 device events. The mid-session RMS (t=600 s)
+  sits at a steady −41.8 dB: game audio, alive the whole way.
+* **Input**: the whole script including every 20-s attack
+  (`fired:98/98`, `push_fail:0`, afk 15).
+* **Presenter**: 27 000 frames, fails 0, max 2.7 ms.
+* **Teardown**: first `status:400` on the RTSP bye in project history
+  (`status_text:"OK"`, empty body — the rig had already let go);
+  **F26's CloudMatch DELETE released the seat anyway: `200 gone:1
+  attempts:1`** — third live save.
+* **The film**: the full 308 MB `.264` stayed on the rig (too big to
+  push); the operator's 10-s mp4 ends on crisp gameplay, in-game ping
+  **1 ms** — the session was not dying, it was *stopped*, by our own
+  `--session-seconds=900`.
+
+### 47.3 What is left, and the next flight
+
+The client is now proven end to end at session scale: record, decode,
+present, play, type, survive, release. The deaths that remain are the
+pool's per-session coin flip (two shapes, any age, any block, any
+hour) — NVIDIA-side rig state, beyond any client instrument we have
+or could build (F27's STUN probe stays PARKED: four runs of
+provably-clean paths have nothing left for it to discriminate).
+
+The one open endurance question: the `SESSION_LENGTH_TIMER` grants
+**3 600 000 ms** and the old ≈600-s cut only ever hit INPUT-IDLE
+sessions — the macro keeps ours armed. **Run 43 = the hour flight:
+the run-42 command with `--session-seconds=3600`** (lottery kept: bad
+draws re-draw themselves, the keeper stops the lottery). If a healthy
+rig comes up, this is the first hour-long pure-C GFN session in
+history; if the pool cuts a free-tier hour early, the cut will arrive
+with paperwork we can read. Skeleton **113** (docs-only slice); gates
+green (slice-4a battery); rig build unchanged (stamp N).
+
+## 48. Round N slice 4e — RUN 43 READ (three single-draw hour attempts, ALL dead at 11 s / 331 s / 433 s on clean paths) + THE OPENNOW AUDIT + **F30 (ctrl-plane watchdog: a named, ~5 s sooner band-death verdict) + F31 (`death_cascade`: the new log kind — message-exact silence dating per plane, one line per death)**
+
+### 48.1 Run 43: the operator's skepticism was the correct reading
+
+Three folders (a/b/c) = three MANUAL single-draw flights of the hour
+command (no `--lottery`: `lottery_arm` absent, `draw:0`), each paying
+the full queue price for one coin flip: **a** (80.250.98.40) died at
+video 11.2 s (ctrl-first, hb last at 6.2 s); **b**
+(77.111.249.145 — the same IP as run 42's draw 3) at 331.2 s after a
+textbook 9 s decay (446→152 d/s) starting at 322 s, `decay_warned:1`
+@327.3 s, ctrl outliving video by 7 s this time; **c**
+(80.250.98.39) at 433.2 s after the same decay shape from 427 s
+(decay @429.5 s). All three: gaps 0, withheld 0, owd <10 ms,
+`decode_fail:0`, exact arithmetic — the pool's per-session coin flip
+in both of its shapes, at 02:30–03:00 local, queues small. The
+operator's "pulsing" on screen matches the decay window itself: 8–10 s
+of the encoder pumping quality down frame by frame (visible as a
+pulse of worsening quality) before the flatline — no
+gap/withheld oscillation exists in any of the three timelines.
+
+The ledger now: 14 draws since run 39, deaths at 10–552 s on eight
+different rigs from five /24s, ONE 900-s keeper (run 42 d4), and the
+keeper's own IP had died at 552 s one run earlier. **One keeper in
+four commands is not a working product; it is a 1-in-4 lottery ticket
+— the operator's read is the honest one.** What run 42 DID prove is
+that the lottery machinery fishes a keeper inside ONE command
+(4 draws, 3 auto-re-draws); run 43 spent three queue cycles on three
+manual single draws instead. The next flight must be one command:
+`--lottery=5 --session-seconds=3600 --lottery-gap=60
+--lottery-stop-on-keeper=1` — five coin flips per queue wait, the
+first healthy rig gets the hour.
+
+### 48.2 The OpenNOW audit: nothing missing that could kill a rig
+
+A line-by-line walk of the reference's liveness surface against ours:
+control keepalive **0x0200 @3 s** (byte-exact golden, we send it),
+SRTCP RR @1 s, QoS @50 ms, NACK/IDR retry intervals, UDP ping v6
+@100 ms post-connect, WSS Ping(seq BE) @2 s with pong matching and
+5 s expiry (our R3-D worker is a faithful port; the live GFN server
+pongs nobody — keeper included), cursor-plane handling, the
+0x010a/0x0110/0x0111 inventory decoded identically (Unhandled in the
+reference too). The reference's extras we do not ship: (i) the
+**0x109 termination → `session_resumable(reason, extended)` → resume**
+path — moot for this death family, which arrives with NO termination
+message at all (silent media stop; our sctl latch would catch a 0x109
+if one ever came); (ii) **0x112 FramePacingFeedbackMode** parsing —
+the code never appeared in any of our fourteen draws; (iii)
+`ControlKeepaliveHealth` bookkeeping — accounting only. **Conclusion:
+the wire we speak is the reference's wire; the deaths are not a
+missing-message bug on our side.** The remaining differences
+(WebRTC/mjolnir vs native bundle, client-type attestation) are
+server-policy territory, unreadable from here.
+
+### 48.3 F30 + F31: the watchdog and the new log kind
+
+**F31 `death_cascade`** (the log kind the operator asked for): every
+ctrl record, every 0x0101 heartbeat and every audio packet now dates
+itself on per-plane volatile latches (message-exact, unlike F22's
+30 s-throttled ctrl beat), tracking last-activity AND the longest
+silence with its start time per plane. On every non-natural stop the
+session prints ONE line: `death_cascade` with
+`video/audio/ctrl/hb × (last_rel, maxgap, maxgap_at)` — the cascade
+order and the exact second each plane went dark, no archaeology
+required. **F30**: in the media loop, heartbeat silence ≥8 s WITH
+video dark ≥2 s ends the draw immediately as `stop_reason:"ctrl_dead"`
+(rc 1 → the lottery re-draws), ~5 s sooner than the second recovery
+window would; no session in history ever recovered from that
+combination, and a recoverable stall keeps heartbeats flowing so the
+IDR/FEC path is untouched. `freeze_witness` now prints for
+`ctrl_dead` too, and the knlog label is `E_SESSION_CTRL_DEAD`.
+Skeleton untouched (**113**, verified against run-40, run-42-d4 and
+run-43-c live summaries); e2e **48/48 deletes:1**; T10 dry **79**;
+T13 **63**; ctest **27/27 ×2**; cross ×2 `-Werror`; knvstd clean
+-O0/-O2/-O3 under `-Wformat-truncation=2`.
+
+Run 44 protocol (one command, hour goal): the run-42 command with
+`--session-seconds=3600` and `--lottery=5`. Read the new lines first:
+`death_cascade` per dead draw tells us ctrl-first or media-first
+without hand-computation; a draw that passes ~120 s is a healthy-rig
+draw and its fate at the hour wall is the whole question.
