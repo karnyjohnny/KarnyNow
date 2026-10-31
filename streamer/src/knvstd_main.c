@@ -8658,6 +8658,22 @@ static int run_session(const char *token, const char *device_id,
             if (doff >= sizeof drops) doff = sizeof drops - 1;
             drops[doff] = '\0';
             fw_out_dump(&fb, t_start, "ctrl_out_total");
+#ifdef KN_HAVE_D3D
+            /* F33b (run 48): the instant the session halts - dead, menu, or
+             * any other reason - hand the mouse and keyboard back BEFORE
+             * the (sub-second but nonzero) teardown runs. In run 48 both
+             * flights died ctrl-first at ~2 s; the operator stared at a
+             * frozen frame with our captured cursor (hidden, clipped) for
+             * the ~12 s media drain and could not alt-tab out cleanly:
+             * "zablokowalo mi myszke". The clip survives window death
+             * otherwise (per-thread), so kn_d3d_vp_close now clears it
+             * too - belt and braces. */
+            if (c.vp && g_sess_interactive) {
+                (void)kn_d3d_vp_set_interactive(c.vp, 0);
+                printf("{\"event\":\"capture_released\",\"reason\":\"%s\"}\n",
+                       stop_reason);
+            }
+#endif
             printf("{\"mode\":\"session\",\"summary\":{\"stop_reason\":\"%s\","
                    "\"session_id\":\"%.64s\",\"datagrams\":%llu,"
                    "\"authenticated\":%llu,\"aus\":%llu,\"frames\":%llu,"

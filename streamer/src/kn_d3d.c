@@ -1286,8 +1286,13 @@ static LRESULT CALLBACK kd_vp_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         kd_vp_capture_apply(vp);
         return 0;
     case WM_SETCURSOR:
-        if (vp->focused && !vp->paused) { SetCursor(NULL); return TRUE; }
-        break;                            /* paused: class arrow */
+        /* F33b: interactive too — after capture_released (loop exit) the
+         * window may still hold focus for the teardown moment; without
+         * this the cursor hides itself again right after we freed it. */
+        if (vp->interactive && vp->focused && !vp->paused) {
+            SetCursor(NULL); return TRUE;
+        }
+        break;                            /* released/paused: class arrow */
     case WM_SIZE: {
         RECT cr;
         if (GetClientRect(h, &cr)) {
@@ -1797,6 +1802,7 @@ int kn_d3d_vp_set_interactive(kn_d3d_vp *vp, int on)
     } else {
         vp->paused = 0;
         ClipCursor(NULL);
+        SetCursor(LoadCursor(NULL, IDC_ARROW)); /* F33b: visible again now */
     }
     return KN_D3D_OK;
 }
@@ -1846,6 +1852,10 @@ void kn_d3d_vp_close(kn_d3d_vp *vp)
         if (vp->d3d) IDirect3D9_Release(vp->d3d);
     }
     /* else: D3D objects leaked ON PURPOSE (faulted driver — D7). */
+    /* F33b: the clip rect is per-thread and SURVIVES DestroyWindow —
+     * close must free the mouse explicitly or the operator is left with
+     * a locked cursor after the window is gone (run 48 complaint). */
+    ClipCursor(NULL);
     if (vp->hwnd) DestroyWindow(vp->hwnd);
     free(vp);
 }

@@ -239,3 +239,11 @@ Run 47 proved the F33 wndproc could lose the keyboard while the mouse kept flowi
 3. **The grab**: `kn_d3d_vp_set_interactive(vp, 1)` calls SetForegroundWindow+SetFocus and seeds `focused` from `GetFocus()==hwnd`; `vp_open` seeds the flag the same way right after GWLP_USERDATA is set (covers creation-time focus).
 4. **Ctrl+G anti-repeat**: the toggle ignores auto-repeat downs (lParam bit 30) — run 47 logged 3 toggles in 0.75 s from one held press.
 5. **Instrumentation**: `kn_d3d_capture_stats` (queued per kind, dropped_nofocus, dropped_paused, focus_flaps) readable via `kn_d3d_vp_capture_stats`; the engine emits a 10 s `input_capture_stats` event line and a final `input_capture_end` (event lines — summary skeleton untouched). `kn_d3d_vp_paused(vp)` exposes the menu state.
+
+## F33b (round N slice 4l): release the mouse AT the verdict — the run-48 UX fix
+Run 48 flew F33a perfectly (capture armed, focus grabbed, zero drops while capturing, auto-pause on focus loss and Ctrl+G menu both executed live) but both sessions were condemned server-side at ~2 s; the operator then sat through the ~12 s frozen-frame drain with the captured cursor hidden and clipped — "zablokowało mi myszkę". Four fixes:
+1. `knvstd_main.c`: right after the media loop exits (before the summary printf, right after `ctrl_out_total`), interactive sessions call `kn_d3d_vp_set_interactive(vp, 0)` and print `{"event":"capture_released","reason":"<stop_reason>"}` — keyboard and mouse belong to the operator again the instant the session halts, whatever the reason (ctrl_dead, menu_exit, time, ...).
+2. `kn_d3d.c set_interactive(off)`: `SetCursor(LoadCursor(NULL, IDC_ARROW))` added next to `ClipCursor(NULL)` — the arrow is visible immediately, not at the next WM_SETCURSOR.
+3. `kn_d3d.c WM_SETCURSOR`: the hidden-cursor branch now also requires `vp->interactive`; a released-but-focused window no longer re-hides the cursor during teardown.
+4. `kn_d3d.c vp_close`: `ClipCursor(NULL)` before `DestroyWindow` — the clip rect is per-thread and survives window destruction; close can no longer strand the mouse.
+Gates: full host canon green (native 0 warnings incl. test_knd3d ASan/UBSan, ctest 28/28 x2, T10 dry ALL PASS 79, T13 63/63, e2e 48/48, skeleton x6, cross x2 -Werror, -O0/2/3 clean on both files).
