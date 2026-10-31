@@ -195,6 +195,72 @@ int kn_d3d_vp_overlay(kn_d3d_vp *vp);           /* current on/off */
 
 void kn_d3d_vp_close(kn_d3d_vp *vp);            /* NULL-safe */
 
+/* ================================================================
+ * Round N slice 4j (F33): INTERACTIVE capture. Armed with
+ * kn_d3d_vp_set_interactive(vp, 1) (the engine's --session-interactive):
+ * while the window is FOCUSED and not menu-paused, every key, mouse
+ * move, button and wheel message is translated into a kn_d3d_input_ev
+ * on a 512-slot ring the owner thread drains with kn_d3d_vp_pop_input
+ * (single-threaded contract: wndproc runs inside kn_d3d_vp_pump on the
+ * owner thread, so the ring needs no lock). Ctrl+G toggles the pause:
+ * paused = cursor freed + centered menu drawn into the frame (EXIT
+ * STREAM / RESUME CAPTURE / STATS OVERLAY). EXIT STREAM sets a latch the
+ * engine consumes with kn_d3d_vp_take_menu_exit (stop_reason
+ * "menu_exit"). While capturing, ESC belongs to the game (the legacy
+ * "ESC closes" behavior stays for non-interactive presenters); WM_CLOSE
+ * (alt+F4) still closes in both modes. The window is created WITHOUT
+ * WS_EX_TOPMOST (operator requirement: alt+tab must work).
+ * ================================================================= */
+enum {
+    KN_D3D_IEV_KEY   = 1,   /* vk/mods/down — OS auto-repeat forwarded  */
+    KN_D3D_IEV_MOVE  = 2,   /* x/y in client px, win_w/win_h for norms  */
+    KN_D3D_IEV_BTN   = 3,   /* vk = button id, down = press/release     */
+    KN_D3D_IEV_WHEEL = 4    /* wheel = WM_MOUSEWHEEL delta (±120 steps) */
+};
+/* mods bits EQUAL kn_input.h KN_INPUT_MOD_* by design (forwarded as-is);
+ * button ids EQUAL KN_INPUT_BTN_* (left 1, middle 2, right 3, x1 4,
+ * x2 5) so the engine maps them 1:1 onto the wire builders. */
+enum {
+    KN_D3D_MOD_SHIFT = 0x01u,
+    KN_D3D_MOD_CTRL  = 0x02u,
+    KN_D3D_MOD_ALT   = 0x04u,
+    KN_D3D_MOD_META  = 0x08u
+};
+typedef struct kn_d3d_input_ev {
+    int kind;               /* KN_D3D_IEV_*                           */
+    unsigned vk;            /* KEY: virtual key; BTN: button id       */
+    unsigned mods;          /* KEY: KN_D3D_MOD_* bits                 */
+    int down;               /* KEY/BTN: 1 press, 0 release            */
+    int x, y;               /* MOVE/BTN: client coords (may be < 0)   */
+    int wheel;              /* WHEEL: signed delta                    */
+    unsigned win_w, win_h;  /* client rect at event time (normalize)  */
+} kn_d3d_input_ev;
+
+/* Neutral (all platforms, unit-tested): the Ctrl+G pause-menu geometry
+ * and the capture-ring selftest seam. kn_d3d_menu_layout returns the
+ * centered box + the three full-inner-width item rows in VIDEO space
+ * (metrics match kn_d3d_overlay_text_nv12: glyph 5*scale wide, `scale`
+ * between glyphs, even origins); kn_d3d_menu_hit maps a point to an
+ * item (or -1); kn_d3d_menu_label yields the exact per-state label;
+ * kn_d3d_menu_draw_nv12 blits the whole menu (dark box, white glyphs,
+ * bright band + dark glyphs on the selected row). */
+typedef struct { int x0, y0, x1, y1; } kn_d3d_rect;
+int kn_d3d_menu_layout(unsigned win_w, unsigned win_h, unsigned scale,
+                       kn_d3d_rect *box, kn_d3d_rect *items /*[3]*/);
+int kn_d3d_menu_hit(const kn_d3d_rect *items /*[3]*/, int x, int y);
+const char *kn_d3d_menu_label(unsigned idx, int overlay_on);
+int kn_d3d_menu_draw_nv12(unsigned char *y_plane, unsigned y_stride,
+                          unsigned char *uv_plane, unsigned uv_stride,
+                          unsigned buf_w, unsigned buf_h,
+                          unsigned scale, int sel, int overlay_on);
+int kn_d3d_iq_selftest(void);                   /* 0 = pass */
+
+int kn_d3d_vp_set_interactive(kn_d3d_vp *vp, int on);
+int kn_d3d_vp_capturing(kn_d3d_vp *vp);  /* focused && interactive && !paused */
+int kn_d3d_vp_pop_input(kn_d3d_vp *vp, kn_d3d_input_ev *out); /* 1 = event */
+int kn_d3d_vp_take_menu_exit(kn_d3d_vp *vp);  /* consume-once exit latch */
+unsigned long long kn_d3d_vp_input_overflows(kn_d3d_vp *vp);
+
 /* Neutral (all platforms): draw `text` into an NV12 buffer as a dark box +
  * white 5x7 bitmap glyphs (D20 FPS overlay). `scale` MUST be even and >= 2
  * (each font pixel maps to a scale x scale Y block and, at even scale,

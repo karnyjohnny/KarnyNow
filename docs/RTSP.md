@@ -5454,3 +5454,37 @@ native build 0 warnings · ctest 27/27 mb + sch · T10 dry ALL PASS 79 · T13 63
 
 ### 52.4 Protocol change: short diagnostic sessions
 Per the operator's call (correct): stop spending nights on hour-long lottery draws of an unproven client. The death ledger says 15 of 21 recorded deaths landed under 300 s and every recorded death class except the 888/1070 s pair fits inside 20 minutes. The diagnostic unit becomes `--session-seconds=1200 --lottery=4 --lottery-gap=60` — worst realistic case ~30 minutes per command because deaths end draws early — and the hour macro stays the final acceptance gate for AFTER the mechanism is understood. Keepers at 1200 s still stop the lottery (stop-on-keeper=1) and still count as healthy-host evidence.
+
+## 53. Run 46 (2026-10-31, build Oct 31 2026 17:06:17 round N): F32's first live verdict — THE SENDER IS PRISTINE TO DEATH; kkkkk SOLVED (symptom, not bug); the 82-84 s class lands 0.3 s after the JustLaunched click; same IP hosted a keeper AND a 1072 s death
+
+Two short flights (46a: 4 draws; 46b: 2 draws, operator Ctrl+C before draw 3). T10 ALL PASS on the rig for this stamp. Stops: 46a 84.1 / 1084.9 / 135.7 / 1174.8 s all `ctrl_dead`; 46b 84.0 s `ctrl_dead` + **KEEPER #2: 1020.0 s, stop `time`, rc=0** (operator-stopped, healthy).
+
+### 53.1 F32 live verdict: the outgoing control plane never stumbled — in ANY draw, including the dying ones
+- Keeper (46b-d2): rr 1019 msgs over 1020 s, max gap 1020 ms (at 147 s); ack 30571, max gap 542 ms (at 282 s). Zero rr/ka/ping gap warns.
+- All five deaths: zero rr/ka/ping gap warns before ctrl death; ack/qos warns are benign ~500 ms scheduler blips; the dying draws' late ack warns are media-gated and POST ctrl-death.
+- Outbox/feedback sweep, all 6 draws: drops=0, retained=0, ack==frames.
+**Conclusion: the server killed a client whose send side was demonstrably alive and on-cadence until the moment of death.** Sender-stall theories: CLOSED. Remaining trigger space: identity/attestation bytes, or server-side judgment of the input pattern/payloads.
+
+### 53.2 kkkkk SOLVED — it is the death, not a bug
+46a-d1 (and 46b-d1, same shape): the screen stuck on the first email char, repeating `kkkkk`. Input engine summaries pristine: sent_key=64 exact (30 chars x down/up + F13 pulse pair), push_fail=0, build_fail=0, drops=0; keys route to sid 0 RELIABLE (`kn_input_route_sid`, byte-parity with OpenNOW nvst_input.rs:969-972 — the PR-SCTP loss theory is DEAD).
+The cascade dates tell the story: `ctrl_last_rel` = **71.363 s (a-d1) / 71.344 s (b-d1)** — the rig's 1 Hz renderer heartbeat (0x0101) stopped BEFORE the macro's email type began at 72.0 s. The 'k' down (first typed char) reached a session already condemned server-side; the 'k' up and the remaining 29 chars landed in teardown. The VM kept rendering: held 'k' → OS auto-repeat → `kkkkk` frames until video drained at 82.06/82.01 s (cascade constant 10.7 s). **No input-side fix is warranted.**
+
+### 53.3 The trigger moved: deaths land 0.3-2.3 s AFTER a button click
+login_1h.txt schedule: Play click 11.0/11.5; JustLaunched click 70.5 down / 71.0 up; email type 72.0; pass 75.0; Login click 76.5/77.0; dialog 221.0; center 332.5; attacks every 20 s from 420.0 (0.5 s holds).
+- The 82-84 s class (now 5 members: run 40, 40g, 44d2 ctrl 72.34, 46a-d1 ctrl 71.36, 46b-d1 ctrl 71.34): ctrl silence within **0.34-1.34 s after the JustLaunched click's button-up at 71.0 s** — on at least three different edge IPs (80.84.172.147, 77.111.250.38, and run 44's), matching within 20 ms across hosts. Not a fixed session timer: it is bound to the click.
+- run 43a's 11.2 s death sits 0.2 s after the Play click down (11.0 s) — same signature, earliest possible click.
+- Late deaths cluster near attack clicks: 43b/43c ctrl ~421.6/423.2 (first attack 420.0); 44d1 1059.7 (grid 1060-0.3); 46a-d4 1162.6 (1160+2.6); 45d ~876.5. Exceptions exist: 46a-d2 1072.1 (mid-interval), 46a-d3 123.3 (46 s after the Login click).
+- Survivors passed the same clicks: keeper b-d2 took 73 buttons + 94 keys to 1020 s; a-d2 passed the 71.0 click, the full login, and ~53 attack clicks before dying at 1072.1.
+
+### 53.4 Per-host determinism is DEAD — the judgment is per-SESSION
+Run-46 peer map: a-d1 80.84.172.147 (84 s death) · a-d2 **80.250.97.36** (1085 s death) · a-d3 80.84.170.153 (136 s death) · a-d4 80.250.97.39 (1175 s death) · b-d1 77.111.250.38 (84 s death) · b-d2 **80.250.97.36** (KEEPER 1020 s). **The same edge IP hosted the keeper and a death.** The "monitored pool host" model must become a per-session judgment: each session is (sometimes) marked — plausibly at handshake/attestation — and executed at a later input event, most sharply the first clicks.
+
+### 53.5 Updated kill model (v3)
+1. A minority of sessions get marked server-side early (identity/attestation is the leading suspect; the send side is proven clean).
+2. Marked sessions are executed with 0.3-2.3 s latency after an input event (button clicks dominate the evidence; the 71.3 s pair is exact across hosts).
+3. Execution = the rig's 1 Hz renderer heartbeat (0x0101) stops; rr/ack/media continue ~10.2-12 s (the cascade constant) while the VM tears down; our F30 watchdog stops the draw at ctrl+12 s.
+4. Unmarked sessions survive indefinitely (2 keepers: 900 s, 1020 s).
+**F33 (interactive mode) is now also the decisive experiment**: human-timed, human-patterned input through the identical wire path. If operator-flown sessions repeatedly pass the 82-84 s window, the mark is behavior/timing-derived; if they die identically, it is handshake/identity bytes.
+
+### 53.6 Ledger (runs 39-46, 2 keepers / 21 deaths)
+39: 24.7/26.5 · 40: 82.18 · 40g: 82.09/10.24 · 41: 552.6 · 42: 199.1/20.0/255.1/**KEEPER 900** · 43: 11.2/331.2/433.2 · 44: 1070.0/82.6/431.7/99.9/62.1 · 45: 288.1/39.7/10.8/888.7/100.2 · 46a: 84.1/1084.9/135.7/1174.8 · 46b: 84.0/**KEEPER 1020**.

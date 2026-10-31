@@ -80,6 +80,10 @@ $CC $CFLAGS streamer/src/kn_input.c streamer/tests/test_kninput.c \
 # round L (F16): the per-draw capture-naming rule (pure string code)
 $CC $CFLAGS streamer/src/kn_drawpath.c streamer/tests/test_kndrawpath.c \
     -o build/test_kndrawpath
+# round N slice 4j (F33): the neutral presenter machinery (menu geometry,
+# glyph coverage, capture-ring seam) — pure integer math, no GPU, no knlog
+$CC $CFLAGS streamer/src/kn_d3d.c streamer/tests/test_knd3d.c \
+    -o build/test_knd3d
 # round M (F22): the freeze-witness ring (pure integer math, no I/O)
 $CC $CFLAGS streamer/src/kn_freeze.c streamer/tests/test_knfreeze.c \
     -o build/test_knfreeze
@@ -187,6 +191,10 @@ echo "== run test_kndrawpath (the F16 per-draw naming rule: pure string code) ==
 rc25=0
 ./build/test_kndrawpath || rc25=$?
 
+echo "== run test_knd3d (the F33 neutral menu/ring machinery) =="
+rc27=0
+./build/test_knd3d || rc27=$?
+
 echo "== run test_knfreeze (the F22 freeze-witness ring: decay/rearm/ramp) =="
 rc26=0
 ./build/test_knfreeze || rc26=$?
@@ -242,10 +250,11 @@ if [ $rc1 -eq 0 ] && [ $rc2 -eq 0 ] && [ $rc3 -eq 0 ] && [ $rc4 -eq 0 ] && \
    [ $rc15 -eq 0 ] && [ $rc16 -eq 0 ] && [ $rc17 -eq 0 ] && [ $rc18 -eq 0 ] && \
    [ $rc19 -eq 0 ] && [ $rc20 -eq 0 ] && [ $rc21 -eq 0 ] && \
    [ $rc22 -eq 0 ] && [ $rc23 -eq 0 ] && [ $rc24 -eq 0 ] && \
-   [ $rc25 -eq 0 ] && [ $rc26 -eq 0 ] && [ $rc_opus -eq 0 ]; then
+   [ $rc25 -eq 0 ] && [ $rc26 -eq 0 ] && [ $rc27 -eq 0 ] && \
+   [ $rc_opus -eq 0 ]; then
     echo "NATIVE TESTS PASS"
 else
-    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19 knsctp=$rc20 kninput=$rc21 knbw=$rc22 knogg=$rc23 knarx=$rc24 kndrawpath=$rc25 knfreeze=$rc26 knopus=$rc_opus)"
+    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19 knsctp=$rc20 kninput=$rc21 knbw=$rc22 knogg=$rc23 knarx=$rc24 kndrawpath=$rc25 knfreeze=$rc26 knd3d=$rc27 knopus=$rc_opus)"
     exit 1
 fi
 

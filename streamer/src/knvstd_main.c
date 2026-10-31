@@ -200,7 +200,19 @@ static void usage(void)
            "                            presenter, NV12 -> StretchRect ->\n"
            "                            backbuffer). ESC or WM_CLOSE closes\n"
            "                            the window and the session continues\n"
-           "                            headless. Default OFF. Win32 only.\n"
+           "                            headless. Default OFF. Win32 only.\n");
+    printf(
+           "       [--session-interactive]  round N slice 4j (F33): PLAY.\n"
+           "                            Implies --session-present and\n"
+           "                            --session-audio-play. The FOCUSED\n"
+           "                            window captures ALL keyboard+mouse\n"
+           "                            to GFN (ESC included — it belongs to\n"
+           "                            the game); Ctrl+G pauses capture and\n"
+           "                            draws the centered menu (exit stream\n"
+           "                            / resume capture / stats overlay).\n"
+           "                            Defaults the anti-AFK pulse to 60 s.\n"
+           "                            Refuses --input-script/--input-live\n"
+           "                            (one input owner). Win32 only.\n"
            "       [--session-audio-play] round N slice 3 (F21): PLAY the\n"
            "                            bundle audio LIVE through WASAPI\n"
            "                            (arx Opus -> kn_opus decode -> feed\n"
@@ -1423,6 +1435,7 @@ static int run_replay(const char *cap_path, const char *au_dir,
  * the writer must preserve evidence through an abnormal end). */
 static volatile sig_atomic_t g_knv_stop;
 static int  g_sess_present = 0;   /* round N (F20): --session-present */
+static int  g_sess_interactive = 0; /* round N slice 4j (F33): --session-interactive */
 static int  g_sess_audio_play = 0; /* round N slice 3 (F21): --session-audio-play */
 
 #ifdef _WIN32
@@ -2395,7 +2408,11 @@ static int dec_frame_out_cb(const uint8_t *data, int w, int h, int sy,
         if (!c->vp && !kn_d3d_permanently_degraded()) {
             if (kn_d3d_available()) {
                 c->vp = kn_d3d_vp_open((unsigned)w, (unsigned)h,
-                                       "KarnyNow — GFN live (ESC closes)");
+                                       g_sess_interactive
+                                       ? "KarnyNow — GFN live (Ctrl+G menu)"
+                                       : "KarnyNow — GFN live (ESC closes)");
+                if (c->vp && g_sess_interactive)
+                    (void)kn_d3d_vp_set_interactive(c->vp, 1);
                 printf("{\"mode\":\"session\","                       "\"event\":\"video_present_begin\","                       "\"ok\":%d,\"w\":%d,\"h\":%d}\n",
                        c->vp ? 1 : 0, w, h);
                 fflush(stdout);
@@ -3902,6 +3919,8 @@ typedef struct sess_input {
     unsigned long long lines, comments, blanks;
     /* live console */
     int      live, raw_on;
+    /* F33: the presenter window owns keyboard+mouse (source "capture") */
+    int      capture;
     /* anti-AFK */
     unsigned afk_ms;
     uint64_t next_afk_ms;
@@ -3913,7 +3932,7 @@ typedef struct sess_input {
                        sent_wheel, gated, build_fail, push_fail,
                        live_keys, live_unmapped, afk_pulses, skipped_late;
     unsigned first_logged, afk_logged;
-    const char *source;              /* "script" | "live" | "anti_afk" */
+    const char *source;         /* "script" | "live" | "anti_afk" | "capture" */
     /* the parse error, if any */
     char     err[192];
     unsigned err_line;
@@ -3926,6 +3945,7 @@ typedef struct sess_input_cfg {
     int         live;         /* --input-live                             */
     unsigned    afk_ms;       /* --input-anti-afk[=MS] (0 = off)          */
     unsigned    text_gap_ms;  /* --input-text-gap=MS   (default 30)       */
+    int         interactive;  /* --session-interactive (F33): the window  */
 } sess_input_cfg;
 
 static void si_init(sess_input *si)
@@ -4520,6 +4540,56 @@ static int si_send(sess_input *si, sess_fb_outbox *fb, uint64_t origin_us,
         fflush(stdout);
     }
     return 0;
+}
+
+/* Round N slice 4j (F33): drain the presenter's capture ring through the
+ * SAME si_send wire path as every other source (source "capture"). The
+ * gate is the activation-chain latch: events arriving before
+ * enable-input(true) are drained and DISCARDED (counted in `gated`) —
+ * input ahead of the chain is the one thing the reference never does.
+ * Budget 64/tick bounds media-loop latency during bursts. Key downs
+ * count in live_keys (the summary keeps its 113-key skeleton). */
+static size_t sess_input_capture_tick(sess_input *si, sess_fb_outbox *fb,
+                                      uint64_t origin_us, kn_d3d_vp *vp,
+                                      int input_active)
+{
+    size_t sent = 0;
+    int budget = 64;
+    kn_d3d_input_ev ev;
+
+    if (!vp) return 0;
+    while (budget-- > 0 && kn_d3d_vp_pop_input(vp, &ev)) {
+        if (!input_active) { si->gated++; continue; }
+        switch (ev.kind) {
+        case KN_D3D_IEV_KEY:
+            if (si_send(si, fb, origin_us, SI_KEY, (uint16_t)ev.vk,
+                        (uint16_t)ev.mods, ev.down, 0, 0, 0, 0, 0,
+                        "capture") == 0) {
+                sent++;
+                if (ev.down) si->live_keys++;
+            }
+            break;
+        case KN_D3D_IEV_MOVE:
+            if (si_send(si, fb, origin_us, SI_ABS, 0, 0, 0, ev.x, ev.y,
+                        (uint16_t)ev.win_w, (uint16_t)ev.win_h, 0,
+                        "capture") == 0)
+                sent++;
+            break;
+        case KN_D3D_IEV_BTN:
+            if (si_send(si, fb, origin_us, SI_BTN, 0, 0, ev.down,
+                        0, 0, 0, 0, ev.vk, "capture") == 0)
+                sent++;
+            break;
+        case KN_D3D_IEV_WHEEL:
+            if (si_send(si, fb, origin_us, SI_WHEEL, 0, 0, 0,
+                        0, ev.wheel, 0, 0, 0, "capture") == 0)
+                sent++;
+            break;
+        default:
+            break;
+        }
+    }
+    return sent;
 }
 
 /* One media-loop tick: fire everything that is due, drain the console when
@@ -6499,8 +6569,18 @@ static int run_session(const char *token, const char *device_id,
             si.afk_ms = icfg->afk_ms;
             if (!si.have_script && !si.live) si.source = "anti_afk";
         }
+        if (icfg->interactive) {
+            /* F33: the window is the only input owner (main() refuses
+             * script/live co-arming); afk keeps its own slot above. */
+            si.capture = 1;
+            si.source = "capture";
+            printf("{\"mode\":\"session\",\"event\":\"input_capture\","
+                   "\"armed\":1,\"note\":\"presenter window owns "
+                   "keyboard+mouse; Ctrl+G = pause menu\"}\n");
+            fflush(stdout);
+        }
     }
-    if (!si.have_script && !si.live && !si.afk_ms)
+    if (!si.have_script && !si.live && !si.afk_ms && !si.capture)
         si.source = "none";
 
     /* ---------------- phase A: CloudMatch ---------------- */
@@ -7781,6 +7861,17 @@ static int run_session(const char *token, const char *device_id,
                     fflush(stdout);
                 }
             }
+            /* F33: the Ctrl+G menu's EXIT STREAM stops the session
+             * cleanly — same teardown path as stop_reason "time". */
+            if (c.vp && g_sess_interactive &&
+                kn_d3d_vp_take_menu_exit(c.vp)) {
+                printf("{\"mode\":\"session\",\"event\":\"menu_exit\","
+                       "\"presented\":%llu}\n",
+                       (unsigned long long)c.present_frames);
+                fflush(stdout);
+                stop_reason = "menu_exit";
+                break;
+            }
             rc = kn_sock_udp_recv(ms, pkt, sizeof pkt,
                                   KN_SOCK_POLL_INTERVAL_MS, &plen, NULL);
             c.now_ms = kn_sock_now_ms();
@@ -8109,6 +8200,11 @@ static int run_session(const char *token, const char *device_id,
                 if (si.have_script || si.live || si.afk_ms)
                     (void)si_tick(&si, c.fb, pump.origin_us, now_ms,
                                   pump_persist && pump.input_active);
+                if (si.capture && c.vp)
+                    (void)sess_input_capture_tick(&si, c.fb, pump.origin_us,
+                                                  c.vp,
+                                                  pump_persist &&
+                                                  pump.input_active);
                 if (have_rr && (c.rtcp_fb_open || unified_mode)) {
                     uint64_t nf = 0, nl = 0;
                     int guard = 0;
@@ -9130,6 +9226,8 @@ int main(int argc, char **argv)
     int sess_input_live = 0;
     long sess_afk_ms = 0;                /* --input-anti-afk[=MS] */
     long sess_present = 0;               /* --session-present (F20) */
+    long sess_interactive = 0;           /* --session-interactive (F33) */
+    long afk_explicit = 0;               /* --input-anti-afk[=MS] given */
     long sess_audio_play = 0;   /* --session-audio-play (F21, slice 3) */
     long sess_text_gap_ms = 30;          /* --input-text-gap=MS */
     long long sess_app = 0;
@@ -9241,14 +9339,20 @@ int main(int argc, char **argv)
             sess_input_script = a + 15;   /* round L (F19) */
         else if (strcmp(a, "--input-live") == 0)
             sess_input_live = 1;          /* round L (F19) */
-        else if (strcmp(a, "--input-anti-afk") == 0)
+        else if (strcmp(a, "--input-anti-afk") == 0) {
             sess_afk_ms = 60000;          /* round L (F19): 1 min default */
+            afk_explicit = 1;
+        }
         else if (strcmp(a, "--session-present") == 0)
             sess_present = 1;            /* round N (F20): live window */
+        else if (strcmp(a, "--session-interactive") == 0)
+            sess_interactive = 1;        /* round N slice 4j (F33): PLAY */
         else if (strcmp(a, "--session-audio-play") == 0)
             sess_audio_play = 1;     /* round N slice 3 (F21): live WASAPI */
-        else if (strncmp(a, "--input-anti-afk=", 17) == 0)
+        else if (strncmp(a, "--input-anti-afk=", 17) == 0) {
             sess_afk_ms = strtol(a + 17, NULL, 10);
+            afk_explicit = 1;
+        }
         else if (strncmp(a, "--input-text-gap=", 17) == 0)
             sess_text_gap_ms = strtol(a + 17, NULL, 10);
         else if (strncmp(a, "--input-check=", 14) == 0)
@@ -9335,13 +9439,29 @@ int main(int argc, char **argv)
             usage();
             return 2;
         }
+        if (sess_interactive && (sess_input_script || sess_input_live)) {
+            printf("{\"mode\":\"session\",\"event\":\"usage_error\","
+                   "\"reason\":\"--session-interactive replaces "
+                   "--input-script/--input-live: one input owner per "
+                   "session\"}\n");
+            fflush(stdout);
+            usage();
+            return 2;
+        }
+        if (sess_interactive) {
+            sess_present = 1;            /* the window IS the product */
+            sess_audio_play = 1;         /* playing means sound */
+            if (!afk_explicit) sess_afk_ms = 60000;  /* the reference pulse */
+        }
         sicfg.script = sess_input_script;
         sicfg.live = sess_input_live;
         sicfg.afk_ms = (unsigned)sess_afk_ms;
         sicfg.text_gap_ms = (unsigned)sess_text_gap_ms;
+        sicfg.interactive = (int)sess_interactive;
         if (lottery_n == 1) {
             g_sess_present = (int)sess_present;
             g_sess_audio_play = (int)sess_audio_play;
+            g_sess_interactive = (int)sess_interactive;
             return run_session(sess_token, sess_device, sess_app,
                                sess_title,
                                sess_cm_host && sess_cm_host[0] ? sess_cm_host
@@ -9408,6 +9528,7 @@ int main(int argc, char **argv)
                 }
                 g_sess_present = (int)sess_present;
                 g_sess_audio_play = (int)sess_audio_play;
+                g_sess_interactive = (int)sess_interactive;
                 lrc = run_session(sess_token, sess_device, sess_app,
                                   sess_title, cmh, sess_seconds,
                                   sess_queue_timeout, sess_keep,

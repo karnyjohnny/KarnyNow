@@ -24,8 +24,9 @@
 /* ============================================================ D20 overlay
  * Platform-NEUTRAL 5x7 bitmap font + NV12 blit (compiles and is testable
  * everywhere — tools/sandbox_overlay_font.c renders ASCII proofs). Bit
- * 0x10 of a row byte = leftmost pixel. Glyph set covers the overlay
- * vocabulary: digits, "FPS LATE", '.', ':', '-', '/', space. */
+ * 0x10 of a row byte = leftmost pixel. Glyph set (F33): the FULL
+ * uppercase A-Z vocabulary + digits + '.', ':', '-', '+', '/', space —
+ * the overlay vocabulary AND the Ctrl+G pause-menu labels. */
 
 typedef struct { char c; unsigned char rows[7]; } kd_glyph;
 
@@ -40,19 +41,40 @@ static const kd_glyph k_kd_font[] = {
     { '7', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 } },
     { '8', { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E } },
     { '9', { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x1C } },
-    { 'F', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 } },
-    { 'P', { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 } },
-    { 'S', { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E } },
-    { 'L', { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F } },
     { 'A', { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 } },
-    { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
+    { 'B', { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E } },
+    { 'C', { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E } },
+    { 'D', { 0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E } },
     { 'E', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F } },
+    { 'F', { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 } },
+    { 'G', { 0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F } },
+    { 'H', { 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 } },
+    { 'I', { 0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E } },
+    { 'J', { 0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C } },
+    { 'K', { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 } },
+    { 'L', { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F } },
+    { 'M', { 0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11 } },
+    { 'N', { 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 } },
+    { 'O', { 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
+    { 'P', { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 } },
+    { 'Q', { 0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D } },
+    { 'R', { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 } },
+    { 'S', { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E } },
+    { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
+    { 'U', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E } },
+    { 'V', { 0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04 } },
+    { 'W', { 0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11 } },
+    { 'X', { 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 } },
+    { 'Y', { 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04 } },
+    { 'Z', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F } },
     { '.', { 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C } },
     { ':', { 0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00 } },
     { '-', { 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 } },
+    { '+', { 0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00 } },
     { '/', { 0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10 } },
     { ' ', { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } },
 };
+
 #define KD_FONT_N ((int)(sizeof k_kd_font / sizeof k_kd_font[0]))
 
 static const kd_glyph *kd_glyph_of(char c)
@@ -142,6 +164,246 @@ int kn_d3d_overlay_text_nv12(unsigned char *y_plane, unsigned y_stride,
         }
     }
     return (int)nglyphs;
+}
+
+/* =============================================== F33 neutral machinery
+ * Pause-menu geometry + hit-testing + the capture input ring. All of it
+ * platform-neutral (pure integer math on plain structs) so the native
+ * POSIX test suite exercises the exact code the Windows wndproc uses.
+ * Text metrics MATCH kn_d3d_overlay_text_nv12: a glyph is 5*scale wide,
+ * glyphs are separated by `scale`, pad = 2*scale, even origins. */
+
+#define KD_MENU_ITEMS 3
+#define KD_MENU_SCALE 4u                       /* video-space px per font px */
+
+typedef kn_d3d_rect kd_rect;   /* public name in kn_d3d.h */
+
+/* The three fixed labels + the variable third-item suffix. Item 2 is the
+ * widest possible label ("STATS OVERLAY OFF") and sizes the box. */
+static const char *const k_kd_menu_label[KD_MENU_ITEMS] = {
+    "EXIT STREAM", "RESUME CAPTURE", "STATS OVERLAY"
+};
+
+static unsigned kd_text_w(unsigned nglyphs, unsigned scale)
+{
+    return nglyphs ? nglyphs * 5u * scale + (nglyphs - 1u) * scale : 0u;
+}
+
+/* Box + per-item rows in VIDEO space (the same space the overlay blits
+ * into). items[i] spans the full inner width (forgiving click target);
+ * rows are 7*scale tall with a scale-sized gap. Returns 0 on success,
+ * -1 on args. Everything is clamped inside the frame and forced even. */
+int kn_d3d_menu_layout(unsigned win_w, unsigned win_h, unsigned scale,
+                   kd_rect *box, kd_rect *items)
+{
+    unsigned inner, box_w, box_h, x0, y0, row_y, i;
+    const unsigned title_g = 6u;               /* "PAUSED" */
+    const unsigned wide_g  = 17u;              /* "STATS OVERLAY OFF" */
+    if (!win_w || !win_h || !box || !items) return -1;
+    if (scale < 2u || (scale & 1u)) return -1;
+    inner = kd_text_w(wide_g, scale) + 4u * scale;      /* label + pad both */
+    box_w = inner + 4u * scale;                          /* breathing room  */
+    box_h = 2u * scale            /* top pad */
+          + 7u * scale            /* title row */
+          + 2u * scale            /* title gap */
+          + KD_MENU_ITEMS * (7u * scale + scale)         /* rows + gaps */
+          + scale;                /* bottom pad */
+    if (box_w > win_w) box_w = win_w & ~1u;
+    if (box_h > win_h) box_h = win_h & ~1u;
+    x0 = ((win_w - box_w) / 2u) & ~1u;
+    y0 = ((win_h - box_h) / 2u) & ~1u;
+    box->x0 = (int)x0; box->y0 = (int)y0;
+    box->x1 = (int)(x0 + box_w); box->y1 = (int)(y0 + box_h);
+    (void)title_g;
+    row_y = y0 + 2u * scale + 7u * scale + 2u * scale;
+    for (i = 0; i < KD_MENU_ITEMS; ++i) {
+        items[i].x0 = (int)(x0 + 2u * scale);
+        items[i].y0 = (int)row_y;
+        items[i].x1 = (int)(x0 + box_w - 2u * scale);
+        items[i].y1 = (int)(row_y + 7u * scale);
+        row_y += 7u * scale + scale;
+    }
+    return 0;
+}
+
+/* Point-in-menu hit test: returns 0..KD_MENU_ITEMS-1 or -1. */
+int kn_d3d_menu_hit(const kd_rect *items, int x, int y)
+{
+    unsigned i;
+    if (!items) return -1;
+    for (i = 0; i < KD_MENU_ITEMS; ++i)
+        if (x >= items[i].x0 && x < items[i].x1 &&
+            y >= items[i].y0 && y < items[i].y1)
+            return (int)i;
+    return -1;
+}
+
+/* The third label depends on the overlay state; kept here so the draw
+ * and any test agree on the exact string. */
+const char *kn_d3d_menu_label(unsigned idx, int overlay_on)
+{
+    if (idx == 2u) return overlay_on ? "STATS OVERLAY ON"
+                                     : "STATS OVERLAY OFF";
+    return idx < KD_MENU_ITEMS ? k_kd_menu_label[idx] : "";
+}
+
+/* Draw the centered pause menu into an NV12 buffer: dark box, white
+ * title "PAUSED", one row per item; the selected row gets a bright
+ * background + dark glyphs. Same pixel discipline as the overlay blit
+ * (even origins, per-2x2 UV pairs). Returns 0 ok / -1 args. */
+int kn_d3d_menu_draw_nv12(unsigned char *y_plane, unsigned y_stride,
+                      unsigned char *uv_plane, unsigned uv_stride,
+                      unsigned buf_w, unsigned buf_h,
+                      unsigned scale, int sel, int overlay_on)
+{
+    kd_rect box, items[KD_MENU_ITEMS];
+    unsigned i, row, col, gy, rx, ry, sx, sy;
+    int r;
+    const char *text;
+    if (!y_plane || !uv_plane || !buf_w || !buf_h) return -1;
+    r = kn_d3d_menu_layout(buf_w, buf_h, scale, &box, items);
+    if (r != 0) return r;
+
+    /* box background: Y=0x10, neutral UV */
+    for (row = (unsigned)box.y0; row < (unsigned)box.y1 && row < buf_h; ++row) {
+        unsigned char *yl = y_plane + (size_t)row * y_stride;
+        for (col = (unsigned)box.x0; col < (unsigned)box.x1 && col < buf_w; ++col)
+            yl[col] = 0x10;
+    }
+    for (row = (unsigned)box.y0 / 2u; row < (unsigned)box.y1 / 2u &&
+                                            row < buf_h / 2u; ++row) {
+        unsigned char *uvl = uv_plane + (size_t)row * uv_stride;
+        for (col = (unsigned)box.x0; col < (unsigned)box.x1 && col < buf_w;
+             col += 2u) { uvl[col] = 0x80; uvl[col + 1u] = 0x80; }
+    }
+
+    /* rows: title + items */
+    for (i = 0; i < KD_MENU_ITEMS + 1u; ++i) {
+        int tx, ty;
+        unsigned char fg = 0xEB, bg = 0x10;
+        unsigned ng = 0, tw;
+        const char *p;
+        if (i == 0) {
+            text = "PAUSED";
+            ty = box.y0 + (int)(2u * scale);
+        } else {
+            text = kn_d3d_menu_label(i - 1u, overlay_on);
+            ty = items[i - 1u].y0;
+            if ((int)(i - 1u) == sel) { fg = 0x10; bg = 0xD0;
+                /* bright selection band across the full row */
+                for (row = (unsigned)items[i - 1u].y0;
+                     row < (unsigned)items[i - 1u].y1 && row < buf_h; ++row) {
+                    unsigned char *yl = y_plane + (size_t)row * y_stride;
+                    for (col = (unsigned)items[i - 1u].x0;
+                         col < (unsigned)items[i - 1u].x1 && col < buf_w; ++col)
+                        yl[col] = bg;
+                }
+            }
+        }
+        for (p = text; *p; ++p) ++ng;
+        tw = kd_text_w(ng, scale);
+        tx = box.x0 + ((box.x1 - box.x0) - (int)tw) / 2;
+        tx &= ~1;
+        for (gy = 0; gy < ng; ++gy) {
+            const kd_glyph *g = kd_glyph_of(text[gy]);
+            unsigned cx = (unsigned)tx + gy * 6u * scale;
+            if (!g) continue;
+            for (ry = 0; ry < 7u; ++ry) {
+                unsigned char bits = g->rows[ry];
+                for (rx = 0; rx < 5u; ++rx) {
+                    if (!(bits & (0x10u >> rx))) continue;
+                    for (sy = 0; sy < scale; ++sy) {
+                        unsigned yy = (unsigned)ty + ry * scale + sy;
+                        unsigned char *yl;
+                        if (yy >= buf_h) continue;
+                        yl = y_plane + (size_t)yy * y_stride;
+                        for (sx = 0; sx < scale; ++sx) {
+                            unsigned xx = cx + rx * scale + sx;
+                            if (xx >= buf_w) continue;
+                            yl[xx] = fg;
+                        }
+                    }
+                    for (sy = 0; sy < scale / 2u; ++sy) {
+                        unsigned vy = ((unsigned)ty + ry * scale) / 2u + sy;
+                        unsigned char *uvl;
+                        if (vy >= buf_h / 2u) continue;
+                        uvl = uv_plane + (size_t)vy * uv_stride;
+                        for (sx = 0; sx < scale / 2u; ++sx) {
+                            unsigned vx = (cx + rx * scale) / 2u + sx;
+                            if (vx >= buf_w / 2u) continue;
+                            uvl[vx * 2u] = 0x80; uvl[vx * 2u + 1u] = 0x80;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* The capture ring: 512 slots, drop-NEWEST on overflow (an overflow
+ * means the owner thread stopped draining — honest counter, one WARN
+ * from the Windows side). Neutral so POSIX tests drive it directly. */
+#define KD_IQ_CAP 512u
+typedef struct {
+    kn_d3d_input_ev ev[KD_IQ_CAP];
+    unsigned head, count;
+    unsigned long long overflow;
+} kd_iq;
+
+static void kd_iq_init(kd_iq *q)
+{
+    q->head = 0; q->count = 0; q->overflow = 0;
+}
+
+static int kd_iq_push(kd_iq *q, const kn_d3d_input_ev *e)
+{
+    unsigned tail;
+    if (q->count == KD_IQ_CAP) { q->overflow++; return -1; }
+    tail = (q->head + q->count) % KD_IQ_CAP;
+    q->ev[tail] = *e;
+    q->count++;
+    return 0;
+}
+
+static int kd_iq_pop(kd_iq *q, kn_d3d_input_ev *out)
+{
+    if (!q->count) return 0;
+    *out = q->ev[q->head];
+    q->head = (q->head + 1u) % KD_IQ_CAP;
+    q->count--;
+    return 1;
+}
+
+/* Single-entry seam so the static ring is exercised on EVERY platform
+ * (native ctest) and never trips -Wunused-function on POSIX: fills the
+ * ring, checks drop-newest + overflow counting + FIFO order. 0 = pass. */
+int kn_d3d_iq_selftest(void)
+{
+    static kd_iq q;
+    kn_d3d_input_ev e, out;
+    unsigned i;
+    kd_iq_init(&q);
+    memset(&e, 0, sizeof e);
+    for (i = 0; i < KD_IQ_CAP + 5u; ++i) {
+        e.kind = KN_D3D_IEV_KEY;
+        e.vk = i;
+        if (i < KD_IQ_CAP) {
+            if (kd_iq_push(&q, &e) != 0) return -1;
+        } else if (kd_iq_push(&q, &e) == 0) return -2;   /* must refuse */
+    }
+    if (q.overflow != 5u) return -3;
+    if (q.count != KD_IQ_CAP) return -4;
+    for (i = 0; i < KD_IQ_CAP; ++i) {
+        if (kd_iq_pop(&q, &out) != 1) return -5;
+        if (out.vk != i) return -6;                      /* FIFO order */
+    }
+    if (kd_iq_pop(&q, &out) != 0) return -7;
+    /* after draining, the ring accepts again */
+    e.vk = 999;
+    if (kd_iq_push(&q, &e) != 0) return -8;
+    if (kd_iq_pop(&q, &out) != 1 || out.vk != 999u) return -9;
+    return 0;
 }
 
 #ifdef _WIN32
@@ -811,29 +1073,250 @@ struct kn_d3d_vp {
     unsigned long fault_code;
     unsigned long long fault_addr;
     unsigned refresh_initial;
+    /* ---- F33 (round N slice 4j): interactive capture ---- */
+    volatile int interactive;         /* kn_d3d_vp_set_interactive       */
+    volatile int focused;             /* WM_SETFOCUS / WM_KILLFOCUS      */
+    volatile int paused;              /* Ctrl+G menu state               */
+    volatile int menu_sel;            /* highlighted menu row 0..2       */
+    volatile int exit_req;            /* menu EXIT STREAM latch          */
+    int iq_warned;                    /* one WARN per ring overflow era  */
+    unsigned cliw, clih;              /* client rect (event norms space) */
+    kd_iq iq;                         /* neutral capture ring            */
 };
+
+/* ---------------- F33 capture helpers (wndproc runs on the owner thread
+ * inside kn_d3d_vp_pump, so the ring and these flags need no lock) ---- */
+
+static unsigned kd_vp_mods(void)
+{
+    unsigned mods = 0;
+    if (GetKeyState(VK_SHIFT) & 0x8000)   mods |= KN_D3D_MOD_SHIFT;
+    if (GetKeyState(VK_CONTROL) & 0x8000) mods |= KN_D3D_MOD_CTRL;
+    if (GetKeyState(VK_MENU) & 0x8000)    mods |= KN_D3D_MOD_ALT;
+    if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000)
+        mods |= KN_D3D_MOD_META;
+    return mods;
+}
+
+static void kd_vp_capture_apply(kn_d3d_vp *vp)
+{
+    int cap = vp->interactive && vp->focused && !vp->paused;
+    if (cap) {
+        RECT wr;
+        GetWindowRect(vp->hwnd, &wr);
+        ClipCursor(&wr);              /* the mouse belongs to the game */
+    } else {
+        ClipCursor(NULL);             /* free the cursor for the OS/menu */
+    }
+    SetCursor(cap ? NULL : LoadCursor(NULL, IDC_ARROW));
+}
+
+static void kd_vp_queue(kn_d3d_vp *vp, const kn_d3d_input_ev *e)
+{
+    if (kd_iq_push(&vp->iq, e) != 0 && !vp->iq_warned) {
+        vp->iq_warned = 1;
+        kd_logf(KN_WARN, "presenter: input ring FULL (%u slots) - events "
+                "dropped newest-first; is the media loop draining?",
+                (unsigned)KD_IQ_CAP);
+    }
+}
+
+static void kd_vp_queue_key(kn_d3d_vp *vp, unsigned vk, unsigned mods, int down)
+{
+    kn_d3d_input_ev e;
+    memset(&e, 0, sizeof e);
+    e.kind = KN_D3D_IEV_KEY;
+    e.vk = vk; e.mods = mods; e.down = down;
+    e.win_w = vp->cliw; e.win_h = vp->clih;
+    kd_vp_queue(vp, &e);
+}
+
+/* Client px -> VIDEO space through the letterbox destination rect, so
+ * the engine normalizes without any geometry knowledge and black bars
+ * never shift the aim. Clamped to [0, dim-1] (the wire fields are
+ * unsigned). Before the first letterbox computation (dstrc empty) the
+ * mapping degenerates to (0,0) — the window is a black pre-fault rect
+ * at that point anyway. */
+static void kd_vp_client_to_video(const kn_d3d_vp *vp, int cx, int cy,
+                                  int *vx, int *vy)
+{
+    int dw = vp->dstrc.right - vp->dstrc.left;
+    int dh = vp->dstrc.bottom - vp->dstrc.top;
+    if (dw <= 0 || dh <= 0) { *vx = 0; *vy = 0; return; }
+    *vx = (int)(((long long)(cx - vp->dstrc.left) * (long long)vp->vw) / dw);
+    *vy = (int)(((long long)(cy - vp->dstrc.top) * (long long)vp->vh) / dh);
+    if (*vx < 0) *vx = 0;
+    if (*vx > (int)vp->vw - 1) *vx = (int)vp->vw - 1;
+    if (*vy < 0) *vy = 0;
+    if (*vy > (int)vp->vh - 1) *vy = (int)vp->vh - 1;
+}
+
+static void kd_vp_queue_mouse(kn_d3d_vp *vp, int kind, unsigned id, int down,
+                              LPARAM l, int wheel)
+{
+    kn_d3d_input_ev e;
+    memset(&e, 0, sizeof e);
+    e.kind = kind;
+    e.vk = id; e.down = down;
+    kd_vp_client_to_video(vp, (int)(short)LOWORD(l), (int)(short)HIWORD(l),
+                          &e.x, &e.y);
+    e.wheel = wheel;
+    e.win_w = vp->vw; e.win_h = vp->vh;   /* normalization basis = video */
+    kd_vp_queue(vp, &e);
+}
+
+static void kd_vp_menu_activate(kn_d3d_vp *vp, int item)
+{
+    switch (item) {
+    case 0:
+        vp->exit_req = 1;             /* engine consumes -> "menu_exit" */
+        kd_logf(KN_INFO, "presenter: menu EXIT STREAM requested");
+        break;
+    case 1:
+        vp->paused = 0;
+        kd_vp_capture_apply(vp);
+        kd_logf(KN_INFO, "presenter: capture RESUMED (menu)");
+        break;
+    case 2:
+        vp->overlay_on = !vp->overlay_on;
+        kd_logf(KN_INFO, "presenter: FPS overlay %s (menu)",
+                vp->overlay_on ? "ON" : "OFF");
+        break;
+    default: break;
+    }
+}
+
+/* Click while paused: client px -> VIDEO space (the menu is drawn into
+ * the video frame, then stretched), then the neutral hit test. */
+static void kd_vp_menu_click(kn_d3d_vp *vp, LPARAM l)
+{
+    kn_d3d_rect box, items[KD_MENU_ITEMS];
+    int vx, vy, hit;
+    if (kn_d3d_menu_layout(vp->vw, vp->vh, KD_MENU_SCALE, &box, items) != 0)
+        return;
+    kd_vp_client_to_video(vp, (int)(short)LOWORD(l), (int)(short)HIWORD(l),
+                          &vx, &vy);
+    hit = kn_d3d_menu_hit(items, vx, vy);
+    if (hit >= 0) {
+        vp->menu_sel = hit;
+        kd_vp_menu_activate(vp, hit);
+    }
+}
 
 static const wchar_t k_kd_vp_cls[] = L"KarnyNowKnD3DVp";
 
 static LRESULT CALLBACK kd_vp_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
-    if (m == WM_CLOSE || (m == WM_KEYDOWN && w == VK_ESCAPE)) {
-        kn_d3d_vp *vp = (kn_d3d_vp *)(uintptr_t)GetWindowLongPtrW(h,
-                                                                 GWLP_USERDATA);
+    kn_d3d_vp *vp = (kn_d3d_vp *)(uintptr_t)GetWindowLongPtrW(h,
+                                                              GWLP_USERDATA);
+    if (m == WM_ERASEBKGND) return 1;
+    if (m == WM_CLOSE) {                 /* alt+F4 / taskbar: both modes */
         if (vp) vp->closed = 1;
         return 0;
     }
-    if (m == WM_KEYDOWN && w == VK_F5) {           /* D20 overlay toggle */
-        kn_d3d_vp *vp = (kn_d3d_vp *)(uintptr_t)GetWindowLongPtrW(h,
-                                                                 GWLP_USERDATA);
-        if (vp) {
+    if (!vp) return DefWindowProcW(h, m, w, l);
+
+    if (!vp->interactive) {
+        /* LEGACY presenter (loopback, --session-present): ESC closes,
+         * F5 toggles the D20 overlay — untouched by F33. */
+        if (m == WM_KEYDOWN && w == VK_ESCAPE) { vp->closed = 1; return 0; }
+        if (m == WM_KEYDOWN && w == VK_F5) {
             vp->overlay_on = !vp->overlay_on;
             kd_logf(KN_INFO, "presenter: FPS overlay %s (F5)",
                     vp->overlay_on ? "ON" : "OFF");
+            return 0;
+        }
+        return DefWindowProcW(h, m, w, l);
+    }
+
+    /* ---- F33 interactive: focused window = ALL input belongs to GFN;
+     * Ctrl+G is the only local key (pause + menu). While paused nothing
+     * is forwarded; arrows/Enter/Esc drive the menu, clicks hit-test. */
+    switch (m) {
+    case WM_SETFOCUS:
+        vp->focused = 1;
+        kd_vp_capture_apply(vp);
+        return 0;
+    case WM_KILLFOCUS:
+        vp->focused = 0;
+        kd_vp_capture_apply(vp);
+        return 0;
+    case WM_SETCURSOR:
+        if (vp->focused && !vp->paused) { SetCursor(NULL); return TRUE; }
+        break;                            /* paused: class arrow */
+    case WM_SIZE: {
+        RECT cr;
+        if (GetClientRect(h, &cr)) {
+            vp->cliw = (unsigned)(cr.right - cr.left);
+            vp->clih = (unsigned)(cr.bottom - cr.top);
         }
         return 0;
     }
-    if (m == WM_ERASEBKGND) return 1;
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+        unsigned mods = kd_vp_mods();
+        if (w == 'G' && (mods & KN_D3D_MOD_CTRL)) {   /* the escape hatch */
+            vp->paused = !vp->paused;
+            vp->menu_sel = 0;
+            kd_vp_capture_apply(vp);
+            kd_logf(KN_INFO, "presenter: capture %s (Ctrl+G)",
+                    vp->paused ? "PAUSED, menu shown" : "RESUMED");
+            return 0;
+        }
+        if (vp->paused) {
+            if (w == VK_UP)
+                vp->menu_sel = (vp->menu_sel + KD_MENU_ITEMS - 1)
+                               % KD_MENU_ITEMS;
+            else if (w == VK_DOWN)
+                vp->menu_sel = (vp->menu_sel + 1) % KD_MENU_ITEMS;
+            else if (w == VK_RETURN || w == VK_SPACE)
+                kd_vp_menu_activate(vp, vp->menu_sel);
+            else if (w == VK_ESCAPE) {
+                vp->paused = 0;
+                kd_vp_capture_apply(vp);
+            } else if (w == VK_F5)
+                vp->overlay_on = !vp->overlay_on;
+            return 0;                     /* nothing forwarded while paused */
+        }
+        if (vp->focused) kd_vp_queue_key(vp, (unsigned)w, mods, 1);
+        return 0;                         /* ESC too: it belongs to the game */
+    }
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        if (!vp->paused && vp->focused)
+            kd_vp_queue_key(vp, (unsigned)w, kd_vp_mods(), 0);
+        return 0;
+    case WM_MOUSEMOVE:
+        if (vp->focused && !vp->paused)
+            kd_vp_queue_mouse(vp, KN_D3D_IEV_MOVE, 0, 0, l, 0);
+        return 0;
+    case WM_LBUTTONDOWN: case WM_LBUTTONUP:
+    case WM_MBUTTONDOWN: case WM_MBUTTONUP:
+    case WM_RBUTTONDOWN: case WM_RBUTTONUP:
+    case WM_XBUTTONDOWN: case WM_XBUTTONUP: {
+        /* ids EQUAL KN_INPUT_BTN_*: left 1, middle 2, right 3, x1 4, x2 5 */
+        unsigned id = (m == WM_LBUTTONDOWN || m == WM_LBUTTONUP) ? 1u
+                    : (m == WM_MBUTTONDOWN || m == WM_MBUTTONUP) ? 2u
+                    : (m == WM_RBUTTONDOWN || m == WM_RBUTTONUP) ? 3u
+                    : (HIWORD(w) == XBUTTON2 ? 5u : 4u);
+        int down = (m == WM_LBUTTONDOWN || m == WM_MBUTTONDOWN ||
+                    m == WM_RBUTTONDOWN || m == WM_XBUTTONDOWN) ? 1 : 0;
+        if (vp->paused) {
+            if (down) kd_vp_menu_click(vp, l);
+            return 0;
+        }
+        if (vp->focused)
+            kd_vp_queue_mouse(vp, KN_D3D_IEV_BTN, id, down, l, 0);
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+        if (vp->focused && !vp->paused)
+            kd_vp_queue_mouse(vp, KN_D3D_IEV_WHEEL, 0, 0, l,
+                              (int)(short)HIWORD(w));
+        return 0;
+    default:
+        break;
+    }
     return DefWindowProcW(h, m, w, l);
 }
 
@@ -857,7 +1340,11 @@ static HWND kd_vp_make_window(int w, int h, const char *title)
         memcpy(wtitle, def, sizeof def);
     }
     wtitle[127] = L'\0';
-    return CreateWindowExW(WS_EX_TOPMOST, k_kd_vp_cls, wtitle,
+    /* F33: exstyle 0 — WS_EX_TOPMOST REMOVED on purpose (operator
+     * requirement: alt+tab must work; the window takes focus on click
+     * like any other). Frameless fullscreen stays: WS_POPUP, adapter
+     * display-mode size. */
+    return CreateWindowExW(0, k_kd_vp_cls, wtitle,
                            WS_POPUP | WS_VISIBLE, 0, 0, w, h,
                            NULL, NULL, wc.hInstance, NULL);
 }
@@ -989,6 +1476,16 @@ kn_d3d_vp *kn_d3d_vp_open(unsigned video_w, unsigned video_h,
     vp->refresh_initial = (unsigned)dm.RefreshRate;
     vp->overlay_on = 1;                         /* D20: debug default ON */
     snprintf(vp->overlay_text, sizeof vp->overlay_text, "FPS --.-");
+    /* F33: capture state starts clean; the ring + client rect are live
+     * from creation (WM_SIZE may not have fired yet for WS_POPUP). */
+    kd_iq_init(&vp->iq);
+    {
+        RECT cr;
+        if (GetClientRect(hwnd, &cr)) {
+            vp->cliw = (unsigned)(cr.right - cr.left);
+            vp->clih = (unsigned)(cr.bottom - cr.top);
+        }
+    }
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)(uintptr_t)vp);
 
     {
@@ -1085,6 +1582,14 @@ static int kd_vp_present_inner(kn_d3d_vp *vp, const unsigned char *y,
             (void)kn_d3d_overlay_text_nv12((unsigned char *)lr.pBits,
                         (unsigned)lr.Pitch, duv, (unsigned)lr.Pitch,
                         vp->vw, vp->vh, 8u, 8u, vp->overlay_text, 2u);
+        /* F33: the Ctrl+G pause menu rides the SAME locked buffer (no
+         * extra lock/stretch pass), drawn over the live frame — the
+         * stream keeps playing while capture is paused. */
+        if (vp->interactive && vp->paused)
+            (void)kn_d3d_menu_draw_nv12((unsigned char *)lr.pBits,
+                        (unsigned)lr.Pitch, duv, (unsigned)lr.Pitch,
+                        vp->vw, vp->vh, KD_MENU_SCALE, vp->menu_sel,
+                        vp->overlay_on);
     }
     t1 = kd_qpc_us();
     IDirect3DSurface9_UnlockRect(vp->srf);
@@ -1201,6 +1706,44 @@ int kn_d3d_vp_overlay(kn_d3d_vp *vp)
     return vp ? vp->overlay_on : 0;
 }
 
+int kn_d3d_vp_set_interactive(kn_d3d_vp *vp, int on)
+{
+    if (!vp) return KN_D3D_ERR_ARGS;
+    vp->interactive = on ? 1 : 0;
+    if (on) {
+        kd_vp_capture_apply(vp);
+        kd_logf(KN_INFO, "presenter: interactive capture ON (Ctrl+G = "
+                "pause menu; ESC belongs to the game)");
+    } else {
+        vp->paused = 0;
+        ClipCursor(NULL);
+    }
+    return KN_D3D_OK;
+}
+
+int kn_d3d_vp_capturing(kn_d3d_vp *vp)
+{
+    return (vp && vp->interactive && vp->focused && !vp->paused) ? 1 : 0;
+}
+
+int kn_d3d_vp_pop_input(kn_d3d_vp *vp, kn_d3d_input_ev *out)
+{
+    if (!vp || !out) return 0;
+    return kd_iq_pop(&vp->iq, out);
+}
+
+int kn_d3d_vp_take_menu_exit(kn_d3d_vp *vp)
+{
+    if (!vp) return 0;
+    if (vp->exit_req) { vp->exit_req = 0; return 1; }
+    return 0;
+}
+
+unsigned long long kn_d3d_vp_input_overflows(kn_d3d_vp *vp)
+{
+    return vp ? vp->iq.overflow : 0ull;
+}
+
 void kn_d3d_vp_close(kn_d3d_vp *vp)
 {
     if (!vp) return;
@@ -1261,6 +1804,14 @@ int kn_d3d_vp_set_overlay(kn_d3d_vp *vp, int on)
 int kn_d3d_vp_set_overlay_text(kn_d3d_vp *vp, const char *text)
 { (void)vp; (void)text; return KN_D3D_ERR_ARGS; }
 int kn_d3d_vp_overlay(kn_d3d_vp *vp) { (void)vp; return 0; }
+int kn_d3d_vp_set_interactive(kn_d3d_vp *vp, int on)
+{ (void)vp; (void)on; return KN_D3D_ERR_ARGS; }
+int kn_d3d_vp_capturing(kn_d3d_vp *vp) { (void)vp; return 0; }
+int kn_d3d_vp_pop_input(kn_d3d_vp *vp, kn_d3d_input_ev *out)
+{ (void)vp; (void)out; return 0; }
+int kn_d3d_vp_take_menu_exit(kn_d3d_vp *vp) { (void)vp; return 0; }
+unsigned long long kn_d3d_vp_input_overflows(kn_d3d_vp *vp)
+{ (void)vp; return 0; }
 void kn_d3d_vp_close(kn_d3d_vp *vp) { (void)vp; }
 
 #endif /* _WIN32 */
