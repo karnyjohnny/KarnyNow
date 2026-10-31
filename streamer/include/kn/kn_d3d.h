@@ -257,9 +257,25 @@ int kn_d3d_iq_selftest(void);                   /* 0 = pass */
 
 int kn_d3d_vp_set_interactive(kn_d3d_vp *vp, int on);
 int kn_d3d_vp_capturing(kn_d3d_vp *vp);  /* focused && interactive && !paused */
+int kn_d3d_vp_paused(kn_d3d_vp *vp);     /* Ctrl+G / focus-loss menu state */
 int kn_d3d_vp_pop_input(kn_d3d_vp *vp, kn_d3d_input_ev *out); /* 1 = event */
 int kn_d3d_vp_take_menu_exit(kn_d3d_vp *vp);  /* consume-once exit latch */
 unsigned long long kn_d3d_vp_input_overflows(kn_d3d_vp *vp);
+
+/* F33a (run-47 post-mortem): capture instrumentation. queued_* count
+ * events accepted into the ring per kind; dropped_nofocus counts mouse
+ * events refused because GetForegroundWindow() != hwnd (ground truth —
+ * the F33 flag-only model let a stale flag leak the mouse while the
+ * keyboard was elsewhere); dropped_paused counts events refused while
+ * the menu was up; focus_flaps counts every gained/lost/healed
+ * transition. The engine emits these on the 10 s input_capture_stats
+ * and the final input_capture_end event lines. */
+typedef struct kn_d3d_capture_stats {
+    unsigned long long queued_key, queued_move, queued_btn, queued_wheel;
+    unsigned long long dropped_nofocus, dropped_paused;
+    unsigned long long focus_flaps;
+} kn_d3d_capture_stats;
+int kn_d3d_vp_capture_stats(kn_d3d_vp *vp, kn_d3d_capture_stats *out);
 
 /* Neutral (all platforms): draw `text` into an NV12 buffer as a dark box +
  * white 5x7 bitmap glyphs (D20 FPS overlay). `scale` MUST be even and >= 2

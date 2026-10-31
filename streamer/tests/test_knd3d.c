@@ -215,6 +215,15 @@ static void t_stub_degradation(void)
     CHECK(kn_d3d_vp_pop_input(NULL, &ev) == 0, "pop_input(NULL) = 0");
     CHECK(kn_d3d_vp_take_menu_exit(NULL) == 0, "take_menu_exit(NULL) = 0");
     CHECK(kn_d3d_vp_input_overflows(NULL) == 0u, "input_overflows(NULL) = 0");
+    CHECK(kn_d3d_vp_paused(NULL) == 0, "paused(NULL) = 0");
+    {
+        kn_d3d_capture_stats cs;
+        memset(&cs, 0xAB, sizeof cs);
+        CHECK(kn_d3d_vp_capture_stats(NULL, &cs) == KN_D3D_ERR_ARGS,
+              "capture_stats(NULL) = ERR_ARGS");
+        CHECK(cs.queued_key == 0u && cs.focus_flaps == 0u,
+              "capture_stats zero-fills even on refusal");
+    }
 #ifndef _WIN32
     /* POSIX: the whole vp family is the honest stub */
     CHECK(kn_d3d_available() == 0, "POSIX: d3d unavailable");

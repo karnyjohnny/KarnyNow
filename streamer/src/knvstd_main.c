@@ -4592,6 +4592,32 @@ static size_t sess_input_capture_tick(sess_input *si, sess_fb_outbox *fb,
     return sent;
 }
 
+/* Round N slice 4k (F33a): the presenter's capture counters as an EVENT
+ * line — 10 s cadence while flying + one final at teardown. Event lines
+ * only; the 113-key summary skeleton is untouched. Run 47's mute-keyboard
+ * bug is why these exist: focus flaps, per-kind drops and queued counts
+ * are on the record from the first second of the next flight. */
+static void sess_capture_stats_emit(kn_d3d_vp *vp, unsigned long long rel_ms,
+                                    int final)
+{
+    kn_d3d_capture_stats cs;
+    if (!vp || kn_d3d_vp_capture_stats(vp, &cs) != 0) return;
+    printf("{\"mode\":\"session\",\"event\":\"%s\","
+           "\"rel_ms\":%llu,"
+           "\"queued_key\":%llu,\"queued_move\":%llu,"
+           "\"queued_btn\":%llu,\"queued_wheel\":%llu,"
+           "\"dropped_nofocus\":%llu,\"dropped_paused\":%llu,"
+           "\"focus_flaps\":%llu,\"overflows\":%llu,"
+           "\"capturing\":%d,\"paused\":%d}\n",
+           final ? "input_capture_end" : "input_capture_stats",
+           rel_ms,
+           cs.queued_key, cs.queued_move, cs.queued_btn, cs.queued_wheel,
+           cs.dropped_nofocus, cs.dropped_paused, cs.focus_flaps,
+           kn_d3d_vp_input_overflows(vp),
+           kn_d3d_vp_capturing(vp), kn_d3d_vp_paused(vp));
+    fflush(stdout);
+}
+
 /* One media-loop tick: fire everything that is due, drain the console when
  * live, and emit the anti-AFK pulse when its interval has elapsed.
  * `input_active` is the pump's activation latch — the gate. Returns the
@@ -6407,6 +6433,7 @@ static int run_session(const char *token, const char *device_id,
                                                     ? jiggle_ms : 0);
     uint16_t ws_port = 0;
     uint64_t t_start, next_poll_ms, now_ms, t_last_stats;
+    uint64_t next_capstats_ms = 0;  /* F33a: input_capture_stats cadence */
     uint64_t ctrl_ping_next_ms = 0;    /* R3-D service beat */
     unsigned long long datagrams = 0;
     /* Round XL (C19): raw media-loop iterations. The loop-tick forensics
@@ -7829,6 +7856,10 @@ static int run_session(const char *token, const char *device_id,
         t_start = kn_sock_now_ms();
         t_last_stats = t_start;
         c.fw_sec_t0 = t_start;                /* F22: first bucket */
+        {
+            /* F33a: the 10 s input_capture_stats cadence (interactive) */
+            next_capstats_ms = t_start + 10000u;
+        }
         /* round N (F20): the window's messages are pumped on EVERY
          * media-loop tick, not per frame — a frozen stream must not
          * freeze the operator's ability to close the window. */
@@ -8200,11 +8231,17 @@ static int run_session(const char *token, const char *device_id,
                 if (si.have_script || si.live || si.afk_ms)
                     (void)si_tick(&si, c.fb, pump.origin_us, now_ms,
                                   pump_persist && pump.input_active);
-                if (si.capture && c.vp)
+                if (si.capture && c.vp) {
                     (void)sess_input_capture_tick(&si, c.fb, pump.origin_us,
                                                   c.vp,
                                                   pump_persist &&
                                                   pump.input_active);
+                    if (now_ms >= next_capstats_ms) {
+                        sess_capture_stats_emit(c.vp,
+                            (unsigned long long)(now_ms - t_start), 0);
+                        next_capstats_ms = now_ms + 10000u;
+                    }
+                }
                 if (have_rr && (c.rtcp_fb_open || unified_mode)) {
                     uint64_t nf = 0, nl = 0;
                     int guard = 0;
@@ -8902,6 +8939,9 @@ teardown:
      * (frames presented, failures, worst frame cost) before anything
      * else teardown touches — it owns D3D objects on this thread. */
     if (c.vp) {
+        if (si.capture)                     /* F33a: the final counters */
+            sess_capture_stats_emit(c.vp,
+                (unsigned long long)(kn_sock_now_ms() - t_start), 1);
         kn_d3d_vp_close(c.vp);
         c.vp = NULL;
         printf("{\"mode\":\"session\",\"event\":\"video_present_end\","               "\"reason\":\"session_end\",\"frames\":%llu,"               "\"fails\":%llu,\"max_ms\":%.1f}\n",

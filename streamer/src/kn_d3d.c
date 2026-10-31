@@ -1082,7 +1082,36 @@ struct kn_d3d_vp {
     int iq_warned;                    /* one WARN per ring overflow era  */
     unsigned cliw, clih;              /* client rect (event norms space) */
     kd_iq iq;                         /* neutral capture ring            */
+    kn_d3d_capture_stats cs;          /* F33a: queued/dropped/flaps      */
 };
+
+/* F33a: focus GROUND TRUTH. Run 47 proved the flag-only model wrong in
+ * both directions: WM_SETFOCUS can arrive before GWLP_USERDATA exists
+ * (the flag misses its own birth) and foreground changes can skip
+ * WM_KILLFOCUS (stale 1) — the operator's keys went to the true focus
+ * window while our mouse path happily queued under a stale flag. Truth
+ * = GetForegroundWindow(); on LOSS we auto-pause and arm the menu (the
+ * operator's run-47 request: alt-tab back = control handed back). */
+static void kd_vp_capture_apply(kn_d3d_vp *vp);   /* fwd: used below */
+
+static void kd_vp_focus_refresh(kn_d3d_vp *vp)
+{
+    int fg = (GetForegroundWindow() == vp->hwnd) ? 1 : 0;
+    if (fg == vp->focused) return;
+    vp->focused = fg;
+    vp->cs.focus_flaps++;
+    if (fg) {
+        kd_logf(KN_INFO, "presenter: focus GAINED (foreground truth)");
+    } else {
+        kd_logf(KN_INFO, "presenter: focus LOST - capture AUTO-PAUSED, "
+                "menu armed (resume is explicit)");
+        if (vp->interactive && !vp->paused) {
+            vp->paused = 1;
+            vp->menu_sel = 0;
+        }
+    }
+    kd_vp_capture_apply(vp);
+}
 
 /* ---------------- F33 capture helpers (wndproc runs on the owner thread
  * inside kn_d3d_vp_pump, so the ring and these flags need no lock) ---- */
@@ -1111,9 +1140,9 @@ static void kd_vp_capture_apply(kn_d3d_vp *vp)
     SetCursor(cap ? NULL : LoadCursor(NULL, IDC_ARROW));
 }
 
-static void kd_vp_queue(kn_d3d_vp *vp, const kn_d3d_input_ev *e)
+static void kd_vp_queue_fail(kn_d3d_vp *vp)
 {
-    if (kd_iq_push(&vp->iq, e) != 0 && !vp->iq_warned) {
+    if (!vp->iq_warned) {
         vp->iq_warned = 1;
         kd_logf(KN_WARN, "presenter: input ring FULL (%u slots) - events "
                 "dropped newest-first; is the media loop draining?",
@@ -1128,7 +1157,8 @@ static void kd_vp_queue_key(kn_d3d_vp *vp, unsigned vk, unsigned mods, int down)
     e.kind = KN_D3D_IEV_KEY;
     e.vk = vk; e.mods = mods; e.down = down;
     e.win_w = vp->cliw; e.win_h = vp->clih;
-    kd_vp_queue(vp, &e);
+    if (kd_iq_push(&vp->iq, &e) == 0) vp->cs.queued_key++;
+    else kd_vp_queue_fail(vp);
 }
 
 /* Client px -> VIDEO space through the letterbox destination rect, so
@@ -1162,7 +1192,11 @@ static void kd_vp_queue_mouse(kn_d3d_vp *vp, int kind, unsigned id, int down,
                           &e.x, &e.y);
     e.wheel = wheel;
     e.win_w = vp->vw; e.win_h = vp->vh;   /* normalization basis = video */
-    kd_vp_queue(vp, &e);
+    if (kd_iq_push(&vp->iq, &e) == 0) {
+        if (kind == KN_D3D_IEV_MOVE)  vp->cs.queued_move++;
+        else if (kind == KN_D3D_IEV_BTN) vp->cs.queued_btn++;
+        else                          vp->cs.queued_wheel++;
+    } else kd_vp_queue_fail(vp);
 }
 
 static void kd_vp_menu_activate(kn_d3d_vp *vp, int item)
@@ -1234,11 +1268,21 @@ static LRESULT CALLBACK kd_vp_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
      * is forwarded; arrows/Enter/Esc drive the menu, clicks hit-test. */
     switch (m) {
     case WM_SETFOCUS:
-        vp->focused = 1;
+        if (!vp->focused) {
+            vp->focused = 1;
+            vp->cs.focus_flaps++;
+            kd_logf(KN_INFO, "presenter: focus GAINED (WM_SETFOCUS)");
+        }
         kd_vp_capture_apply(vp);
         return 0;
     case WM_KILLFOCUS:
-        vp->focused = 0;
+        if (vp->focused) {
+            vp->focused = 0;
+            vp->cs.focus_flaps++;
+            kd_logf(KN_INFO, "presenter: focus LOST (WM_KILLFOCUS) - "
+                    "capture AUTO-PAUSED, menu armed");
+        }
+        if (!vp->paused) { vp->paused = 1; vp->menu_sel = 0; }
         kd_vp_capture_apply(vp);
         return 0;
     case WM_SETCURSOR:
@@ -1255,12 +1299,25 @@ static LRESULT CALLBACK kd_vp_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
         unsigned mods = kd_vp_mods();
-        if (w == 'G' && (mods & KN_D3D_MOD_CTRL)) {   /* the escape hatch */
-            vp->paused = !vp->paused;
-            vp->menu_sel = 0;
+        /* F33a self-heal: a key message ARRIVING is OS-guaranteed proof
+         * this window holds keyboard focus — heal a flag that missed its
+         * WM_SETFOCUS (run 47's mute-keyboard half). */
+        if (!vp->focused) {
+            vp->focused = 1;
+            vp->cs.focus_flaps++;
+            kd_logf(KN_INFO, "presenter: focus HEALED by key arrival "
+                    "(WM_SETFOCUS was missed)");
             kd_vp_capture_apply(vp);
-            kd_logf(KN_INFO, "presenter: capture %s (Ctrl+G)",
-                    vp->paused ? "PAUSED, menu shown" : "RESUMED");
+        }
+        if (w == 'G' && (mods & KN_D3D_MOD_CTRL)) {   /* the escape hatch */
+            if (!(l & 0x40000000)) {   /* F33a: ignore auto-repeat (run 47
+                                        * held Ctrl+G -> 3 toggles/0.75 s) */
+                vp->paused = !vp->paused;
+                vp->menu_sel = 0;
+                kd_vp_capture_apply(vp);
+                kd_logf(KN_INFO, "presenter: capture %s (Ctrl+G)",
+                        vp->paused ? "PAUSED, menu shown" : "RESUMED");
+            }
             return 0;
         }
         if (vp->paused) {
@@ -1283,12 +1340,19 @@ static LRESULT CALLBACK kd_vp_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     case WM_KEYUP:
     case WM_SYSKEYUP:
+        if (!vp->focused) {              /* F33a self-heal (as above) */
+            vp->focused = 1;
+            vp->cs.focus_flaps++;
+            kd_vp_capture_apply(vp);
+        }
         if (!vp->paused && vp->focused)
             kd_vp_queue_key(vp, (unsigned)w, kd_vp_mods(), 0);
         return 0;
     case WM_MOUSEMOVE:
-        if (vp->focused && !vp->paused)
-            kd_vp_queue_mouse(vp, KN_D3D_IEV_MOVE, 0, 0, l, 0);
+        kd_vp_focus_refresh(vp);         /* F33a: ground truth per message */
+        if (!vp->focused)      { vp->cs.dropped_nofocus++; return 0; }
+        if (vp->paused)        { vp->cs.dropped_paused++;  return 0; }
+        kd_vp_queue_mouse(vp, KN_D3D_IEV_MOVE, 0, 0, l, 0);
         return 0;
     case WM_LBUTTONDOWN: case WM_LBUTTONUP:
     case WM_MBUTTONDOWN: case WM_MBUTTONUP:
@@ -1301,18 +1365,22 @@ static LRESULT CALLBACK kd_vp_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
                     : (HIWORD(w) == XBUTTON2 ? 5u : 4u);
         int down = (m == WM_LBUTTONDOWN || m == WM_MBUTTONDOWN ||
                     m == WM_RBUTTONDOWN || m == WM_XBUTTONDOWN) ? 1 : 0;
+        kd_vp_focus_refresh(vp);         /* F33a: ground truth per message */
         if (vp->paused) {
             if (down) kd_vp_menu_click(vp, l);
+            else vp->cs.dropped_paused++;
             return 0;
         }
-        if (vp->focused)
-            kd_vp_queue_mouse(vp, KN_D3D_IEV_BTN, id, down, l, 0);
+        if (!vp->focused) { vp->cs.dropped_nofocus++; return 0; }
+        kd_vp_queue_mouse(vp, KN_D3D_IEV_BTN, id, down, l, 0);
         return 0;
     }
     case WM_MOUSEWHEEL:
-        if (vp->focused && !vp->paused)
-            kd_vp_queue_mouse(vp, KN_D3D_IEV_WHEEL, 0, 0, l,
-                              (int)(short)HIWORD(w));
+        kd_vp_focus_refresh(vp);         /* F33a: ground truth per message */
+        if (!vp->focused) { vp->cs.dropped_nofocus++; return 0; }
+        if (vp->paused)   { vp->cs.dropped_paused++;  return 0; }
+        kd_vp_queue_mouse(vp, KN_D3D_IEV_WHEEL, 0, 0, l,
+                          (int)(short)HIWORD(w));
         return 0;
     default:
         break;
@@ -1487,6 +1555,10 @@ kn_d3d_vp *kn_d3d_vp_open(unsigned video_w, unsigned video_h,
         }
     }
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)(uintptr_t)vp);
+    /* F33a: WM_SETFOCUS fired DURING CreateWindowExW — before USERDATA
+     * existed — so seed the flag from the truth instead of missing the
+     * window's own birth focus. */
+    vp->focused = (GetFocus() == hwnd) ? 1 : 0;
 
     {
         int x0, y0, x1, y1;
@@ -1711,9 +1783,17 @@ int kn_d3d_vp_set_interactive(kn_d3d_vp *vp, int on)
     if (!vp) return KN_D3D_ERR_ARGS;
     vp->interactive = on ? 1 : 0;
     if (on) {
+        /* F33a: grab the keyboard at arm time — the process is
+         * foreground-eligible right after the console launch; if
+         * Windows still refuses, the per-message focus_refresh and the
+         * key-arrival self-heal cover the rest. */
+        (void)SetForegroundWindow(vp->hwnd);
+        (void)SetFocus(vp->hwnd);
+        vp->focused = (GetFocus() == vp->hwnd) ? 1 : 0;
         kd_vp_capture_apply(vp);
         kd_logf(KN_INFO, "presenter: interactive capture ON (Ctrl+G = "
-                "pause menu; ESC belongs to the game)");
+                "pause menu; ESC belongs to the game; focus grabbed: %d)",
+                vp->focused);
     } else {
         vp->paused = 0;
         ClipCursor(NULL);
@@ -1724,6 +1804,19 @@ int kn_d3d_vp_set_interactive(kn_d3d_vp *vp, int on)
 int kn_d3d_vp_capturing(kn_d3d_vp *vp)
 {
     return (vp && vp->interactive && vp->focused && !vp->paused) ? 1 : 0;
+}
+
+int kn_d3d_vp_paused(kn_d3d_vp *vp)
+{
+    return (vp && vp->paused) ? 1 : 0;
+}
+
+int kn_d3d_vp_capture_stats(kn_d3d_vp *vp, kn_d3d_capture_stats *out)
+{
+    if (!out) return KN_D3D_ERR_ARGS;
+    if (!vp) { memset(out, 0, sizeof *out); return KN_D3D_ERR_ARGS; }
+    *out = vp->cs;
+    return KN_D3D_OK;
 }
 
 int kn_d3d_vp_pop_input(kn_d3d_vp *vp, kn_d3d_input_ev *out)
@@ -1807,6 +1900,14 @@ int kn_d3d_vp_overlay(kn_d3d_vp *vp) { (void)vp; return 0; }
 int kn_d3d_vp_set_interactive(kn_d3d_vp *vp, int on)
 { (void)vp; (void)on; return KN_D3D_ERR_ARGS; }
 int kn_d3d_vp_capturing(kn_d3d_vp *vp) { (void)vp; return 0; }
+int kn_d3d_vp_paused(kn_d3d_vp *vp) { (void)vp; return 0; }
+int kn_d3d_vp_capture_stats(kn_d3d_vp *vp, kn_d3d_capture_stats *out)
+{
+    if (!out) return KN_D3D_ERR_ARGS;
+    memset(out, 0, sizeof *out);
+    (void)vp;
+    return KN_D3D_ERR_ARGS;
+}
 int kn_d3d_vp_pop_input(kn_d3d_vp *vp, kn_d3d_input_ev *out)
 { (void)vp; (void)out; return 0; }
 int kn_d3d_vp_take_menu_exit(kn_d3d_vp *vp) { (void)vp; return 0; }
