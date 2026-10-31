@@ -1742,6 +1742,19 @@ typedef struct {
     uint16_t len;
     uint16_t sid;
 } sess_fb_msg;
+/* ---- round N slice 4i (F32): outgoing control-wire families. The
+ * run-44/45 summaries proved the outgoing totals pristine in EVERY
+ * draw (ack==frames exact, qos at 19.3-20 Hz, dropped 0, retained 0),
+ * but totals cannot see the last seconds before a kill. One latch
+ * family per outgoing code: updated at the encode sites, rendered
+ * into the warn tick, the session-end ctrl_out_total line, and the
+ * death-path forensics. rr/qos/ka/ping flow WHETHER OR NOT media
+ * does, so a gap in those is a SENDER stall, not rig silence. */
+enum {
+    FW_OUT_RR = 0, FW_OUT_ACK, FW_OUT_PACING, FW_OUT_QOS, FW_OUT_KA,
+    FW_OUT_NACK, FW_OUT_IDR, FW_OUT_PLI, FW_OUT_RFI, FW_OUT_JIGGLE,
+    FW_OUT_PING, FW_OUT_CTRL, FW_OUT_INPUT, FW_OUT_SLOTS
+};
 typedef struct sess_fb_outbox {
     sess_fb_msg q[SESS_FB_SLOTS];
     unsigned head, count;
@@ -1752,6 +1765,16 @@ typedef struct sess_fb_outbox {
     unsigned long long pushed_per_sid[SESS_FB_SIDS];
     unsigned long long dropped_per_sid[SESS_FB_SIDS];
     unsigned long long refused;      /* bad args / oversized: never queued */
+    /* ---- F32: outgoing-wire gap latches. Absolute ms clock (the
+     * now_ms/kn_sock_now_ms domain, same as the F31 receive latches).
+     * Writers: the encode sites in the media/main loops, the pump's
+     * sess_ctrl_send, the ctrl-ping service. Readers: the warn tick,
+     * fw_out_dump at session end. Zeroed by sess_fb_init's memset. */
+    volatile uint64_t fw_o_n[FW_OUT_SLOTS];
+    volatile uint64_t fw_o_last_ms[FW_OUT_SLOTS];
+    volatile uint64_t fw_o_maxgap_ms[FW_OUT_SLOTS];
+    volatile uint64_t fw_o_maxgap_at_ms[FW_OUT_SLOTS];
+    volatile uint64_t fw_o_warn_ms[FW_OUT_SLOTS];
 #ifdef _WIN32
     CRITICAL_SECTION lock;
 #else
@@ -1780,6 +1803,61 @@ static void sess_fb_destroy(sess_fb_outbox *b)
     pthread_mutex_destroy(&b->lock);
 #endif
     b->inited = 0;
+}
+
+static const char *const fw_out_names[FW_OUT_SLOTS] = {
+    "rr", "ack", "pacing", "qos", "ka", "nack", "idr", "pli", "rfi",
+    "jiggle", "ping", "ctrl", "input"
+};
+/* F32 warn thresholds (ms); 0 = event-driven family, never warned.
+ * Reference cadences: RR 1 s (nvst.rs:97), QoS 50 ms (nvst_control.rs
+ * :19), keepalive 3 s (nvst_input.rs:11), WSS ping 2 s. Thresholds sit
+ * ~2-5x the cadence. ack/pacing are media-gated (per completed frame /
+ * 55.5 ms gate) so their warns also fire during a rig-side decay —
+ * expected, dated evidence, throttled to one line per family per 5 s.
+ * input: anti-afk pulses every 60 s, so 90 s means the path is dead. */
+static const uint64_t fw_out_warn_thr[FW_OUT_SLOTS] = {
+    2500ull, 500ull, 2000ull, 250ull, 4500ull, 0ull, 0ull, 0ull, 0ull,
+    0ull, 3500ull, 0ull, 90000ull
+};
+
+static void fw_out_note(sess_fb_outbox *b, int idx, uint64_t now_ms)
+{
+    uint64_t g;
+    if (!b || !b->inited || idx < 0 || idx >= FW_OUT_SLOTS || !now_ms)
+        return;
+    b->fw_o_n[idx]++;
+    g = b->fw_o_last_ms[idx] ? now_ms - b->fw_o_last_ms[idx] : 0ull;
+    if (g > b->fw_o_maxgap_ms[idx]) {
+        b->fw_o_maxgap_ms[idx]    = g;
+        b->fw_o_maxgap_at_ms[idx] = b->fw_o_last_ms[idx];
+    }
+    b->fw_o_last_ms[idx] = now_ms;
+}
+
+/* the session-end ledger line: per family [n, last_rel, maxgap,
+ * maxgap_at] in ms relative to t_start. Printed on EVERY stop
+ * (keeper included) right before the summary; NOT part of the summary
+ * object, so the 113-key skeleton is untouched. */
+static void fw_out_dump(const sess_fb_outbox *b, uint64_t t_start,
+                        const char *event)
+{
+    int i;
+    if (!b) return;
+    printf("{\"mode\":\"session\",\"event\":\"%s\",\"codes\":{",
+           event);
+    for (i = 0; i < FW_OUT_SLOTS; i++) {
+        uint64_t last = b->fw_o_last_ms[i];
+        uint64_t at   = b->fw_o_maxgap_at_ms[i];
+        printf("%s\"%s\":[%llu,%llu,%llu,%llu]", i ? "," : "",
+               fw_out_names[i],
+               (unsigned long long)b->fw_o_n[i],
+               (unsigned long long)(last >= t_start ? last - t_start : 0ull),
+               (unsigned long long)b->fw_o_maxgap_ms[i],
+               (unsigned long long)(at >= t_start ? at - t_start : 0ull));
+    }
+    printf("}}\n");
+    fflush(stdout);
 }
 
 static int sess_fb_push(sess_fb_outbox *b, uint16_t sid,
@@ -2257,8 +2335,10 @@ static void dec_frame_in_cb(const kn_rx_frame *f, void *ud)
                 int pn = kn_rx_ctrl_frame_pacing(f->frame_index,
                                                  SESS_FRAME_TIME_US, 0, pb);
                 if (pn > 0 &&
-                    sess_fb_push(c->fb, 6, pb, (size_t)pn) == 0)
+                    sess_fb_push(c->fb, 6, pb, (size_t)pn) == 0) {
                     c->fb_pacing++;
+                    fw_out_note(c->fb, FW_OUT_PACING, c->now_ms);
+                }
                 c->next_pacing_us = now_us + SESS_PACING_INTERVAL_US;
             }
         } else {
@@ -2290,6 +2370,7 @@ static void dec_frame_in_cb(const kn_rx_frame *f, void *ud)
                     c->cbatch.last_ack_frame = f->frame_index;
                     c->cbatch.have_last_ack_frame = 1;
                     c->fb_ack++;
+                    fw_out_note(c->fb, FW_OUT_ACK, c->now_ms);
                 }
             }
         }
@@ -2526,14 +2607,18 @@ static void dec_kf_service(dec_ctx *c, uint64_t now_ms)
     {
         uint8_t idr[6];
         int n = kn_rx_ctrl_idr_request(idr);
-        if (n > 0 && sess_fb_push(c->fb, 0, idr, (size_t)n) == 0)
+        if (n > 0 && sess_fb_push(c->fb, 0, idr, (size_t)n) == 0) {
             c->fb_idr++;
+            fw_out_note(c->fb, FW_OUT_IDR, c->now_ms);
+        }
     }
     if (c->rtcp_fb_open && c->v->have_bound_ssrc) {
         uint8_t pli[12];
         kn_rx_rtcp_pli(SESS_RTCP_SENDER_SSRC, c->v->bound_ssrc, pli);
-        if (sess_fb_push(c->fb, 14, pli, sizeof pli) == 0)
+        if (sess_fb_push(c->fb, 14, pli, sizeof pli) == 0) {
             c->fb_pli++;
+            fw_out_note(c->fb, FW_OUT_PLI, c->now_ms);
+        }
     }
     /* bounded stdout: the episode's first attempt, then every 50th
      * (a 5-s stall at 100 ms cadence is 50 attempts; the reference logs
@@ -4410,6 +4495,7 @@ static int si_send(sess_input *si, sess_fb_outbox *fb, uint64_t origin_us,
         return -1;
     }
     si->sent++;
+    fw_out_note(fb, FW_OUT_INPUT, kn_sock_now_ms());
     switch (kind) {
     case SI_KEY:   si->sent_key++;   break;
     case SI_BTN:   si->sent_btn++;   break;
@@ -4641,9 +4727,21 @@ static int sess_ctrl_open(sess_pump *p)
  * (nvst_input.rs:72-78). Every activation/cursor message rides here. */
 static int sess_ctrl_send(sess_pump *p, const uint8_t *msg, size_t len)
 {
+    int ok;
     if (!p->sctp || !kn_sctp_established(p->sctp)) return 0;
-    return kn_sctp_send(p->sctp, 0, KN_SCTP_PPI_BINARY, 1, msg, len)
-               == KN_SCTP_OK;
+    ok = kn_sctp_send(p->sctp, 0, KN_SCTP_PPI_BINARY, 1, msg, len)
+             == KN_SCTP_OK;
+    /* F32: activation chain, cursor commands and everything else on
+     * the reliable control label land in the ledger. 0x0206 would be
+     * INPUT, but runtime input rides the outbox; the branch keeps the
+     * families honest if routing ever changes. */
+    if (ok && len >= 2) {
+        uint16_t code =
+            (uint16_t)((unsigned)msg[0] | ((unsigned)msg[1] << 8));
+        fw_out_note(p->fb, code == 0x0206u ? FW_OUT_INPUT : FW_OUT_CTRL,
+                    kn_sock_now_ms());
+    }
+    return ok;
 }
 
 /* the cursor machine's sink (nvst_cursor.rs emits Capture(bool)/Tracking) */
@@ -5056,6 +5154,7 @@ static void sess_ctrl_try_activate(sess_pump *p)
 
 typedef struct {
     kn_ws_client *ws;
+    sess_fb_outbox *fb;          /* F32: ledger sink (NULL = no ledger) */
     int      have;               /* service armed (post-PLAY) */
     int      dead;               /* hard error: the worker's break */
     uint64_t next_ping_ms;
@@ -5124,6 +5223,7 @@ static void sess_ctrl_ping_service(sess_ctrl_ping *k, uint64_t now_ms)
             pl[i] = (uint8_t)(k->seq >> (8 * (7 - i)));
         if (kn_ws_send_ping(k->ws, pl, sizeof pl) == KN_WS_OK) {
             k->pings_sent++;
+            if (k->fb) fw_out_note(k->fb, FW_OUT_PING, now_ms);
             k->outstanding_seq = k->seq;
             k->outstanding_ms = now_ms;
         } else {
@@ -6774,6 +6874,7 @@ static int run_session(const char *token, const char *device_id,
         return 1;
     }
     sess_ctrl_ping_init(&ctrl_ping, &wsc);   /* armed after PLAY */
+    ctrl_ping.fb = &fb;                      /* F32: ledger sink */
 
     rio.send_text = sess_ws_send_text;
     rio.recv_text = sess_ws_recv_text;
@@ -7759,6 +7860,35 @@ static int run_session(const char *token, const char *device_id,
                     stop_reason = "ctrl_dead";
                     break;
                 }
+                /* F32: outgoing-cadence warn tick. rr/qos/ka/ping are
+                 * sender-liveness that flows whether or not media does;
+                 * a warn here while the receive side still looks alive
+                 * is the feedback-silence smoking gun the totals could
+                 * never show. One line per family per 5 s while the
+                 * violation stands. */
+                if (c.fb) {
+                    int oi;
+                    for (oi = 0; oi < FW_OUT_SLOTS; oi++) {
+                        uint64_t thr = fw_out_warn_thr[oi];
+                        uint64_t ogap;
+                        if (!thr || !c.fb->fw_o_last_ms[oi]) continue;
+                        ogap = now_ms - c.fb->fw_o_last_ms[oi];
+                        if (ogap >= thr &&
+                            now_ms - c.fb->fw_o_warn_ms[oi] >= 5000ull) {
+                            c.fb->fw_o_warn_ms[oi] = now_ms;
+                            printf("{\"mode\":\"session\","
+                                   "\"event\":\"ctrl_out_gap\","
+                                   "\"code\":\"%s\",\"gap_ms\":%llu,"
+                                   "\"thr_ms\":%llu,\"at_rel_ms\":%llu}\n",
+                                   fw_out_names[oi],
+                                   (unsigned long long)ogap,
+                                   (unsigned long long)thr,
+                                   (unsigned long long)(now_ms >= t_start
+                                       ? now_ms - t_start : 0ull));
+                            fflush(stdout);
+                        }
+                    }
+                }
                 /* Round XLI (D8): the poll path is the only source of
                  * RECOVERY_TIMEOUT / PROGRESS_RECOVERY events, so this
                  * is where the bounded recovery contract can terminate
@@ -7812,8 +7942,10 @@ static int run_session(const char *token, const char *device_id,
                                   (int32_t)((int64_t)expected -
                                             (int64_t)rec32),
                                   f_high, f_jit, rr);
-                    if (sess_fb_push(c.fb, 14, rr, sizeof rr) == 0)
+                    if (sess_fb_push(c.fb, 14, rr, sizeof rr) == 0) {
                         c.fb_rr++;
+                        fw_out_note(c.fb, FW_OUT_RR, now_ms);
+                    }
                     c.rr_prior_expected = expected;
                     c.rr_prior_received = rec32;
                     c.next_rr_ms = now_ms + SESS_RR_INTERVAL_MS;
@@ -7906,6 +8038,7 @@ static int run_session(const char *token, const char *device_id,
                                            now_ms)) {
                             c.cbatch.have_qos = 1;
                             c.fb_qos++;
+                            fw_out_note(c.fb, FW_OUT_QOS, now_ms);
                         }
                         (void)sess_cb_flush(&c.cbatch, c.fb, "qos");
                     }
@@ -7916,8 +8049,10 @@ static int run_session(const char *token, const char *device_id,
                 if (now_ms >= c.next_ka_ms) {
                     static const uint8_t ka_msg[8] =
                         { 0x00, 0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00 };
-                    if (sess_fb_push(c.fb, 0, ka_msg, sizeof ka_msg) == 0)
+                    if (sess_fb_push(c.fb, 0, ka_msg, sizeof ka_msg) == 0) {
                         c.fb_ka++;
+                        fw_out_note(c.fb, FW_OUT_KA, now_ms);
+                    }
                     c.next_ka_ms = now_ms + SESS_KA_INTERVAL_MS;
                 }
                 /* Round XLI.1 — the synthetic mouse jiggle (docs/INPUT.md
@@ -7945,6 +8080,7 @@ static int run_session(const char *token, const char *device_id,
                     if (jn > 0) {
                         if (sess_fb_push(c.fb, 6, jm, (size_t)jn) == 0) {
                             c.fb_jiggle++;
+                            fw_out_note(c.fb, FW_OUT_JIGGLE, now_ms);
                             if (!c.jiggle_first_logged) {
                                 c.jiggle_first_logged = 1u;
                                 printf("{\"mode\":\"session\","
@@ -7997,15 +8133,19 @@ static int run_session(const char *token, const char *device_id,
                             n2 = kn_rx_ctrl_nack_v2(0, miss, cnt, nb,
                                                     sizeof nb);
                             if (n2 > 0 &&
-                                sess_fb_push(c.fb, 6, nb, (size_t)n2) == 0)
+                                sess_fb_push(c.fb, 6, nb, (size_t)n2) == 0) {
                                 c.fb_nack++;
+                                fw_out_note(c.fb, FW_OUT_NACK, now_ms);
+                            }
                         } else {
                             rl = kn_rx_rtcp_nack(SESS_RTCP_SENDER_SSRC,
                                                  f_ssrc, nf, nl, rn,
                                                  sizeof rn);
                             if (rl &&
-                                sess_fb_push(c.fb, 14, rn, rl) == 0)
+                                sess_fb_push(c.fb, 14, rn, rl) == 0) {
                                 c.fb_nack++;
+                                fw_out_note(c.fb, FW_OUT_NACK, now_ms);
+                            }
                         }
                     }
                 }
@@ -8023,9 +8163,10 @@ static int run_session(const char *token, const char *device_id,
                              * (nvst.rs:3095-3114) uses send_control —
                              * the RELIABLE channel (sid 0), not the
                              * lossy partial one run 18-21 used. */
-                            if (sess_fb_push(c.fb, 0, ob, (size_t)n3) == 0)
+                            if (sess_fb_push(c.fb, 0, ob, (size_t)n3) == 0) {
                                 c.fb_rfi++;
-                            else
+                                fw_out_note(c.fb, FW_OUT_RFI, now_ms);
+                            } else
                                 kn_rx_inval_restore_rfi(&v.inval, rf,
                                                         rlast);
                         }
@@ -8383,6 +8524,7 @@ static int run_session(const char *token, const char *device_id,
             }
             if (doff >= sizeof drops) doff = sizeof drops - 1;
             drops[doff] = '\0';
+            fw_out_dump(&fb, t_start, "ctrl_out_total");
             printf("{\"mode\":\"session\",\"summary\":{\"stop_reason\":\"%s\","
                    "\"session_id\":\"%.64s\",\"datagrams\":%llu,"
                    "\"authenticated\":%llu,\"aus\":%llu,\"frames\":%llu,"

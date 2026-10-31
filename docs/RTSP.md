@@ -5352,3 +5352,105 @@ Interpretation table for run 45:
 
 ### Media policy (operator decision, endorsed)
 Raw .264/.opus are NOT pushed (size + laptop-side trim cost). The logs are sufficient: audio decode_fail=0 on every draw ever recorded, and the cascade lines now date deaths to the millisecond without media. When media forensics are truly needed, the operator's trim recipe (h264 -> mp4 @ -r 30 truth, -sseof on mp4 index, opus 1:1 -sseof) is correct and stays the on-demand path.
+
+---
+
+## 50. Run 45 (shift experiment, login_shift.txt) + the WebRTC reference dump: the verdict on phase binding, and the staged-monitor synthesis
+
+### 50.1 Run 45: 5/5 dead again — the shift experiment answers "game-phase vs session-clock"
+Build Oct 31 10:28:45, macro `login_shift.txt` (login block moved to 130-137 s; confirmed in input_summary x10). Rigs: 80.250.98.37, 185.136.70.137, 80.250.98.41, **80.250.98.36** (the run-42 keeper IP), 80.84.171.151.
+
+| draw | video died | true ctrl died | cascade delta | stop | fired |
+|---|---|---|---|---|---|
+| 1 | 288.1 s | 277.8 s | 10.3 s | ctrl_dead | 75 |
+| 2 | 39.7 s | 29.5 s | 10.2 s | ctrl_dead | 3 |
+| 3 | 10.8 s | 0.6 s | (video-first) | recovery_exhausted 20.9 s | 3 |
+| 4 | 888.7 s | 878.1 s | 10.6 s | ctrl_dead | 126 |
+| 5 | 100.2 s | 89.4 s | 10.8 s | ctrl_dead | 3 |
+
+**Verdict: session-clock/random, NOT game-phase-bound.** Three of five draws died BEFORE the shifted login block was even reached (10.8/39.7/100.2 s < 130 s); none died near login+5 s (~142 s); the two late deaths (288/888) sit nowhere near the login block. The 82 s class did not recur (those frontends were not drawn). Macro surgery is not the lever; login_1h.txt goes back in for future runs.
+
+**Cascade constant confirmed**: 10.2-10.8 s ctrl->video on four more draws (n=9 across runs 44+45, spread 10.1-10.8). Audio outlives video by ~2 s every time.
+
+**Draw 3 = a new shape (half-born session)**: ctrl/hb went silent at 0.6 s — the control plane essentially never established — yet video streamed to 10.8 s, then everything stalled. F30 could not fire (its check rides the media loop; once video stopped arriving at 10.8 s the loop had no more wakeups) and the recovery path named it recovery_exhausted at 20.9 s. Known F30 limitation, documented, not worth fixing: the recovery timer still produces a correct verdict ~7 s later on this rare path.
+
+**Phase-determinism ledger grows**: .39 died at 433.2 s (run 43c) then 431.7 s (run 44) — 1.5 s apart across nights. .36 kept 900 s (run 42, session cap) then died at 888.7 s (run 45). The 82 s triple (.135/.136/.96.37) stands. Same host => nearly same death phase, repeatedly.
+
+### 50.2 The WebRTC reference dump (operator-provided: 40 min flawless play.geforcenow.com session on Supermium, 11:44-12:24Z, endpoint 185.136.70.139:5004 UDP srflx/prflx direct, H264 42001f software-decoded on Intel HD)
+Channels: input_channel_v1 (103 174 sends, batched binary events), stats_channel (13 525 sends @ ~5.6 Hz median gap 191 ms, max gap 2.4 s over 40 min / 2 350 receives @ ~1 Hz), cursor_channel (107), control_channel (45 sends / 73 receives, event-based only).
+- **Client telemetry is continuous**: ~20-byte binary reports with a monotonic sequence counter (2465 @ 609 s -> 10059 @ 2100 s = 5.09/s); type-02 reports carry quality doubles. Server answers 1 Hz with 79-byte score reports (score 100.0, ratio floats ~0.76-0.92, -1.0 flag fields).
+- **Control channel carries no keepalive at all** — liveness on the browser path is the telemetry stream plus RTP/RTCP itself.
+- Server->client control traffic: 68 NvExtendedCommandMessage (Serenity foregroundWindow/process notifications — the browser-side analogue of our 0x010a app events), SESSION_LENGTH_TIMER x2 (+0.6 s, +1800.4 s; 30-min tier), videoStreamProgressEvent, gameSessionHdrMode. Client->server: etwPrint identity (browser name/version, GPU detail), windowState (30x, flags 0/1/3/16/17/18/19), systemState, PASTE clipboard, SAFE_ZONE, SCXDeltaQpMap, and exitMessage {code:0} at teardown.
+- **Media stats of a "perfect" session**: 1.66 GB video, 70 961 frames decoded @ 29.5 fps avg, 1280x720, packetsLost 350/1 591 160 (0.022%), pliCount 78, nackCount 35, firCount 0, **keyFramesDecoded 98 (one per ~24 s)**, freezeCount 398 totalling 136.8 s (5.7% of the session), framesDropped 740, software decode 12.9 ms/frame. Audio: 7 packets lost, 0.7% concealed samples.
+- Takeaways: (a) even flawless browser play has constant micro-freezes and periodic IDRs — server QoS tolerates visibly imperfect media, so our kills are NOT QoS-threshold kills; (b) our keeper had kf=1 over 15 min vs browser's 1-per-24 s — native and WebRTC paths run different keyframe policies (native: on-demand only; we never PLI, and run 44/45 max video gap never exceeded 0.5 s so no PLI was ever needed); (c) the browser announces identity and window/system state proactively — native-path analogues are the next audit target.
+
+### 50.3 The synthesis: a staged server-side monitor, not "rig health"
+Facts to reconcile: (1) our client CAN hold a session flawlessly (run 42 d4: 900 s, stop "time", 27 000/27 000 frames, macro 98/98, clean bye+release); (2) deaths are ctrl-plane-first with a constant ~10.2 s media drain while the network is demonstrably healthy (media keeps flowing AFTER ctrl dies); (3) death phase repeats per host across nights (.39: 433.2/431.7; the 82 s triple; .36: 888.7 after a 900 s keep); (4) browsers and OpenNOW never die this way on the same pool; (5) no pre-death degradation on any plane, ever, in the abrupt class.
+
+Working hypothesis: **a client-validation / telemetry monitor is active on SOME pool hosts (staged rollout or per-host config). On monitored hosts our native client trips it at a deterministic per-host phase and the session manager kills the control plane (media drains ~10 s later). On unmonitored hosts our client is indistinguishable from healthy and survives indefinitely (keeper).** This explains every ledger entry, including why the same IP flips between keep and die (host re-image / monitor state) and why time-of-day and block are irrelevant.
+
+Consequence: the operator is right that "server kills" does NOT exonerate the client — the kill is server-side but the trigger is client-visible. The fix path is to find what the monitor checks that OpenNOW satisfies and we do not.
+
+### 50.4 Next: F32 — byte-level identity and telemetry audit vs OpenNOW (planned)
+1. Diff EVERY outbound message we send on the native wire against OpenNOW's encoders field-by-field: handshake headers and client version/identity strings, 0x0104/0x0105 report CONTENTS (not just cadence — rates already match: RR 1 s, QoS 50 ms, 0x0200 3 s byte-exact), teardown sequence.
+2. Search OpenNOW for native analogues of windowState / systemState / etwPrint identity announcements; if OpenNOW sends them and we do not, implement.
+3. Instrument: periodic hexdump of our outbound ctrl frames into knlog (new kind) so the next flight carries ground truth of our own payload contents.
+The WebRTC dump stays in logs-archive/webrtc as the healthy-reference baseline (stats cadence, PLI/NACK behaviour, keyframe policy, telemetry shape).
+
+---
+
+## 51. WebRTC dump deep-dive (round 2): the healthy reference is a terrible-quality session that never got killed
+Second pass over logs-archive/webrtc (operator capture: play.geforcenow.com on Supermium, 11:44:36-12:24:31Z, Endfield, same laptop and network that ran run 45 the same morning).
+
+### 51.1 Peer-connection lifecycle: one PC, one ICE connection, zero recovery events
+chrome-stats lifecycle: PC 101-3 (video transceiver probe) and 101-4/101-5 (audio probes) were created and closed within ~50-300 ms at setup — capability probes. PC 101-6 is the session: 4 client data channels (input_channel_v1 ordered; input_channel_partially_reliable unordered maxPacketLifeTime 300 ms; cursor_channel ordered; stats_channel unordered maxRetransmits 0) + 2 server-opened channels (control_channel ordered protocol "chat"; **remote_trace_channel** ordered "chat" — silent the entire session). ICE: local 192.168.x udp+tcp candidates, remote srflx 185.136.x udp; selected pair srflx/prflx direct to 185.136.70.139:5004. **No ICE restart, no reconnection, no resume at any point.** Browser resilience is not the reason it survives.
+
+### 51.2 Quality timeline of the "flawless" session — QoS-based culling is now decisively dead
+Per-5.7 s samples (423 getStats snapshots): freezeCount 398 across 33 clusters spanning t=11 s to t=2389 s (never stopped happening); framesPerSecond median 27.5, min 2.0, **57/422 samples below 15 fps (13.5% of the session)**; currentRoundTripTime median 54 ms, **p95 555 ms, max 891 ms**; pliCount 78 spread over 76 intervals across the whole session; video packetsLost 350/1 591 160. Host class: hardwareConcurrency 2, deviceMemory 2 GB, software H264 decode at 12.9 ms/frame.
+Our native deaths, by contrast, happen on pristine transport (owd <10 ms, gaps <0.5 s, 27 000/27 000 frames in the keeper). **A server that tolerates 891 ms RTT spikes and 398 freezes from the browser while killing our flawless stream is not measuring quality — it is measuring the client.** This is the strongest support yet for the staged-monitor model (section 50.3) and for the operator's position that the trigger is client-visible.
+
+### 51.3 Telemetry protocol (partially decoded)
+- stats_channel client->server, two shapes: type-01 (20 B): header {01 02 0000}, stream/channel id 6, kind 2, **monotonic u32 sequence counter** — 13 525 msgs, median gap 191 ms (5.6 Hz), max gap 2 367 ms in 40 min. type-02 (19 B): header {02 02 0200} + a µs-scale session timestamp double (first 3760.0, last 2 397 012.0 = session age) + counters — 2 198 msgs (~1 Hz).
+- server->client type-03 (79 B, 1 Hz, 2 350 msgs): float -1.0 at offset 4, a varying primary double (100.0 at session start, later 29.0 / 455.0 / 485.0 — semantics unresolved), ratio floats ~0.76-0.92 and 0.05-0.21, -1.0/1.0 flag fields, trailing u32 2. Partially decoded only; the native-path analogue to audit in F32 is our 0x0104/0x0105 report CONTENT.
+- control_channel carries no keepalive; liveness = the telemetry stream + RTP/RTCP.
+- Single input_channel_v1 receive in the whole session: 5 bytes 0e 02 03 00 00 (handshake/ack).
+
+### 51.4 Serenity notification timeline (server->client app events, browser analogue of our 0x010a)
++0.4 s Launcher.exe / Games.exe / QtWebEngineProcess.exe + foregroundWindow(fs=true) then fs=false x2; **+21.2 s Endfield.exe**; +26.2 s UnityCrashHandler64.exe; +29.6-29.8 s nvngx_update.exe x3 + conhost.exe x3; +48.9 s PlatformProcess.exe; +52.4 s CefViewWing.exe x3; +53.1 s, +146.8 s QtWebEngineProcess.exe; then silence until SESSION_LENGTH_TIMER at +1800.4 s (30-min tier; first at +0.6 s). 15 foregroundWindow events overall. Exit: client sends exitMessage {code:0}; server never terminates anything.
+Note for the kill model: the 82 s death class (native) sits ~47-61 s AFTER Endfield.exe launch — inside the launch-burst window (nvngx/CEF/process churn). Coincidence level: unresolved; the launch window is when a per-host monitor would plausibly sample client state.
+cursor_channel: 107 shape updates, clustered at UI transitions (21-46 s game launch; 2322-2326 s operator mouse activity at exit).
+
+### 51.5 event_log file: NOT the session RtcEventLog — parked
+event_log_20261031_1244_101_6.log (12.5 MB) parses as a flat protobuf stream of 5 221 top-level fields whose embedded timestamps span only ~2.4 s (69.536-71.930 s in µs units): field 2 x1451 (~1.9 KB each, sub-blobs at fields 101/102/104/105/108/115 with compressed repetitive payloads) — a state/codec snapshot dump, not a packet timeline. Decoding it needs the Chrome-side schema; parked. The packet-level truth is already in internals (51.2).
+
+### 51.6 What F32 must answer (unchanged plan, sharpened)
+The browser reference cannot be copied (different transport), but it frames the question: the server knows exactly who the client is, continuously (5.6 Hz sequenced telemetry, identity etwPrint, windowState/systemState). On the native path the equivalents are our handshake identity strings, 0x0104/0x0105 report contents, and whatever windowState analogue OpenNOW sends. F32: byte-level diff of every outbound native message against OpenNOW encoders + outbound ctrl hexdump instrumentation, so the next flight carries ground truth about us.
+
+---
+
+## 52. Slice 4i: the outgoing-wire audit closed + F32 (the outgoing control ledger) — strategy shift to short diagnostic sessions
+
+### 52.1 The audit result: outgoing parity with OpenNOW is REAL, and the run-44/45 totals prove it was exercised
+Re-clone of OpenNOW (OpenCloudGaming/OpenNOW, current master — restructured into native/opennow-streamer crates) plus a sweep of our own encoders:
+- The full client->server catalogue (nvst_control.rs + nvst_input.rs): 0x0200 keepalive, 0x0206 remote input, 0x020b enable-input, 0x020e input-version, 0x0320/0x0321 window/system state, 0x0308/0x030d cursor, 0x0203 pacing, 0x0204 frame-ack, 0x0207 QoS, 0x0301 invalidation, 0x0302 IDR, 0x0317 NACK-v2 — **every family exists in our tree, is wired, and carries KAT vectors ported from the reference's own test bytes.**
+- Cadences are the reference's: RR 1 s, QoS 50 ms, pacing 55.5 ms gate, keepalive 3 s byte-exact golden, WSS ping 2 s; QoS/RR/KA are NOT media-gated (they flow while video is dark).
+- 0x0101 renderer heartbeat: the reference does NOT answer it either (ServerControlMessage::Unhandled) — parity.
+- RTSP: no keepalive request in the reference either (NvstControlPing is an RTT sampler, not a pinger) — parity.
+- telemetry.rs is local UI JSON, not wire — irrelevant.
+- The only unshipped reference behaviour left: 0x109 termination -> resumable -> resume (the message has never appeared on our wire in 15 draws).
+- Run 44/45 summary counters (all ten draws): dropped 0, refused-path clean, retained 0, bytes_pending 0, flush_failed absent, ack == frames EXACT in every draw, qos at 18.5-20 Hz, rr ~= wall seconds, ka ~= wall/3. **The outgoing stream was pristine on totals in every single death.**
+
+### 52.2 What totals cannot see — and F32 does
+Totals average over the whole session; a sender stall in the final seconds before a kill is invisible in them (a 10 s silence is 1% of a 1070 s draw). F32 adds the missing time resolution, all in knvstd_main.c:
+- **Per-family gap latches on the outbox** (13 families: rr/ack/pacing/qos/ka/nack/idr/pli/rfi/jiggle/ping/ctrl/input): n, last_ms, maxgap_ms, maxgap_at_ms — noted at every encode/send success site (frame callbacks, main-loop cadences, sess_ctrl_send, the WSS ping service, the runtime input push).
+- **Live warn tick** in the media loop: `ctrl_out_gap` JSONL line when a family with a threshold (rr 2.5 s, ack 500 ms, pacing 2 s, qos 250 ms, ka 4.5 s, ping 3.5 s, input 90 s) goes silent — one line per family per 5 s while the violation stands. Because rr/qos/ka/ping flow WHETHER OR NOT media does, a warn on those while the receive side still looks alive is the feedback-silence smoking gun.
+- **ctrl_out_total line at EVERY session end** (keeper included), printed just before the summary (summary object untouched — the 113-key skeleton is unchanged): per family [n, last_rel, maxgap, maxgap_at].
+Discrimination table for the next flight:
+- All families' maxgap small up to the ctrl death (no pre-death ctrl_out_gap on rr/qos/ka/ping) => the client was demonstrably responsive to the last millisecond => the kill is a server-side decision about WHO the client is (attestation/identity territory) — the remaining levers become handshake identity bytes, or accepting the lottery.
+- Any of rr/qos/ka/ping gaps before the ctrl death => sender stall found; the family name + timestamp tells us which thread starved, and the fix is ours.
+
+### 52.3 Gate canon (slice 4i)
+native build 0 warnings · ctest 27/27 mb + sch · T10 dry ALL PASS 79 · T13 63/63 · sandbox_session_e2e 48/48 deletes:1 · skeleton 113==113 vs run-40, run-42-d4, run-43-c live summaries · knvstd_main.c -O0/-O2/-O3 -Wall -Wextra -Werror -Wformat-truncation=2 clean · cross-check x86_64+i686 PASS zero warnings. E2E recipe note: the header comment's source list is stale — the working link adds kn_sock/kn_sha1/kn_cm/kn_http/kn_net_mbedtls/kn_rx/knsrtp/knfec/kn_arx/kn_perf/knlog/knring/kn_input/kn_diag/kn_gs/kn_aes/kn_opus/kn_ogg + libmbedcrypto.a + libopus.a + -lm (kn_net.c must be EXCLUDED: duplicate symbols with kn_net_mbedtls.c). Rig target unchanged: T10 ALL PASS 89, stamp N after rebuild.
+
+### 52.4 Protocol change: short diagnostic sessions
+Per the operator's call (correct): stop spending nights on hour-long lottery draws of an unproven client. The death ledger says 15 of 21 recorded deaths landed under 300 s and every recorded death class except the 888/1070 s pair fits inside 20 minutes. The diagnostic unit becomes `--session-seconds=1200 --lottery=4 --lottery-gap=60` — worst realistic case ~30 minutes per command because deaths end draws early — and the hour macro stays the final acceptance gate for AFTER the mechanism is understood. Keepers at 1200 s still stop the lottery (stop-on-keeper=1) and still count as healthy-host evidence.
