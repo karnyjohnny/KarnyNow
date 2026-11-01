@@ -1083,6 +1083,13 @@ struct kn_d3d_vp {
     unsigned cliw, clih;              /* client rect (event norms space) */
     kd_iq iq;                         /* neutral capture ring            */
     kn_d3d_capture_stats cs;          /* F33a: queued/dropped/flaps      */
+    /* ---- F39 (run-102 read): the rig's cursor state decides the mouse
+     * mode. Hidden (notification 0,0 = the game captured the cursor):
+     * moves become warp-to-center REL deltas (wire type 7 — the only
+     * motion the rig consumes in that state); Visible: the letterboxed
+     * ABS path (type 5). Written by the engine thread only. ---- */
+    volatile int cursor_hidden;
+    int warp_x, warp_y;               /* client-rect center (warp point) */
 };
 
 /* F33a: focus GROUND TRUTH. Run 47 proved the flag-only model wrong in
@@ -1134,10 +1141,46 @@ static void kd_vp_capture_apply(kn_d3d_vp *vp)
         RECT wr;
         GetWindowRect(vp->hwnd, &wr);
         ClipCursor(&wr);              /* the mouse belongs to the game */
+        if (vp->cursor_hidden) {
+            /* F39: re-arm the warp point (the window may have changed)
+             * and pull the OS cursor onto it so the first delta is
+             * measured from the center, like every later one. */
+            RECT rc;
+            if (GetClientRect(vp->hwnd, &rc)) {
+                vp->warp_x = rc.right / 2;
+                vp->warp_y = rc.bottom / 2;
+            }
+            {   POINT p;
+                p.x = vp->warp_x; p.y = vp->warp_y;
+                if (ClientToScreen(vp->hwnd, &p)) SetCursorPos(p.x, p.y);
+            }
+        }
     } else {
         ClipCursor(NULL);             /* free the cursor for the OS/menu */
     }
     SetCursor(cap ? NULL : LoadCursor(NULL, IDC_ARROW));
+}
+
+/* F39: queue one REL sample per i16-sized chunk (output.rs splits
+ * out-of-range deltas the same way). Relative samples are NEVER merged
+ * — only consecutive ABS ones are (mouse-input.md: "Consecutive
+ * absolute samples replace the previous one. Relative samples are not
+ * merged."). */
+static void kd_vp_queue_fail(kn_d3d_vp *vp);   /* fwd: defined below */
+static void kd_vp_queue_mouse_rel(kn_d3d_vp *vp, int dx, int dy)
+{
+    while (dx || dy) {
+        kn_d3d_input_ev e;
+        int sx = dx > 32767 ? 32767 : (dx < -32768 ? -32768 : dx);
+        int sy = dy > 32767 ? 32767 : (dy < -32768 ? -32768 : dy);
+        memset(&e, 0, sizeof e);
+        e.kind = KN_D3D_IEV_MOVE_REL;
+        e.x = sx; e.y = sy;
+        e.win_w = vp->vw; e.win_h = vp->vh;
+        if (kd_iq_push(&vp->iq, &e) != 0) { kd_vp_queue_fail(vp); return; }
+        vp->cs.queued_move_rel++;
+        dx -= sx; dy -= sy;
+    }
 }
 
 static void kd_vp_queue_fail(kn_d3d_vp *vp)
@@ -1192,6 +1235,18 @@ static void kd_vp_queue_mouse(kn_d3d_vp *vp, int kind, unsigned id, int down,
                           &e.x, &e.y);
     e.wheel = wheel;
     e.win_w = vp->vw; e.win_h = vp->vh;   /* normalization basis = video */
+    /* F39 coalescing: a fresh ABS move REPLACES a pending unsent ABS
+     * move (the reference's send queue keeps only the latest absolute
+     * sample — run 102 draw 4 flew 1251 abs reports in 14 s). */
+    if (kind == KN_D3D_IEV_MOVE && vp->iq.count > 0u) {
+        unsigned tail = (vp->iq.head + vp->iq.count - 1u) % KD_IQ_CAP;
+        if (vp->iq.ev[tail].kind == KN_D3D_IEV_MOVE) {
+            vp->iq.ev[tail] = e;
+            vp->cs.coalesced_move++;
+            vp->cs.queued_move++;
+            return;
+        }
+    }
     if (kd_iq_push(&vp->iq, &e) == 0) {
         if (kind == KN_D3D_IEV_MOVE)  vp->cs.queued_move++;
         else if (kind == KN_D3D_IEV_BTN) vp->cs.queued_btn++;
@@ -1357,6 +1412,26 @@ static LRESULT CALLBACK kd_vp_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         kd_vp_focus_refresh(vp);         /* F33a: ground truth per message */
         if (!vp->focused)      { vp->cs.dropped_nofocus++; return 0; }
         if (vp->paused)        { vp->cs.dropped_paused++;  return 0; }
+        if (vp->cursor_hidden) {
+            /* F39: Hidden-cursor mode (the rig's notification (0,0) —
+             * the game owns the cursor). Warp-to-center relative
+             * capture: the delta since the last warp is the sample;
+             * the SetCursorPos echo lands exactly ON the warp point
+             * (delta 0, inherently silent) and re-warping is a no-op.
+             * The reference uses a Raw Input thread; the warp method is
+             * its Win32-classic equivalent (residual: one warp echo can
+             * merge with real motion — the delta stays correct because
+             * it is measured from the warp point either way). */
+            int x = (int)(short)LOWORD(l), y = (int)(short)HIWORD(l);
+            int dx = x - vp->warp_x, dy = y - vp->warp_y;
+            if (dx || dy) {
+                POINT p;
+                kd_vp_queue_mouse_rel(vp, dx, dy);
+                p.x = vp->warp_x; p.y = vp->warp_y;
+                if (ClientToScreen(h, &p)) SetCursorPos(p.x, p.y);
+            }
+            return 0;
+        }
         kd_vp_queue_mouse(vp, KN_D3D_IEV_MOVE, 0, 0, l, 0);
         return 0;
     case WM_LBUTTONDOWN: case WM_LBUTTONUP:
@@ -1843,6 +1918,43 @@ unsigned long long kn_d3d_vp_input_overflows(kn_d3d_vp *vp)
     return vp ? vp->iq.overflow : 0ull;
 }
 
+/* F39: the engine applies the pump's latched cursor state every tick;
+ * idempotent. On the Hidden transition the warp point is (re)computed
+ * from the client rect and the OS cursor is pulled onto it. */
+int kn_d3d_vp_set_cursor_hidden(kn_d3d_vp *vp, int hidden)
+{
+    int h = hidden ? 1 : 0;
+    if (!vp) return -1;
+    if (vp->cursor_hidden == h) return 0;
+    vp->cursor_hidden = h;
+    if (h) {
+        RECT rc;
+        if (GetClientRect(vp->hwnd, &rc) && rc.right > 0 && rc.bottom > 0) {
+            vp->warp_x = rc.right / 2;
+            vp->warp_y = rc.bottom / 2;
+        } else {
+            vp->warp_x = (int)vp->cliw / 2;   /* pre-window fallback */
+            vp->warp_y = (int)vp->clih / 2;
+        }
+        if (vp->interactive && vp->focused && !vp->paused) {
+            POINT p;
+            p.x = vp->warp_x; p.y = vp->warp_y;
+            if (ClientToScreen(vp->hwnd, &p)) SetCursorPos(p.x, p.y);
+        }
+        kd_logf(KN_INFO, "presenter: cursor HIDDEN by the rig - relative "
+                "mode (type 7), warp center %d,%d", vp->warp_x, vp->warp_y);
+    } else {
+        kd_logf(KN_INFO, "presenter: cursor VISIBLE - absolute mode "
+                "(type 5, letterbox-mapped)");
+    }
+    return 1;
+}
+
+int kn_d3d_vp_cursor_hidden(kn_d3d_vp *vp)
+{
+    return vp ? vp->cursor_hidden : 0;
+}
+
 void kn_d3d_vp_close(kn_d3d_vp *vp)
 {
     if (!vp) return;
@@ -1923,6 +2035,9 @@ int kn_d3d_vp_pop_input(kn_d3d_vp *vp, kn_d3d_input_ev *out)
 int kn_d3d_vp_take_menu_exit(kn_d3d_vp *vp) { (void)vp; return 0; }
 unsigned long long kn_d3d_vp_input_overflows(kn_d3d_vp *vp)
 { (void)vp; return 0; }
+int kn_d3d_vp_set_cursor_hidden(kn_d3d_vp *vp, int hidden)
+{ (void)vp; (void)hidden; return -1; }
+int kn_d3d_vp_cursor_hidden(kn_d3d_vp *vp) { (void)vp; return 0; }
 void kn_d3d_vp_close(kn_d3d_vp *vp) { (void)vp; }
 
 #endif /* _WIN32 */

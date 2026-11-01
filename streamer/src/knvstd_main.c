@@ -258,7 +258,20 @@ static void usage(void)
            "       [--cm-user-age=N]    userAge in the session body (default 25;\n"
            "                            the reference sends the account value).\n"
            "       [--cm-timezone=NAME] clientTimezone metaData IANA name\n"
-           "                            (default Europe/Warsaw).\n");
+           "                            (default Europe/Warsaw).\n"
+           "       [--session-resume=0|1]\n"
+           "                            default 1 (F38): a 403 SESSION_LIMIT\n"
+           "                            create names the account's live session\n"
+           "                            (otherUserSessions[]) — ATTACH to it\n"
+           "                            (PUT RESUME on its control node, then\n"
+           "                            poll) instead of waiting out the backoff\n"
+           "                            ladder. 0 = the legacy ladder only.\n"
+           "       [--device-id-file=PATH]\n"
+           "                            persist the random device GUID at PATH\n"
+           "                            instead of <log-dir>/kn_device_id.txt —\n"
+           "                            the launcher passes a per-INSTALL path so\n"
+           "                            every draw is the SAME device (run 102\n"
+           "                            flew five fresh devices in one evening).\n");
 }
 
 /* THE stdout-JSON string sanitizer for knvstd (name is historical — it
@@ -1483,6 +1496,11 @@ static int         g_cm_profile  = 0;              /* 0 = native */
 static int         g_cm_user_age = 25;             /* --cm-user-age=N */
 static const char *g_cm_tz_name  = "Europe/Warsaw";/* --cm-timezone=NAME */
 static char        g_cm_subsession[37];            /* fresh per draw (F35) */
+static int         g_sess_resume = 1;              /* F38: --session-resume=
+                                                      attach to a live session
+                                                      named in a 403 conflict
+                                                      instead of waiting out
+                                                      the backoff ladder */
 
 /* RFC-4122-style random UUID (v4) from SHA-1 over monotonic ms + a
  * process counter + stack-address entropy. Identification only, not a
@@ -3592,6 +3610,11 @@ typedef struct {
      * loop's jiggle gate — same single-word, single-writer pattern as
      * the sctl_* latches above (pump thread writes, main reads). */
     volatile unsigned input_active;
+    /* F39 (run-102 read): the rig's cursor state, latched by the pump's
+     * ctrl-record path and applied to the presenter by the media loop
+     * (same single-word cross-thread pattern): 1 = Hidden -> relative
+     * type-7 capture, 0 = Visible -> letterboxed absolute type 5. */
+    volatile int cursor_hidden_req;
     uint64_t origin_us;              /* transport origin (chain timestamps) */
     uint64_t next_ctrl_log_ms;
     unsigned ctrl_raw_n;
@@ -4670,6 +4693,13 @@ static size_t sess_input_capture_tick(sess_input *si, sess_fb_outbox *fb,
                         "capture") == 0)
                 sent++;
             break;
+        case KN_D3D_IEV_MOVE_REL:
+            /* F39: Hidden-cursor deltas -> wire type 7 (sid 6, the
+             * reference's unordered motion channel). */
+            if (si_send(si, fb, origin_us, SI_REL, 0, 0, 0, ev.x, ev.y,
+                        0, 0, 0, "capture") == 0)
+                sent++;
+            break;
         case KN_D3D_IEV_BTN:
             if (si_send(si, fb, origin_us, SI_BTN, 0, 0, ev.down,
                         0, 0, 0, 0, ev.vk, "capture") == 0)
@@ -4701,14 +4731,18 @@ static void sess_capture_stats_emit(kn_d3d_vp *vp, unsigned long long rel_ms,
            "\"rel_ms\":%llu,"
            "\"queued_key\":%llu,\"queued_move\":%llu,"
            "\"queued_btn\":%llu,\"queued_wheel\":%llu,"
+           "\"queued_move_rel\":%llu,\"coalesced_move\":%llu,"
            "\"dropped_nofocus\":%llu,\"dropped_paused\":%llu,"
            "\"focus_flaps\":%llu,\"overflows\":%llu,"
+           "\"cursor_hidden\":%d,"
            "\"capturing\":%d,\"paused\":%d}\n",
            final ? "input_capture_end" : "input_capture_stats",
            rel_ms,
            cs.queued_key, cs.queued_move, cs.queued_btn, cs.queued_wheel,
+           cs.queued_move_rel, cs.coalesced_move,
            cs.dropped_nofocus, cs.dropped_paused, cs.focus_flaps,
            kn_d3d_vp_input_overflows(vp),
+           kn_d3d_vp_cursor_hidden(vp),
            kn_d3d_vp_capturing(vp), kn_d3d_vp_paused(vp));
     fflush(stdout);
 }
@@ -5257,8 +5291,27 @@ static void sess_ctrl_ingest(sess_pump *p, uint16_t sid, uint32_t ppi,
             fflush(stdout);
         }
     }
-    if (kn_input_has_cursor_notification(data, len))
+    if (kn_input_has_cursor_notification(data, len)) {
         kn_input_cursor_notify(&p->cursor, kn_sock_now_ms());
+        /* F39: the notification's PAYLOAD decides the mouse mode —
+         * (msg_type 0, cursor_id 0) = the rig captured the cursor
+         * (Hidden): ONLY relative type-7 motion moves it; any other
+         * pair = Visible: letterboxed absolute type 5. Latched for the
+         * media loop (presenter thread) + one evidence line per change
+         * (the run-102 complaint: in-game cursor frozen mid-screen —
+         * every abs report we flew was ignored by a Hidden rig). */
+        int mt = -1, cid = -1;
+        if (kn_input_cursor_notification_info(data, len, &mt, &cid)) {
+            int hidden = (mt == 0 && cid == 0) ? 1 : 0;
+            if (hidden != p->cursor_hidden_req) {
+                p->cursor_hidden_req = hidden;
+                printf("{\"mode\":\"session\",\"event\":\"cursor_mode\","
+                       "\"msg_type\":%d,\"cursor_id\":%d,\"mode\":\"%s\"}\n",
+                       mt, cid, hidden ? "hidden_rel" : "visible_abs");
+                fflush(stdout);
+            }
+        }
+    }
 }
 
 /* finish_nvst_input_handshake (nvst.rs:6554-6591): once the control
@@ -6876,6 +6929,8 @@ static int run_session(const char *token, const char *device_id,
     const char *profile_name;
     int rc, http_status = 0, ring_ok, exit_code = 1, i;
     int cm_try = 0;                    /* round XLIII (F4): CM backoff */
+    int sess_resumed = 0;              /* F38: attached, not created */
+    char resume_host[256] = "";        /* F38: the conflict's control node */
     /* Round XLV (F8): the jiggle interval became a RUN parameter —
      * run 26 completed the picture (all FIVE jiggle-on draws died in
      * the ~10-13 s band; the only two long draws ever, runs 18/22 at
@@ -7147,6 +7202,65 @@ static int run_session(const char *token, const char *device_id,
         kn_net_tls_stream_close(cm_tls);
         cm_tls = NULL;
         if (rc == KN_HTTP_OK && http_status == 200) break;
+        /* F38 (run-102 read, RTSP §60.2): a 403 SESSION_LIMIT means the
+         * account still HOLDS a live session — and the 403 body names
+         * it (otherUserSessions[]). Run 102 watched two draws sit out
+         * 20 s + 40 s backoff ladders next to a session the operator
+         * could resume from the web in one click. Attach the way the
+         * reference does (cloudmatch.rs session.claim :1160-1230):
+         * PUT the RESUME body to the session's OWN control node, then
+         * poll there until fresh ready. A failed resume falls through
+         * to the legacy ladder — nothing is lost by trying. */
+        if (http_status == 403 && rc == KN_HTTP_OK && g_sess_resume) {
+            kn_cm_conflict cf;
+            if (kn_cm_parse_conflict(cm_json, &cf) == 0 &&
+                cf.app_id == app_id) {
+                char rerr[160];
+                int rstatus = 0, rrc;
+                printf("{\"mode\":\"session\",\"event\":\"cm_resume_attempt\","
+                       "\"session_id\":\"%.64s\",\"status\":%lld,"
+                       "\"control_host\":\"%.120s\"}\n",
+                       cf.session_id, (long long)cf.status, cf.control_host);
+                fflush(stdout);
+                rerr[0] = '\0';
+                cm_tls = kn_net_tls_stream_open(cf.control_host,
+                                                cf.control_port, 15000,
+                                                rerr, sizeof rerr);
+                if (cm_tls) {
+                    cm_io_ctx.s = cm_tls;
+                    hio.send = tls_send; hio.recv = tls_recv;
+                    hio.ctx = &cm_io_ctx;
+                    rrc = kn_cm_resume(hio, cf.control_host, "/", &st, &cf,
+                                       20000, sess_now, NULL,
+                                       cm_rxb, sizeof cm_rxb,
+                                       cm_json, sizeof cm_json,
+                                       &rstatus, &sess);
+                    kn_net_tls_stream_close(cm_tls);
+                    cm_tls = NULL;
+                    if (rrc == KN_HTTP_OK && rstatus == 200) {
+                        printf("{\"mode\":\"session\",\"event\":\"cm_resumed\","
+                               "\"session_id\":\"%.64s\",\"status\":%lld,"
+                               "\"phase\":\"%s\"}\n",
+                               sess.session_id, (long long)sess.status,
+                               sess.phase);
+                        fflush(stdout);
+                        rc = rrc;
+                        http_status = rstatus;
+                        sess_resumed = 1;
+                        snprintf(resume_host, sizeof resume_host, "%s",
+                                 cf.control_host);
+                        break;
+                    }
+                    printf("{\"mode\":\"session\",\"event\":\"cm_resume_failed\","
+                           "\"rc\":%d,\"http_status\":%d}\n", rrc, rstatus);
+                    fflush(stdout);
+                } else {
+                    printf("{\"mode\":\"session\",\"event\":\"cm_resume_failed\","
+                           "\"rc\":-1,\"detail\":\"%.150s\"}\n", rerr);
+                    fflush(stdout);
+                }
+            }
+        }
         if (!(http_status == 403 || cm_status_transient(http_status)) ||
             cm_try >= SESS_CM_RETRIES) break;
         printf("{\"mode\":\"session\",\"event\":\"cm_create_backoff\","
@@ -7174,9 +7288,9 @@ static int run_session(const char *token, const char *device_id,
     }
     printf("{\"mode\":\"session\",\"event\":\"cm_created\",\"session_id\":"
            "\"%.64s\",\"status\":%lld,\"phase\":\"%s\",\"queue_position\":"
-           "%lld,\"have_queue\":%d}\n",
+           "%lld,\"have_queue\":%d,\"resumed\":%d}\n",
            sess.session_id, (long long)sess.status, sess.phase,
-           (long long)sess.queue_position, sess.have_queue);
+           (long long)sess.queue_position, sess.have_queue, sess_resumed);
     fflush(stdout);
 
     /* Poll-target switch (round XXIII — the R7 run-1 finding): the create
@@ -7192,7 +7306,14 @@ static int run_session(const char *token, const char *device_id,
      * the create host (:1984 unwrap_or semantics). */
     if (kn_cm_control_base(&sess, poll_host, sizeof poll_host, &poll_port))
         poll_src = "sessionControlInfo";
-    else {
+    else if (sess_resumed && resume_host[0]) {
+        /* F38: a resumed session whose payload lacks a trusted control
+         * node polls the node the CONFLICT named — never the global
+         * create front (that is where the 403 came from). */
+        snprintf(poll_host, sizeof poll_host, "%.250s", resume_host);
+        poll_port = 443;
+        poll_src = "resume-host";
+    } else {
         snprintf(poll_host, sizeof poll_host, "%.250s", cm_host);
         poll_port = 443;
         poll_src = "create-host";
@@ -8763,6 +8884,10 @@ static int run_session(const char *token, const char *device_id,
                     (void)si_tick(&si, c.fb, pump.origin_us, now_ms,
                                   pump_persist && pump.input_active);
                 if (si.capture && c.vp) {
+                    /* F39: apply the pump's latched cursor state before
+                     * draining (idempotent; one compare when steady). */
+                    (void)kn_d3d_vp_set_cursor_hidden(c.vp,
+                                                      pump.cursor_hidden_req);
                     (void)sess_input_capture_tick(&si, c.fb, pump.origin_us,
                                                   c.vp,
                                                   pump_persist &&
@@ -9807,6 +9932,12 @@ int main(int argc, char **argv)
     int sess_cm_profile = 0;               /* F37: native is the default */
     int sess_cm_user_age = 25;             /* F35: --cm-user-age=N */
     const char *sess_cm_tz = "Europe/Warsaw"; /* F35: --cm-timezone=NAME */
+    const char *sess_device_file = NULL;   /* F38a: --device-id-file=PATH
+        — a per-INSTALL persistence path (the log-dir default rotates the
+        device every flight that uses a fresh log dir; run 102 flew five
+        "devices" in one evening) */
+    int sess_resume = 1;                   /* F38: on a 403 SESSION_LIMIT
+        conflict, attach to the live session instead of waiting it out */
     const char *sess_title = "KarnyNow session", *sess_cm_host = NULL;
     const char *sess_au_dir = NULL;
     const char *sess_audio_out = NULL;   /* round XLVIII (F11) */
@@ -9920,6 +10051,19 @@ int main(int argc, char **argv)
             sess_cm_tz = a + 14;
         else if (strncmp(a, "--session-device=", 17) == 0)
             sess_device = a + 17;
+        else if (strncmp(a, "--device-id-file=", 17) == 0)
+            sess_device_file = a + 17;   /* F38a: stable per-install id */
+        else if (strncmp(a, "--session-resume=", 17) == 0) {
+            if (strcmp(a + 17, "0") == 0)      sess_resume = 0;
+            else if (strcmp(a + 17, "1") == 0) sess_resume = 1;
+            else {
+                printf("{\"mode\":\"session\",\"event\":\"usage_error\","
+                       "\"reason\":\"--session-resume= takes 0|1\"}\n");
+                fflush(stdout);
+                usage();
+                return 2;
+            }
+        }
         else if (strncmp(a, "--session-title=", 16) == 0)
             sess_title = a + 16;
         else if (strncmp(a, "--session-app=", 14) == 0)
@@ -10072,13 +10216,23 @@ int main(int argc, char **argv)
         g_cm_profile  = sess_cm_profile;
         g_cm_user_age = sess_cm_user_age;
         g_cm_tz_name  = sess_cm_tz;
+        g_sess_resume = sess_resume;
         {
             static char dev_buf[64];
             if (!sess_device) {
                 char idpath[600];
                 FILE *idf;
-                snprintf(idpath, sizeof idpath, "%s/kn_device_id.txt",
-                         log_dir && log_dir[0] ? log_dir : "logs");
+                /* F38a: --device-id-file=PATH wins over the log-dir
+                 * default — the launcher passes a per-INSTALL path so
+                 * every draw of one installation is the SAME device
+                 * (run 102 flew five fresh "devices" in one evening
+                 * because every draw had its own log dir). */
+                if (sess_device_file && sess_device_file[0])
+                    snprintf(idpath, sizeof idpath, "%.590s",
+                             sess_device_file);
+                else
+                    snprintf(idpath, sizeof idpath, "%s/kn_device_id.txt",
+                             log_dir && log_dir[0] ? log_dir : "logs");
                 dev_buf[0] = '\0';
                 idf = fopen(idpath, "rb");
                 if (idf) {

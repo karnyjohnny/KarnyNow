@@ -1199,6 +1199,203 @@ static void test_cm_ads(void)
           "ads: missing adId refused before any I/O");
 }
 
+/* ---- F38 (run-102 read): session resume — the 403 conflict payload
+ * names the account's live session; attach instead of re-queueing.
+ * The fixture is run-102 draw 3's REAL 403 body (draw 2's orphaned
+ * seat), reduced to the load-bearing keys. ---- */
+static const char k_conflict_403[] =
+    "{\"session\":{\"sessionControlInfo\":{\"protocol\":0,"
+      "\"appLevelProtocol\":5,"
+      "\"ip\":\"np-waw-01.cloudmatchbeta.nvidiagrid.net\","
+      "\"usage\":10,\"port\":443},"
+    "\"sessionRequestData\":{\"appId\":107057914,\"appLaunchMode\":1,"
+      "\"clientPlatformName\":\"Windows\"},"
+    "\"sessionId\":\"1ce6d5f8-b77d-4516-a2d7-e450db59627b\",\"status\":1},"
+    "\"requestStatus\":{\"statusDescription\":"
+      "\"SESSION_LIMIT_EXCEEDED_STATUS 4AF1201B\",\"statusCode\":11},"
+    "\"otherUserSessions\":[{"
+      "\"sessionControlInfo\":{\"ip\":"
+        "\"np-ams-05.cloudmatchbeta.nvidiagrid.net\",\"port\":443},"
+      "\"connectionInfo\":[{\"protocol\":1,\"appLevelProtocol\":6,"
+        "\"resourcePath\":\"rtsps://80-84-170-154.cloudmatchbeta."
+        "nvidiagrid.net:322\",\"usage\":14,\"port\":322}],"
+      "\"sessionRequestData\":{\"appId\":107057914,\"appLaunchMode\":1,"
+        "\"enablePersistingInGameSettings\":false,"
+        "\"clientPlatformName\":\"Windows\"},"
+      "\"sessionId\":\"c3731ac8-d0ea-4577-a9ab-78dc539ad390\","
+      "\"status\":3}]}";
+
+static void test_cm_resume(void)
+{
+    static hio h;
+    kn_cm_settings st;
+    kn_cm_conflict cf;
+    kn_cm_session s;
+    char body[6144];
+    size_t blen = 0;
+    int status = 0, rc;
+
+    printf("-- kn_cm session resume (F38) --\n");
+
+    /* the run-102 payload: otherUserSessions[0] is the candidate; the
+     * fresh `session` (status 1) is NOT resumable (:1506-1515). */
+    memset(&cf, 0, sizeof cf);
+    rc = kn_cm_parse_conflict(k_conflict_403, &cf);
+    CHECK(rc == 0, "resume: run-102 403 parses");
+    CHECK(!strcmp(cf.session_id, "c3731ac8-d0ea-4577-a9ab-78dc539ad390"),
+          "resume: the ORPHAN's sessionId (otherUserSessions first)");
+    CHECK(!strcmp(cf.control_host, "np-ams-05.cloudmatchbeta.nvidiagrid.net")
+          && cf.control_port == 443,
+          "resume: the orphan's own control node + 443");
+    CHECK(cf.status == 3 && cf.app_id == 107057914,
+          "resume: status 3 (resumable) + appId echoed");
+    CHECK(cf.echo_app_launch_mode == 1 && cf.echo_persist == 0 &&
+          !strcmp(cf.echo_platform, "Windows"),
+          "resume: echoed appLaunchMode/persist/platform captured");
+    {   /* status 1 only -> nothing resumable */
+        static const char fx[] =
+            "{\"session\":{\"sessionId\":\"S1\",\"status\":1,"
+            "\"sessionControlInfo\":{\"ip\":\"np-waw-01.cloudmatchbeta."
+            "nvidiagrid.net\",\"port\":443},"
+            "\"sessionRequestData\":{\"appId\":107057914}}}";
+        CHECK(kn_cm_parse_conflict(fx, &cf) != 0,
+              "resume: status 1 is not resumable (:1506-1515)");
+    }
+    {   /* status 6 (terminal-ish) is not resumable either */
+        static const char fx[] =
+            "{\"session\":{\"sessionId\":\"S6\",\"status\":6,"
+            "\"sessionControlInfo\":{\"ip\":\"np-waw-01.cloudmatchbeta."
+            "nvidiagrid.net\",\"port\":443},"
+            "\"sessionRequestData\":{\"appId\":1}}}";
+        CHECK(kn_cm_parse_conflict(fx, &cf) != 0,
+              "resume: status 6 is not resumable");
+    }
+    {   /* an untrusted (private) control host is refused */
+        static const char fx[] =
+            "{\"otherUserSessions\":[{"
+            "\"sessionControlInfo\":{\"ip\":\"10.0.0.1\",\"port\":443},"
+            "\"sessionRequestData\":{\"appId\":99},"
+            "\"sessionId\":\"SX\",\"status\":2}]}";
+        CHECK(kn_cm_parse_conflict(fx, &cf) != 0,
+              "resume: a private control host never redirects the PUT");
+    }
+    {   /* a non-443 control port is refused (:1976-1980) */
+        static const char fx[] =
+            "{\"otherUserSessions\":[{"
+            "\"sessionControlInfo\":{\"ip\":\"np-ams-05.cloudmatchbeta."
+            "nvidiagrid.net\",\"port\":8443},"
+            "\"sessionRequestData\":{\"appId\":99},"
+            "\"sessionId\":\"SX\",\"status\":2}]}";
+        CHECK(kn_cm_parse_conflict(fx, &cf) != 0,
+              "resume: port != 443 refused");
+    }
+    {   /* appId <= 0 is refused (:893-894) */
+        static const char fx[] =
+            "{\"otherUserSessions\":[{"
+            "\"sessionControlInfo\":{\"ip\":\"np-ams-05.cloudmatchbeta."
+            "nvidiagrid.net\",\"port\":443},"
+            "\"sessionRequestData\":{\"appId\":0},"
+            "\"sessionId\":\"SX\",\"status\":2}]}";
+        CHECK(kn_cm_parse_conflict(fx, &cf) != 0,
+              "resume: appId 0 refused");
+    }
+
+    /* the RESUME body: the reference's subset, in its key order, with
+     * the echoed trio appended (:1546-1597). NO renegotiation keys. */
+    memset(&st, 0, sizeof st);
+    st.token = "T0KEN"; st.device_id = "dev-1"; st.app_id = 42;
+    st.title = "T"; st.width = 1280; st.height = 720; st.fps = 30;
+    st.subsession_id = "SUB-9"; st.timezone_offset_ms = 3600000;
+    rc = kn_cm_parse_conflict(k_conflict_403, &cf);
+    CHECK(rc == 0, "resume: reparse for the body leg");
+    rc = kn_cm_build_resume_body(&st, &cf, body, sizeof body, &blen);
+    CHECK(rc == KN_HTTP_OK && blen == strlen(body) && blen > 0,
+          "resume: body built");
+    {
+        const char *pfx =
+            "{\"action\":2,\"data\":\"RESUME\",\"sessionRequestData\":{"
+            "\"appId\":42,\"audioMode\":2,\"remoteControllersBitmap\":0,"
+            "\"sdrHdrMode\":0,\"networkTestSessionId\":null,"
+            "\"availableSupportedControllers\":[2],"
+            "\"preferredController\":2,\"clientVersion\":\"30.0\","
+            "\"deviceHashId\":\"dev-1\",";
+        CHECK(!strncmp(body, pfx, strlen(pfx)),
+              "resume: exact subset prefix in the reference's key order");
+    }
+    CHECK(strstr(body, "\"internalTitle\":\"T\"") != NULL &&
+          strstr(body, "\"clientPlatformName\":\"Windows\"") != NULL &&
+          strstr(body, "\"clientTimezoneOffset\":3600000") != NULL &&
+          strstr(body, "\"streamerVersion\":\"14\"") != NULL &&
+          strstr(body, "\"secureRTSPSupported\":true") != NULL,
+          "resume: subset values match the create body's sources");
+    CHECK(strstr(body, "{\"key\":\"SubSessionId\",\"value\":\"SUB-9\"}") !=
+          NULL, "resume: metaData carries the flight's SubSessionId");
+    CHECK(strstr(body, "\"appLaunchMode\":1") != NULL &&
+          strstr(body, "\"enablePersistingInGameSettings\":false") != NULL,
+          "resume: the echoed keys are re-sent (:1589-1597)");
+    CHECK(strstr(body, "\"metaData\":null,\"adUpdates\":null}") != NULL &&
+          body[blen - 1] == '}',
+          "resume: the wrapper closes with null metaData/adUpdates");
+    CHECK(strstr(body, "clientRequestMonitorSettings") == NULL &&
+          strstr(body, "requestedStreamingFeatures") == NULL &&
+          strstr(body, "sdkVersion") == NULL,
+          "resume: NO codec/geometry/fps/bitrate renegotiation (:1547)");
+    {   /* cf NULL: the echoed trio is omitted, platform defaults */
+        size_t l2 = 0;
+        char b2[6144];
+        CHECK(kn_cm_build_resume_body(&st, NULL, b2, sizeof b2, &l2) ==
+                  KN_HTTP_OK &&
+              strstr(b2, "appLaunchMode") == NULL &&
+              strstr(b2, "enablePersistingInGameSettings") == NULL &&
+              strstr(b2, "\"clientPlatformName\":\"Windows\"") != NULL,
+              "resume: NULL conflict omits the echoed keys");
+    }
+    {   /* missing title refused (same gate as the create body) */
+        kn_cm_settings bad = st;
+        bad.title = NULL;
+        CHECK(kn_cm_build_resume_body(&bad, &cf, body, sizeof body,
+                                      &blen) == KN_HTTP_ERR_ARGS,
+              "resume: missing title refused");
+    }
+
+    /* the PUT round-trip: URL carries the session preferences
+     * (language.rs :75-83), the body rides it, and the response
+     * re-fills the session like every other CM round. */
+    memset(&st, 0, sizeof st);
+    st.token = "T0KEN"; st.device_id = "dev-1"; st.app_id = 42;
+    st.title = "T"; st.width = 1280; st.height = 720; st.fps = 30;
+    hio_reset(&h);
+    {   char framed[HIO_CAP / 2];
+        snprintf(framed, sizeof framed,
+                 "HTTP/1.1 200 OK\r\nContent-Length: %lu\r\n\r\n%s",
+                 (unsigned long)strlen(k_session_ready), k_session_ready);
+        hio_queue(&h, framed);
+    }
+    memset(&cf, 0, sizeof cf);
+    snprintf(cf.session_id, sizeof cf.session_id, "SESS-1");
+    g_now = 0;
+    rc = kn_cm_resume(hio_io(&h), "np-ams-05.example", "/", &st, &cf,
+                      1000, fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
+                      sizeof g_body, &status, &s);
+    CHECK(rc == KN_HTTP_OK && status == 200, "resume: PUT 200 accepted");
+    h.from[h.flen] = '\0';
+    CHECK(strstr((char *)h.from,
+          "PUT /v2/session/SESS-1?keyboardLayout=en-US&languageCode="
+          "en_US HTTP/1.1\r\n") == (char *)h.from,
+          "resume: PUT + the session-preference query (language.rs)");
+    CHECK(strstr((char *)h.from, "Authorization: GFNJWT T0KEN\r\n") != NULL,
+          "resume: GFNJWT authorization rides the PUT");
+    CHECK(strstr((char *)h.from,
+                 "{\"action\":2,\"data\":\"RESUME\"") != NULL,
+          "resume: the RESUME body rides the PUT");
+    CHECK(!strcmp(s.session_id, "SESS-1") && s.ready,
+          "resume: the response re-fills the session (poll continues)");
+    CHECK(kn_cm_resume(hio_io(&h), "h", "/", &st, NULL, 1000, fake_now,
+                       NULL, g_rxb, sizeof g_rxb, g_body, sizeof g_body,
+                       &status, NULL) == KN_HTTP_ERR_ARGS,
+          "resume: missing conflict refused before any I/O");
+}
+
 int main(void)
 {
     test_json();
@@ -1210,5 +1407,6 @@ int main(void)
     test_cm_network();
     test_cm_cancel();
     test_cm_ads();
+    test_cm_resume();
     return kn_test_summary("test_kncm");
 }

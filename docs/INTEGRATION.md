@@ -226,6 +226,52 @@ stamp; fly the DEFAULT (native identity) via the launcher; a
 `conn_unusable` line on a native draw would falsify the model outright.
 Docs: RTSP §58 + §59, START-HERE §32, AUTH.md §6, this section.
 
+## Rev 45 slice 4p (2026-11-01 night): RUN 102 READ — F37 PROVEN LIVE (5/5 NATIVE SEATS ON THE RIG, T10 89/89); F38 SESSION RESUME + F39 CURSOR-MODE FIDELITY + ONE-DEVICE-PER-INSTALL SHIP
+Run 102 closed the identity chapter: five draws, five `profile:native` ->
+`ready:1` -> RTSPS seat -> D3D9 window -> live video flights (zero
+`conn_unusable`; T10 on the rig ALL PASS 89 on the F37 stamp). The
+deaths split cleanly: the two heaviest-input flights in project history
+(274/1251 abs reports in 10-14 s of live mouse+keyboard) drew instant
+fuses (10.3/12.1 s); hands-off and macro flights flew 268/179/312 s
+and died the run-29 decay family (kbps ramp -> 0, ctrl dead first,
+teardown rc:-3, release rc:-2 -> ORPHANED seat -> the next create's
+403 SESSION_LIMIT ladder, which the operator watched next to the same
+session still resumable on the web). Ledger 4 keepers / 33 deaths over
+37. **F38**: the 403 payload names the live session
+(`otherUserSessions[]`, run-102 evidence: status 3 + usage14/alp6
+:322 rtsps) — `kn_cm_parse_conflict` (reference filters: appId>0,
+status 2..=5, port 443, `cm_host_trusted` shared with control_base),
+`kn_cm_build_resume_body` (the :1546-1597 subset + echoed
+appLaunchMode/persist/platform; NO codec/geometry/fps renegotiation),
+`kn_cm_resume` (PUT `v2/session/{id}?keyboardLayout=en-US&
+languageCode=en_US`); knvstd tries resume before the backoff ladder
+(`--session-resume=0|1` default 1, appId-gated), events
+`cm_resume_attempt/cm_resumed/cm_resume_failed`, `cm_created` grew
+`"resumed":N`, poll-host fallback `resume-host`. **F39**: the
+"kursor zablokowany na środku" bug — the rig's cursor notification
+(0x010f, payload (0,0) = Hidden) switches the reference to RELATIVE
+type-7 motion and suppresses absolute (output.rs :1252-1265,
+cursor_state_for_message :2143); we kept flying type-5 into a Hidden
+rig. Now: `kn_input_cursor_notification_info` -> pump latch +
+`cursor_mode` event -> `kn_d3d_vp_set_cursor_hidden` (Hidden =
+warp-to-center MOVE_REL capture, i16-split, sid 6; Visible = the
+existing letterboxed abs path + the reference's coalescing: a fresh
+abs sample replaces a pending one). Capture-stats lines grew
+`queued_move_rel/coalesced_move/cursor_hidden`. **F38a**: knvstd
+`--device-id-file=`; the launcher passes
+`--session-device=<store.device_id()>` — login and CloudMatch finally
+share ONE per-install device identity (run 102 flew five "devices").
+The operator's goal ladder (G0 launch DONE / G1 manual login = F39's
+acceptance / G2 the 60-min keeper via the 4-flight discriminator plan)
+lives in RTSP §60.5 + START-HERE §33. Files: `kn_cm.{h,c}`,
+`knvstd_main.c`, `kn_input.{h,c}`, `kn_d3d.{h,c}`, `test_kncm.c`
+(232->**258**), `test_kninput.c` (794->**802**),
+`tools/kn_launcher/gui.py`. Skeleton **113 == 113** (event lines only).
+Gates: native 0 warnings · ctest 29/29 x2 · T10 dry 79 · T13 63
+(srtp_backend:1) · cross x2 -Werror 0 warnings · e2e 48/48 deletes:1 ·
+ASan+UBSan 0 diagnostics · launcher 71/0. Rig: REBUILD, T10 expected
+89 on the F38/F39 stamp, then the §60.5 ladder. Full text: RTSP §60.
+
 ## Rev 45 changed files (round N slice 4)
 
 - `streamer/include/kn/kn_audio.h` — `kn_audio_stats.prerolls`;

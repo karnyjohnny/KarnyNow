@@ -591,6 +591,15 @@ class MainWindow(QMainWindow):
                                 "the parameters — knvstd would refuse, so "
                                 "nothing was launched")
             return
+        # F38a (run-102 read): ONE device identity per install. auth.py
+        # already sends store.device_id() as the login x-device-id, and
+        # the reference reuses the SAME value for CloudMatch's
+        # x-device-id/deviceHashId — knvstd's per-log-dir random made
+        # every draw a fresh "device" (run 102 flew five in one
+        # evening) and split the login/stream identity. An
+        # operator-typed --session-device wins (no duplicate).
+        if not any(a.startswith("--session-device") for a in extra):
+            argv.append("--session-device=" + store.device_id())
         argv += extra
         log_name = self.logname.text().strip() or self._suggest_log_name()
         if not re.match(r"^[\w.\-]+\.log$", log_name):

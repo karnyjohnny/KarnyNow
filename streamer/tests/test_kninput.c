@@ -1042,6 +1042,74 @@ static void t_vk_tables(void)
     }
 }
 
+static void t_cursor_notification_info(void)
+{
+    /* F39 (run-102 read): the notification PAYLOAD decides the mouse
+     * mode — output.rs apply_cursor (:1359-1376) reads bytes[0] =
+     * message_type (only 0|1 valid) and bytes[1] = cursor_id;
+     * cursor_state_for_message (:2143-2151): (0,0) = Hidden (the rig
+     * owns the cursor — ONLY relative type-7 motion moves it), every
+     * other pair = Visible (absolute type 5, letterbox-mapped). */
+    {   /* system cursor 0x010f, (0,0) -> the Hidden pair */
+        static const uint8_t hid[6] = { 0x0f, 0x01, 0x02, 0x00, 0x00, 0x00 };
+        int mt = -1, cid = -1;
+        CHECK(kn_input_cursor_notification_info(hid, sizeof hid,
+                                                &mt, &cid) == 1 &&
+              mt == 0 && cid == 0,
+              "info: system (0,0) -> Hidden pair");
+    }
+    {   /* system cursor id 3 -> Visible */
+        static const uint8_t vis[6] = { 0x0f, 0x01, 0x02, 0x00, 0x00, 0x03 };
+        int mt = -1, cid = -1;
+        CHECK(kn_input_cursor_notification_info(vis, sizeof vis,
+                                                &mt, &cid) == 1 &&
+              mt == 0 && cid == 3,
+              "info: system id 3 -> Visible pair");
+    }
+    {   /* custom bitmap 0x0110: (1,0) is a VISIBLE bitmap (:2147-2148
+         * — only the PREDEFINED id 0 is the hidden/raw-input cursor) */
+        static const uint8_t bmp[6] = { 0x10, 0x01, 0x02, 0x00, 0x01, 0x00 };
+        int mt = -1, cid = -1;
+        CHECK(kn_input_cursor_notification_info(bmp, sizeof bmp,
+                                                &mt, &cid) == 1 &&
+              mt == 1 && cid == 0,
+              "info: custom (1,0) stays visible");
+    }
+    {   /* message_type outside {0,1} is ignored (:1369-1371) */
+        static const uint8_t bad[6] = { 0x0f, 0x01, 0x02, 0x00, 0x02, 0x00 };
+        CHECK(kn_input_cursor_notification_info(bad, sizeof bad,
+                                                NULL, NULL) == 0,
+              "info: message_type 2 ignored");
+    }
+    {   /* a 1-byte payload cannot carry the pair */
+        static const uint8_t sh[5] = { 0x0f, 0x01, 0x01, 0x00, 0x00 };
+        CHECK(kn_input_cursor_notification_info(sh, sizeof sh,
+                                                NULL, NULL) == 0,
+              "info: 1-byte payload ignored");
+    }
+    {   /* the LAST cursor record wins (the reference applies in order) */
+        static const uint8_t two[12] = {
+            0x0f, 0x01, 0x02, 0x00, 0x00, 0x00,
+            0x10, 0x01, 0x02, 0x00, 0x01, 0x07
+        };
+        int mt = -1, cid = -1;
+        CHECK(kn_input_cursor_notification_info(two, sizeof two,
+                                                &mt, &cid) == 1 &&
+              mt == 1 && cid == 7,
+              "info: last cursor record wins");
+    }
+    {   /* a batch with NO cursor record (keepalive only) */
+        uint8_t batch[16];
+        int n = kn_input_keepalive(0u, batch, sizeof batch);
+        CHECK(n == 8 &&
+              kn_input_cursor_notification_info(batch, (size_t)n,
+                                                NULL, NULL) == 0,
+              "info: no cursor record -> 0");
+    }
+    CHECK(kn_input_cursor_notification_info(NULL, 8, NULL, NULL) == 0,
+          "info: NULL bytes -> 0");
+}
+
 int main(void)
 {
     printf("== test_kninput: the NVST control/input plane ==\n");
@@ -1063,6 +1131,7 @@ int main(void)
     t_cursor_reset_semantics();
     t_cursor_failed_enables_keep_deadline();
     t_cursor_state_names();
+    t_cursor_notification_info();
     t_command_names();
     t_hist();
     t_truncations();

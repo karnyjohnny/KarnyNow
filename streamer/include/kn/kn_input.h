@@ -269,6 +269,18 @@ int kn_input_protocol_version(const uint8_t *bytes, size_t len);
  * kn_input_cursor_notify (nvst.rs:8322-8326). */
 int kn_input_has_cursor_notification(const uint8_t *bytes, size_t len);
 
+/* F39 (run-102 read, RTSP §60.3): the cursor notification PAYLOAD —
+ * output.rs apply_cursor (:1359-1376): bytes[0] = message_type (0 =
+ * predefined/system 0x010f, 1 = custom bitmap 0x0110; other values are
+ * ignored), bytes[1] = cursor_id. cursor_state_for_message (:2143):
+ * (0,0) = Hidden -> the rig captured the cursor (in-game) and consumes
+ * ONLY relative motion (type 7); every other pair = Visible -> absolute
+ * type 5 mapped into the stream viewport. Scans the record list and
+ * returns the LAST cursor record (the reference applies each in order);
+ * 1 on a parsed pair, 0 when no cursor record carries one. */
+int kn_input_cursor_notification_info(const uint8_t *bytes, size_t len,
+                                      int *msg_type, int *cursor_id);
+
 /* A short stable lowercase name for evidence lines ("input-version",
  * "qos-report", ...); "unknown-0xNNNN" formatting is the caller's job —
  * this returns NULL for codes it does not know. */

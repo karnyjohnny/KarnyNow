@@ -236,6 +236,65 @@ int kn_cm_cancel(kn_http_io io, const char *host, const char *base_path,
                  uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
                  int *http_status);
 
+/* F38 (run-102 read, RTSP §60.2): SESSION RESUME. A 403
+ * SESSION_LIMIT_EXCEEDED create response carries the account's live
+ * session(s) — run 102 proved it: `otherUserSessions[]` held the
+ * previous draw's orphan (status 3, its own control node, and the
+ * NATIVE :322 RTSPS connectionInfo). The reference attaches instead of
+ * re-queueing (cloudmatch.rs session.claim :1160-1230 +
+ * session_requires_resume :1506-1515: status 2..=5 is resumable, 1|6 is
+ * not, anything else is an error): PUT v2/session/{id} with the RESUME
+ * body on the session's control node, then poll until fresh ready.
+ * parse_conflict mirrors the reference's candidate chain (:889-895:
+ * otherUserSessions first, then session), filtering appId > 0, status
+ * 2..=5, and a trusted public control host (the same gate as
+ * kn_cm_control_base). Returns 0 with out filled, negative when no
+ * resumable candidate exists. */
+typedef struct {
+    char      session_id[64];
+    char      control_host[128];
+    uint16_t  control_port;             /* always 443 when parsed */
+    long long status;
+    long long app_id;
+    /* echoed sessionRequestData of the matched session — the resume
+     * body re-sends appLaunchMode / enablePersistingInGameSettings /
+     * clientPlatformName from it (:1589-1597). -1/"" = absent. */
+    long long echo_app_launch_mode;
+    int       echo_persist;             /* -1 absent, 0 false, 1 true */
+    char      echo_platform[32];
+} kn_cm_conflict;
+int kn_cm_parse_conflict(const char *json, kn_cm_conflict *out);
+
+/* The RESUME body — key set and value sources from build_resume_body
+ * (:1540-1599): a fresh create body's subset (appId, audioMode,
+ * remoteControllersBitmap, sdrHdrMode, networkTestSessionId,
+ * availableSupportedControllers, preferredController, clientVersion,
+ * deviceHashId, internalTitle, clientPlatformName, surroundAudioInfo,
+ * clientTimezoneOffset, clientIdentification, parentSessionId,
+ * streamerVersion, secureRTSPSupported, metaData) wrapped in
+ * {"action":2,"data":"RESUME","sessionRequestData":{...},
+ *  "metaData":null,"adUpdates":null}.
+ * Resume must NOT renegotiate codec/geometry/fps/bitrate — the monitor
+ * settings, streaming features and sdkVersion keys are absent by
+ * design. `cf` supplies the echoed fields (NULL = omit all three). */
+int kn_cm_build_resume_body(const kn_cm_settings *s,
+                            const kn_cm_conflict *cf,
+                            char *out, size_t outsz, size_t *out_len);
+
+/* PUT {base_path}v2/session/{id}?keyboardLayout=en-US&languageCode=en_US
+ * (append_session_preferences defaults, language.rs :75-83) on the
+ * conflict's control host. The response is a full session payload —
+ * extract fills `out` (may be NULL). Same header table as every other
+ * CM round (content-type text/plain residual: the reference's .json()
+ * sends application/json — the F36 ad-report precedent proved the
+ * server accepts ours; disclosed). */
+int kn_cm_resume(kn_http_io io, const char *host, const char *base_path,
+                 const kn_cm_settings *s, const kn_cm_conflict *cf,
+                 uint32_t timeout_ms,
+                 uint64_t (*now_ms)(void *), void *now_ctx,
+                 uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
+                 int *http_status, kn_cm_session *out);
+
 /* F36 (run-100 read): the queue-ad report. ad_action takes the
  * reference's mapping (cloudmatch.rs report_ad): 1 start, 2 pause,
  * 3 resume, 4 finish, 5 cancel (KN_CM_AD_* below). The body mirrors the

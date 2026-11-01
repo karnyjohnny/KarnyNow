@@ -680,22 +680,23 @@ static int cm_domain_public(const char *h, size_t len)
     return 1;
 }
 
-int kn_cm_control_base(const kn_cm_session *s, char *host_out, size_t hostsz,
-                       uint16_t *port_out)
+/* F38: the trusted-host gate extracted verbatim from
+ * kn_cm_control_base — scheme strip (:2415-2416), charset whitelist
+ * (:2403-2409), then the IPv6/IPv4/domain public checks. Returns 1 and
+ * copies the normalized host on success. Both control_base and
+ * parse_conflict share it so a conflict host can never be less trusted
+ * than a polled one. */
+static int cm_host_trusted(const char *raw, char *out, size_t outsz)
 {
     const char *p;
     size_t len, i;
-    if (!s || !s->have_control || !host_out || hostsz < 2 || !port_out)
-        return 0;
-    if (s->control_port != 443) return 0;             /* (:1976-1980) */
-    p = s->control_host;
-    if (strncmp(p, "https://", 8) == 0) p += 8;       /* (:2415-2416) */
-    else if (strstr(p, "://")) return 0;              /* any other scheme */
+    if (!raw || !out || outsz < 2) return 0;
+    p = raw;
+    if (strncmp(p, "https://", 8) == 0) p += 8;
+    else if (strstr(p, "://")) return 0;
     if (!p[0]) return 0;
     len = strlen(p);
-    if (len + 1 > hostsz) return 0;
-    /* charset whitelist — also rejects the userinfo/query/fragment
-     * carriers '/', '@', '?', '#' and whitespace (:2403-2409) */
+    if (len + 1 > outsz) return 0;
     for (i = 0; i < len; ++i) {
         char c = p[i];
         int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -703,19 +704,29 @@ int kn_cm_control_base(const kn_cm_session *s, char *host_out, size_t hostsz,
                  c == ':' || c == '[' || c == ']';
         if (!ok) return 0;
     }
-    if (p[0] == '[') {                                /* bracketed IPv6 */
+    if (p[0] == '[') {
         const char *close = strchr(p, ']');
         if (!close || close[1] != '\0' || close == p + 1) return 0;
         if (!cm_ipv6_public(p + 1, (size_t)(close - p - 1))) return 0;
-    } else if (strchr(p, ':')) {                      /* bare IPv6 text */
+    } else if (strchr(p, ':')) {
         if (!cm_ipv6_public(p, len)) return 0;
     } else if (cm_is_ipv4_text(p)) {
         if (!cm_ipv4_public(p)) return 0;
     } else if (!cm_domain_public(p, len)) {
         return 0;
     }
-    memcpy(host_out, p, len);
-    host_out[len] = '\0';
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return 1;
+}
+
+int kn_cm_control_base(const kn_cm_session *s, char *host_out, size_t hostsz,
+                       uint16_t *port_out)
+{
+    if (!s || !s->have_control || !host_out || hostsz < 2 || !port_out)
+        return 0;
+    if (s->control_port != 443) return 0;             /* (:1976-1980) */
+    if (!cm_host_trusted(s->control_host, host_out, hostsz)) return 0;
     *port_out = 443;
     return 1;
 }
@@ -873,6 +884,162 @@ int kn_cm_report_ad(kn_http_io io, const char *host, const char *base_path,
         return KN_HTTP_ERR_ARGS;
     n = snprintf(path, sizeof path, "%sv2/session/%.64s",
                  base_path ? base_path : "/", session_id);
+    if (n < 0 || (size_t)n >= sizeof path) return KN_HTTP_ERR_ARGS;
+    return cm_round(io, "PUT", host, path, s, body, blen, timeout_ms,
+                    now_ms, now_ctx, rxb, rxbsz, jsonbuf, jsoncap,
+                    http_status, out);
+}
+
+/* ------------------------------------------------------- F38: resume */
+
+int kn_cm_parse_conflict(const char *json, kn_cm_conflict *out)
+{
+    kn_jdoc d;
+    const kn_jnode *root, *src[2];
+    int c, i;
+
+    if (!json || !out) return KN_HTTP_ERR_ARGS;
+    memset(out, 0, sizeof *out);
+    out->control_port = 443;
+    out->echo_app_launch_mode = -1;
+    out->echo_persist = -1;
+    if (kn_json_parse(&d, json, strlen(json), NULL) != KN_JSON_OK) return -1;
+    root = kn_json_root(&d);
+    /* the reference's candidate chain (:889-895): otherUserSessions
+     * first, then the payload's own session object. */
+    src[0] = kn_json_get(&d, root, "otherUserSessions");
+    src[1] = kn_json_get(&d, root, "session");
+    for (c = 0; c < 2; ++c) {
+        int cnt = 0;
+        if (!src[c]) continue;
+        cnt = (c == 0) ? kn_json_len(&d, src[c]) : 1;
+        for (i = 0; i < cnt; ++i) {
+            const kn_jnode *sn =
+                (c == 0) ? kn_json_at(&d, src[c], i) : src[c];
+            const kn_jnode *srd, *sci;
+            long long status = -1, appid = 0, cport = 443;
+            char sid[64], host[256];
+            int b;
+            if (!sn) continue;
+            if (jstr(&d, kn_json_get(&d, sn, "sessionId"),
+                     sid, sizeof sid) != 0 || !sid[0])
+                continue;
+            (void)jint(kn_json_get(&d, sn, "status"), &status);
+            if (status < 2 || status > 5) continue;   /* :1506-1515 */
+            srd = kn_json_get(&d, sn, "sessionRequestData");
+            (void)jint(kn_json_get(&d, srd, "appId"), &appid);
+            if (appid <= 0) continue;                 /* :893-894 */
+            sci = kn_json_get(&d, sn, "sessionControlInfo");
+            if (jstr(&d, kn_json_get(&d, sci, "ip"),
+                     host, sizeof host) != 0 || !host[0])
+                continue;
+            (void)jint(kn_json_get(&d, sci, "port"), &cport);
+            if (cport != 443) continue;               /* :1976-1980 */
+            if (!cm_host_trusted(host, out->control_host,
+                                 sizeof out->control_host))
+                continue;                             /* :895-899 */
+            snprintf(out->session_id, sizeof out->session_id, "%s", sid);
+            out->status = status;
+            out->app_id = appid;
+            (void)jint(kn_json_get(&d, srd, "appLaunchMode"),
+                       &out->echo_app_launch_mode);
+            if (kn_json_bool(kn_json_get(&d, srd,
+                                         "enablePersistingInGameSettings"),
+                             &b) == KN_JSON_OK)
+                out->echo_persist = b ? 1 : 0;
+            (void)jstr(&d, kn_json_get(&d, srd, "clientPlatformName"),
+                       out->echo_platform, sizeof out->echo_platform);
+            return 0;
+        }
+    }
+    return -1;                    /* nothing resumable — re-queue path */
+}
+
+int kn_cm_build_resume_body(const kn_cm_settings *s,
+                            const kn_cm_conflict *cf,
+                            char *out, size_t outsz, size_t *out_len)
+{
+    char srd[4096];
+    const char *platform = "Windows";
+    int n, m = 0;
+
+    if (!s || !s->title || !s->device_id || !out || !out_len)
+        return KN_HTTP_ERR_ARGS;
+    if (cf && cf->echo_platform[0]) platform = cf->echo_platform;
+
+    /* the subset (:1546-1567) — same value sources as the create body;
+     * clientPlatformName honours the echo (:1589-1597 replaces it). */
+    n = snprintf(srd, sizeof srd,
+        "{\"appId\":%lld,"
+        "\"audioMode\":2,"
+        "\"remoteControllersBitmap\":0,"
+        "\"sdrHdrMode\":0,"
+        "\"networkTestSessionId\":null,"
+        "\"availableSupportedControllers\":[2],"
+        "\"preferredController\":2,"
+        "\"clientVersion\":\"30.0\","
+        "\"deviceHashId\":\"%.128s\","
+        "\"internalTitle\":\"%.120s\","
+        "\"clientPlatformName\":\"%.31s\","
+        "\"surroundAudioInfo\":0,"
+        "\"clientTimezoneOffset\":%ld,"
+        "\"clientIdentification\":\"GFN-PC\","
+        "\"parentSessionId\":null,"
+        "\"streamerVersion\":\"14\","
+        "\"secureRTSPSupported\":true,"
+        "\"metaData\":[{\"key\":\"wssignaling\",\"value\":\"1\"},"
+                      "{\"key\":\"SubSessionId\",\"value\":\"%.64s\"},"
+                      "{\"key\":\"surroundAudioInfo\",\"value\":\"2\"}]",
+        s->app_id, s->device_id, s->title, platform,
+        s->timezone_offset_ms,
+        (s->subsession_id && s->subsession_id[0]) ? s->subsession_id
+                                                  : s->device_id);
+    if (n < 0 || (size_t)n >= sizeof srd) return KN_HTTP_ERR_BIG;
+    /* the echoed keys — inserted ONLY when the original session carried
+     * them non-null (:1589-1597); a duplicate key would be malformed. */
+    if (cf && cf->echo_app_launch_mode >= 0) {
+        m = snprintf(srd + n, sizeof srd - (size_t)n,
+                     ",\"appLaunchMode\":%lld", cf->echo_app_launch_mode);
+        if (m < 0 || n + m >= (int)sizeof srd) return KN_HTTP_ERR_BIG;
+        n += m;
+    }
+    if (cf && cf->echo_persist >= 0) {
+        m = snprintf(srd + n, sizeof srd - (size_t)n,
+                     ",\"enablePersistingInGameSettings\":%s",
+                     cf->echo_persist ? "true" : "false");
+        if (m < 0 || n + m >= (int)sizeof srd) return KN_HTTP_ERR_BIG;
+        n += m;
+    }
+    m = snprintf(srd + n, sizeof srd - (size_t)n, "}");
+    if (m < 0 || n + m >= (int)sizeof srd) return KN_HTTP_ERR_BIG;
+    n += m;
+
+    m = snprintf(out, outsz,
+        "{\"action\":2,\"data\":\"RESUME\",\"sessionRequestData\":%s,"
+        "\"metaData\":null,\"adUpdates\":null}", srd);
+    if (m < 0 || (size_t)m >= outsz) return KN_HTTP_ERR_BIG;
+    *out_len = (size_t)m;
+    return KN_HTTP_OK;
+}
+
+int kn_cm_resume(kn_http_io io, const char *host, const char *base_path,
+                 const kn_cm_settings *s, const kn_cm_conflict *cf,
+                 uint32_t timeout_ms,
+                 uint64_t (*now_ms)(void *), void *now_ctx,
+                 uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
+                 int *http_status, kn_cm_session *out)
+{
+    char path[448], body[6144];
+    size_t blen = 0;
+    int n;
+    if (!host || !s || !cf || !cf->session_id[0])
+        return KN_HTTP_ERR_ARGS;
+    if (kn_cm_build_resume_body(s, cf, body, sizeof body,
+                                &blen) != KN_HTTP_OK)
+        return KN_HTTP_ERR_ARGS;
+    n = snprintf(path, sizeof path,
+                 "%sv2/session/%.64s?keyboardLayout=en-US&languageCode=en_US",
+                 base_path ? base_path : "/", cf->session_id);
     if (n < 0 || (size_t)n >= sizeof path) return KN_HTTP_ERR_ARGS;
     return cm_round(io, "PUT", host, path, s, body, blen, timeout_ms,
                     now_ms, now_ctx, rxb, rxbsz, jsonbuf, jsoncap,

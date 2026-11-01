@@ -132,3 +132,19 @@ Test discipline: run `test_launcher.py` AS A SCRIPT with
 `QT_QPA_PLATFORM=offscreen` (never via pytest — the checks are
 script-mode). Current: **71 checks, 0 failures**. Flow details live in
 RTSP §59.4 and START-HERE §32.
+
+### 6.1 Addendum (slice 4p): ONE device identity per install — login and CloudMatch finally agree
+`store.device_id()` (a persisted UUID in `%APPDATA%/KarnyNow/device_id.txt`)
+was already sent as the login `x-device-id` header (auth.py) — but the
+launcher never passed it to knvstd, and knvstd defaults to persisting its
+GUID **per log directory**: every draw of run 102 flew a fresh
+`device_hash_id`, so the account looked like FIVE different devices in one
+evening while the login said one. The reference keeps a single per-install
+identity for both paths. Fixed: `gui.py:_launch` appends
+`--session-device=<store.device_id()>` (operator override wins), and knvstd
+gained `--device-id-file=PATH` for manual runs. Consequence for the resume
+flow (§RTSP 60.2): a resumed session's `deviceHashId` in the resume body
+now matches the identity that created it, instead of silently rotating.
+`test_launcher.py`: 71/0 (the flag is injected only when the operator did
+not type `--session-device` — same guard style as the existing `--has-app`
+logic).

@@ -563,6 +563,37 @@ int kn_input_has_cursor_notification(const uint8_t *bytes, size_t len)
     return ctx.found;
 }
 
+typedef struct {
+    int found;
+    int msg_type, cursor_id;
+} kn_in_cursor_info_ctx;
+
+static void kn_in_cursor_info_cb(void *vctx, uint16_t code,
+                                 const uint8_t *payload, size_t plen)
+{
+    kn_in_cursor_info_ctx *ctx = (kn_in_cursor_info_ctx *)vctx;
+    if (code != KN_INPUT_CMD_SYSTEM_CURSOR && code != KN_INPUT_CMD_BITMAP_CURSOR)
+        return;
+    if (plen < 2u) return;            /* apply_cursor: needs both bytes */
+    if (payload[0] > 1u) return;      /* only message_type 0|1 are valid */
+    ctx->found = 1;                   /* last record wins (applied in order) */
+    ctx->msg_type = (int)payload[0];
+    ctx->cursor_id = (int)payload[1];
+}
+
+int kn_input_cursor_notification_info(const uint8_t *bytes, size_t len,
+                                      int *msg_type, int *cursor_id)
+{
+    /* F39: output.rs apply_cursor payload layout — see kn_input.h. */
+    kn_in_cursor_info_ctx ctx;
+    ctx.found = 0; ctx.msg_type = -1; ctx.cursor_id = -1;
+    (void)kn_input_scan(bytes, len, kn_in_cursor_info_cb, &ctx);
+    if (!ctx.found) return 0;
+    if (msg_type)  *msg_type  = ctx.msg_type;
+    if (cursor_id) *cursor_id = ctx.cursor_id;
+    return 1;
+}
+
 const char *kn_input_command_name(uint16_t code)
 {
     switch (code) {

@@ -215,7 +215,10 @@ enum {
     KN_D3D_IEV_KEY   = 1,   /* vk/mods/down — OS auto-repeat forwarded  */
     KN_D3D_IEV_MOVE  = 2,   /* x/y in client px, win_w/win_h for norms  */
     KN_D3D_IEV_BTN   = 3,   /* vk = button id, down = press/release     */
-    KN_D3D_IEV_WHEEL = 4    /* wheel = WM_MOUSEWHEEL delta (±120 steps) */
+    KN_D3D_IEV_WHEEL = 4,   /* wheel = WM_MOUSEWHEEL delta (±120 steps) */
+    KN_D3D_IEV_MOVE_REL = 5 /* F39: x/y carry dx/dy (i16 range, split
+                             * like the reference) while the rig's cursor
+                             * is Hidden — warp-to-center capture */
 };
 /* mods bits EQUAL kn_input.h KN_INPUT_MOD_* by design (forwarded as-is);
  * button ids EQUAL KN_INPUT_BTN_* (left 1, middle 2, right 3, x1 4,
@@ -262,6 +265,16 @@ int kn_d3d_vp_pop_input(kn_d3d_vp *vp, kn_d3d_input_ev *out); /* 1 = event */
 int kn_d3d_vp_take_menu_exit(kn_d3d_vp *vp);  /* consume-once exit latch */
 unsigned long long kn_d3d_vp_input_overflows(kn_d3d_vp *vp);
 
+/* F39 (run-102 read, RTSP §60.3): the rig's cursor state drives the
+ * mouse mode — Hidden (notification 0,0): the local cursor hides, the
+ * capture warps to the client-rect center after every move and the ring
+ * receives MOVE_REL deltas (wire type 7); Visible: the existing
+ * letterboxed absolute path (wire type 5). Idempotent; safe to call
+ * every tick from the media loop with the pump's latched request.
+ * Returns 1 when the mode CHANGED, 0 when unchanged, -1 on bad args. */
+int kn_d3d_vp_set_cursor_hidden(kn_d3d_vp *vp, int hidden);
+int kn_d3d_vp_cursor_hidden(kn_d3d_vp *vp);
+
 /* F33a (run-47 post-mortem): capture instrumentation. queued_* count
  * events accepted into the ring per kind; dropped_nofocus counts mouse
  * events refused because GetForegroundWindow() != hwnd (ground truth —
@@ -274,6 +287,8 @@ typedef struct kn_d3d_capture_stats {
     unsigned long long queued_key, queued_move, queued_btn, queued_wheel;
     unsigned long long dropped_nofocus, dropped_paused;
     unsigned long long focus_flaps;
+    unsigned long long queued_move_rel;   /* F39: deltas while Hidden */
+    unsigned long long coalesced_move;    /* F39: abs samples replaced */
 } kn_d3d_capture_stats;
 int kn_d3d_vp_capture_stats(kn_d3d_vp *vp, kn_d3d_capture_stats *out);
 
