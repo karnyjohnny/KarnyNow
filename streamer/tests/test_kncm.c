@@ -318,6 +318,10 @@ static void test_cm_extract(void)
           s.media_port == 47995, "usage-2 bundle/media peer (:2050)");
     CHECK(s.have_seat && s.seat_setup_step == 3, "seatSetupStep");
     CHECK(s.have_queue && s.queue_position == 7, "queuePosition");
+    CHECK(s.conn_count == 3 && s.conn0_usage == 16 && s.conn0_alp == -1 &&
+          s.conn0_port == 322 && s.conn0_path[0] == '\0',
+          "F37: conn0 witness on a healthy native seat (absent alp/path = "
+          "-1/\"\", present port = 322)");
 
     {   /* usage 14 + appLevelProtocol 1 also qualifies; status 1 not ready */
         static const char fx[] =
@@ -338,6 +342,26 @@ static void test_cm_extract(void)
         CHECK(kn_cm_extract_session(fx, &s) == 0 && !s.have_rtsps &&
               s.ready == 0,
               "usage14+alp4 (WebRTC) does not produce an rtsps endpoint");
+    }
+    {   /* F37 (run-101 verbatim): the BROWSER-identity seat — status 2,
+         * usage 14 + alp 5 on :443 /nvst/. ready MUST stay 0 and the
+         * conn0 witness fields must name the shape so the session loop
+         * can fail fast with conn_unusable instead of polling silently
+         * for 217 s (RTSP §59.2). */
+        static const char fx[] =
+            "{\"session\":{\"sessionId\":\"E5FEC7C9\",\"status\":2,"
+            "\"connectionInfo\":[{\"protocol\":1,\"appLevelProtocol\":5,"
+            "\"ip\":\"80-250-97-36.cloudmatchbeta.nvidiagrid.net\","
+            "\"resourcePath\":\"/nvst/\",\"usage\":14,\"port\":443}],"
+            "\"seatSetupInfo\":{\"queuePosition\":0,\"seatSetupStep\":3}}}";
+        CHECK(kn_cm_extract_session(fx, &s) == 0, "run-101 seat fixture");
+        CHECK(s.status == 2 && s.ready == 0 && !s.have_rtsps,
+              "run-101: status 2 but usage14+alp5 is NOT rtsps -> ready 0");
+        CHECK(s.conn_count == 1 && s.conn0_usage == 14 && s.conn0_alp == 5 &&
+              s.conn0_port == 443 && strcmp(s.conn0_path, "/nvst/") == 0,
+              "run-101: conn0 witness fields (usage/alp/port/path)");
+        CHECK(s.have_seat && s.seat_setup_step == 3 && !s.have_queue,
+              "run-101: seatSetupStep 3, queuePosition 0 filtered");
     }
     {   /* resourcePath rtsps URL kept as-is; port required (:2005) */
         static const char fx[] =
@@ -397,7 +421,7 @@ static void test_cm_body(void)
 {
     kn_cm_settings st;
     static char body[8192], auth[2048];
-    kn_http_header hh[10];
+    kn_http_header hh[24];
     size_t n = 0;
     static kn_jdoc d;
 
@@ -470,6 +494,38 @@ static void test_cm_body(void)
             CHECK(kn_json_get(&d, srd, "transport")->type == KN_J_NULL,
                   "transport null (native NVST)");
         }
+        {   /* F37: the OpenNOW-strict deltas (RTSP §59.3) */
+            const kn_jnode *md, *f, *dlss;
+            char sv2[128];
+            CHECK(kn_json_int(kn_json_get(&d, srd, "appLaunchMode"), &iv)
+                      == KN_JSON_OK && iv == 1,
+                  "appLaunchMode 1 (\"default\", :2979-2985)");
+            CHECK(kn_json_int(kn_json_get(&d, srd, "userAge"), &iv)
+                      == KN_JSON_OK && iv == 25,
+                  "userAge 25 fallback (:1740)");
+            f = kn_json_get(&d, srd, "requestedStreamingFeatures");
+            dlss = kn_json_get(&d, f, "dlssOverrides");
+            CHECK(dlss != NULL && dlss->type == KN_J_OBJ &&
+                  kn_json_int(kn_json_get(&d, dlss, "srScale"), &iv)
+                      == KN_JSON_OK && iv == 100,
+                  "dlssOverrides = default_overrides object (dlss.rs :22)");
+            md = kn_json_get(&d, srd, "metaData");
+            CHECK(kn_json_str_copy(kn_json_get(&d, kn_json_at(&d, md, 1),
+                                               "value"),
+                                   sv2, sizeof sv2) == KN_JSON_OK &&
+                  strcmp(sv2, "device-hash-abc") == 0,
+                  "SubSessionId falls back to the device id when unset");
+        }
+    }
+    {   /* F37: a supplied fresh SubSessionId lands verbatim */
+        st.subsession_id = "6406b345-f343-4fd5-8489-729bcdd01f4d";
+        CHECK(kn_cm_build_create_body(&st, body, sizeof body, &n) ==
+                  KN_HTTP_OK &&
+              strstr(body, "{\"key\":\"SubSessionId\",\"value\":"
+                           "\"6406b345-f343-4fd5-8489-729bcdd01f4d\"}")
+                  != NULL,
+              "SubSessionId = the fresh per-draw UUID (random_uuid :1675)");
+        st.subsession_id = NULL;
     }
     st.fps = 120;
     CHECK(kn_cm_build_create_body(&st, body, sizeof body, &n) == KN_HTTP_OK &&
@@ -480,20 +536,45 @@ static void test_cm_body(void)
     CHECK(kn_cm_auth_header(&st, auth, sizeof auth) == KN_HTTP_OK &&
           strcmp(auth, "GFNJWT TOKEN123") == 0, "auth header format (:2040)");
     {
-        int i, nh = kn_cm_fixed_headers(&st, hh, 10);
-        int have_ct = 0, have_id = 0;
-        CHECK(nh == 10, "ten fixed headers");
+        int i, nh = kn_cm_fixed_headers(&st, hh, 22);
+        int have_ct = 0, have_id = 0, have_ua = 0, have_ident = 0,
+            have_os = 0, have_type = 0, have_make = 0, have_model = 0,
+            have_xdev = 0;
+        CHECK(nh == 12, "twelve fixed native headers (F37: +UA +identity)");
         for (i = 0; i < nh; ++i) {
             if (strcmp(hh[i].name, "Content-Type") == 0 &&
                 strcmp(hh[i].value, "text/plain") == 0) have_ct = 1;
             if (strcmp(hh[i].name, "nv-client-id") == 0 &&
                 strcmp(hh[i].value, KN_CM_LCARS_CLIENT_ID) == 0) have_id = 1;
+            if (strcmp(hh[i].name, "user-agent") == 0 &&
+                strcmp(hh[i].value, KN_CM_BIFROST_UA) == 0) have_ua = 1;
+            if (strcmp(hh[i].name, "x-nv-client-identity") == 0 &&
+                strcmp(hh[i].value, KN_CM_BIFROST_UA) == 0) have_ident = 1;
+            if (strcmp(hh[i].name, "nv-device-os") == 0 &&
+                strcmp(hh[i].value, "WINDOWS") == 0) have_os = 1;
+            if (strcmp(hh[i].name, "nv-device-type") == 0 &&
+                strcmp(hh[i].value, "DESKTOP") == 0) have_type = 1;
+            if (strcmp(hh[i].name, "nv-device-make") == 0 &&
+                strcmp(hh[i].value, "UNKNOWN") == 0) have_make = 1;
+            if (strcmp(hh[i].name, "nv-device-model") == 0 &&
+                strcmp(hh[i].value, "UNKNOWN") == 0) have_model = 1;
+            if (strcmp(hh[i].name, "x-device-id") == 0 &&
+                strcmp(hh[i].value, "device-hash-abc") == 0) have_xdev = 1;
         }
-        CHECK(have_ct, "Content-Type text/plain quirk (:2041)");
-        CHECK(have_id, "nv-client-id = LCARS (:2042)");
+        CHECK(have_ct, "Content-Type text/plain quirk (:2270)");
+        CHECK(have_id, "nv-client-id = LCARS (:2271)");
+        CHECK(have_ua, "Bifrost user-agent (:2266, :3025)");
+        CHECK(have_ident, "x-nv-client-identity = the UA (:2285)");
+        CHECK(have_os && have_type && have_make && have_model,
+              "device quartet WINDOWS/DESKTOP/UNKNOWN/UNKNOWN (:2999-3023)");
+        CHECK(have_xdev, "x-device-id = settings device_id (:2284)");
+        CHECK(strcmp(hh[0].name, "user-agent") == 0,
+              "UA is the first header (capture order, :2266)");
         for (i = 0; i < nh; ++i)
             if (strstr(hh[i].name, "uthorization")) { CHECK(0, "no auth here"); }
         CHECK(1, "Authorization deliberately NOT in the fixed table");
+        CHECK(kn_cm_fixed_headers(&st, hh, 10) == 0,
+              "native table refuses a too-small max (<12)");
     }
 }
 

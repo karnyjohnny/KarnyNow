@@ -10,6 +10,8 @@
 #      "Arknights: Endfield"), word-start hits ranked higher
 # Empty query = the full (pre-sorted) list. Results are capped.
 
+from __future__ import annotations
+
 import unicodedata
 
 CAP = 100

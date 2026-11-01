@@ -242,13 +242,19 @@ static void usage(void)
            "                            mode only; lottery draws append under\n"
            "                            per-draw headers. The file is\n"
            "                            operator-sensitive: never push raw.\n"
-           "       [--cm-profile=browser|native]\n"
-           "                            round N slice 4n (F35): the CloudMatch\n"
-           "                            identity profile. browser (DEFAULT)\n"
-           "                            mirrors the play.geforcenow.com 2.0.89.154\n"
-           "                            wiretap field-for-field (body + headers);\n"
-           "                            native = the legacy OpenNOW-transcribed\n"
-           "                            chimera (A/B and rollback only).\n"
+           "       [--cm-profile=native|browser]\n"
+           "                            the CloudMatch identity profile. native\n"
+           "                            (DEFAULT, F37) is OpenNOW-strict and is\n"
+           "                            the only profile that provisions a seat\n"
+           "                            this client can stream: secureRTSPSupported\n"
+           "                            + streamerVersion 14 -> connectionInfo\n"
+           "                            usage 16 / usage 14 alp 1|6 on :322.\n"
+           "                            browser mirrors the play.geforcenow.com\n"
+           "                            2.0.89.154 wiretap (F35) and provisions a\n"
+           "                            WEBRTC seat (usage 14 alp 5, :443 /nvst/)\n"
+           "                            -> run 101 proved it queues and clears the\n"
+           "                            ad gate but never becomes streamable here.\n"
+           "                            CloudMatch-level A/B only; RTSP §59.\n"
            "       [--cm-user-age=N]    userAge in the session body (default 25;\n"
            "                            the reference sends the account value).\n"
            "       [--cm-timezone=NAME] clientTimezone metaData IANA name\n"
@@ -1464,12 +1470,16 @@ static int  g_sess_present = 0;   /* round N (F20): --session-present */
 static int  g_sess_interactive = 0; /* round N slice 4j (F33): --session-interactive */
 static int  g_sess_audio_play = 0; /* round N slice 3 (F21): --session-audio-play */
 
-/* F35 (round N slice 4n): the CM identity profile. Browser parity is the
- * DEFAULT — the run-60/61 wiretap audit (RTSP §57) showed our legacy
- * identity was a chimera (NATIVE/Dell/Win7 headers + WebRTC-signaling
- * metadata + a static branded deviceHashId) while the reference web
- * client announces BROWSER/WEBRTC/CHROME with fresh random UUIDs. */
-static int         g_cm_profile  = 1;              /* 1 = browser */
+/* F35 (round N slice 4n) introduced the CM identity profile knob with
+ * browser parity as the default; F37 (RTSP §59) flips it back: the
+ * browser identity provisions a WEBRTC-only seat (run 101: status 2 +
+ * connectionInfo usage 14 alp 5 :443 /nvst/ -> ready:0 for 217 s ->
+ * the cloud's INTERNAL_ERROR teardown), while the NATIVE identity
+ * (OpenNOW-strict since F37: Bifrost UA, WINDOWS/DESKTOP/UNKNOWN
+ * device quartet, appLaunchMode 1, dlssOverrides object, fresh
+ * SubSessionId) is the one that provisions the RTSP seat every keeper
+ * ever flew on (:322, runs 22-61). */
+static int         g_cm_profile  = 0;              /* 0 = native */
 static int         g_cm_user_age = 25;             /* --cm-user-age=N */
 static const char *g_cm_tz_name  = "Europe/Warsaw";/* --cm-timezone=NAME */
 static char        g_cm_subsession[37];            /* fresh per draw (F35) */
@@ -7295,6 +7305,34 @@ static int run_session(const char *token, const char *device_id,
                 sess_ad_play(&st, &sess, poll_host, poll_port,
                              ad_handled, sizeof ad_handled, &t_start,
                              &ads_done);
+            /* F37 (run-101 read, RTSP §59.2): the unusable-seat
+             * fail-fast. The cloud reached status 2 and DID offer
+             * connectionInfo, but conn_signaling rejected every entry —
+             * the browser identity's WebRTC seat (usage 14 alp 5, :443
+             * /nvst/) that this RTSP client can never consume. Run 101
+             * polled that state for 217 s in silence until the cloud
+             * tore the seat down (INTERNAL_ERROR 02F12011); name it on
+             * the FIRST poll instead and release the seat below. */
+            if (sess.status >= 2 && !sess.have_rtsps &&
+                sess.conn_count > 0) {
+                char pathesc[64];
+                lb_json_path(pathesc, sizeof pathesc, sess.conn0_path);
+                printf("{\"mode\":\"session\",\"event\":\"conn_unusable\","
+                       "\"status\":%lld,\"conn_count\":%d,"
+                       "\"conn0_usage\":%lld,\"conn0_alp\":%lld,"
+                       "\"conn0_port\":%lld,\"conn0_path\":\"%s\","
+                       "\"note\":\"seat ready but no RTSP-signaling "
+                       "connection (usage 16 / usage 14 alp 1|6) was "
+                       "offered - WebRTC-only seat; fly "
+                       "--cm-profile=native\"}\n",
+                       (long long)sess.status, sess.conn_count,
+                       (long long)sess.conn0_usage,
+                       (long long)sess.conn0_alp,
+                       (long long)sess.conn0_port, pathesc);
+                fflush(stdout);
+                stop_reason = "seat_unusable";
+                break;
+            }
             continue;
         }
         if (rc == KN_HTTP_OK && http_status == 404) {
@@ -9766,7 +9804,7 @@ int main(int argc, char **argv)
     const char *sess_token = NULL, *sess_device = NULL;  /* F35: NULL =
         persisted random GUID (the branded "karnynow-win7-e5500" default
         was a static fingerprint shared by EVERY flight ever — RTSP §57) */
-    int sess_cm_profile = 1;               /* F35: --cm-profile=browser */
+    int sess_cm_profile = 0;               /* F37: native is the default */
     int sess_cm_user_age = 25;             /* F35: --cm-user-age=N */
     const char *sess_cm_tz = "Europe/Warsaw"; /* F35: --cm-timezone=NAME */
     const char *sess_title = "KarnyNow session", *sess_cm_host = NULL;

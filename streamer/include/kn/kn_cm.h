@@ -9,6 +9,13 @@
  * four-source fallback (:1971-1982). Wire facts mirrored in
  * docs/RTSP.md §5; login/token: docs/AUTH.md.
  *
+ * F37 re-verified against OpenNOW @ 1cb3479 (2026-10-29): the native
+ * create body is build_create_body :1643-1762 (metadata trio :1674,
+ * appLaunchMode :2979-2985 — "default" is 1, NOT 0; dlssOverrides =
+ * dlss.rs default_overrides :22-24), cloudmatch_headers :2263-2287
+ * (Bifrost UA + x-nv-client-identity + WINDOWS/DESKTOP/UNKNOWN/UNKNOWN)
+ * and the endpoint filter :1989-2022 — unchanged. docs/RTSP.md §59.
+ *
  * DEVIATION (documented, bounded): R22's full 31-field session context is
  * the stage-4 TUI IPC contract; this struct carries the stage-2 SUBSET
  * the media path consumes (sessionId/status/phase/queue/seat, the first
@@ -40,6 +47,13 @@ extern "C" {
  * request. The browser profile announces THIS; the legacy profile keeps
  * the OpenNOW-transcribed 2.0.87.131. */
 #define KN_CM_CLIENT_VERSION_BROWSER "2.0.89.154"
+/* F37 (RTSP §59): the NATIVE client's User-Agent, byte-for-byte from
+ * bifrost_user_agent (cloudmatch.rs :3025-3033, Windows leg) — it is
+ * ALSO the x-nv-client-identity value (:2266-2267, :2285-2286). The
+ * legacy table sent NO user-agent at all; the official native client
+ * always sends this one. */
+#define KN_CM_BIFROST_UA \
+    "GFN-PC/30.0 (Windows NT 10.0) BifrostClientSDK/4.9 (38495286)"
 #define KN_CM_DEFAULT_BASE_HOST "prod.cloudmatchbeta.nvidiagrid.net"
 
 typedef struct kn_cm_settings {
@@ -51,20 +65,35 @@ typedef struct kn_cm_settings {
                                   the browser profile sends null) */
     uint32_t    width, height, fps;
     long        timezone_offset_ms;   /* clientTimezoneOffset */
-    /* F35 (round N slice 4n): the browser-parity identity profile.
-     * RTSP §57: our old identity was a chimera (NATIVE headers + Dell
-     * Win7 device strings + WebRTC signaling metadata + a static
-     * branded deviceHashId) while our transport IS browser-shaped
-     * (WSS signaling, no secure RTSP). The browser profile mirrors the
-     * reference capture field-for-field. */
-    int         profile;       /* 0 = legacy native-chimera,
-                                  1 = browser parity (knvstd default) */
+    /* F35 (round N slice 4n): the identity profile knob.
+     * F37 (RTSP §59) CORRECTS F35's premise and flips the default:
+     * the browser identity makes CloudMatch provision a WEBRTC seat —
+     * connectionInfo usage 14 with appLevelProtocol 5 on :443 /nvst/,
+     * the JSON sign_in protocol (gfn_ref_urls.txt) — which this RTSP
+     * client can never consume (run 101: ready:0 for 217 s, then the
+     * cloud's INTERNAL_ERROR teardown). OpenNOW rejects the same shape
+     * (cloudmatch.rs :1989-2022 accepts only usage 16 or usage 14 with
+     * alp 1|6) and provisions its RTSP seat with the NATIVE identity:
+     * secureRTSPSupported true + streamerVersion "14" + NO
+     * GSStreamerType metadata. Profile 0 is therefore OpenNOW-strict
+     * NATIVE (the DEFAULT and the only streamable identity); profile 1
+     * stays reachable for CloudMatch-level A/B experiments ONLY — it
+     * queues and handles ads faithfully but its seat is unstreamable
+     * here by construction. */
+    int         profile;       /* 0 = OpenNOW-strict native (DEFAULT),
+                                  1 = browser parity (CM experiments;
+                                      provisions a WebRTC-only seat) */
     const char *subsession_id; /* metaData SubSessionId — a FRESH random
-                                  UUID per session (browser behaviour);
-                                  required for profile 1 */
+                                  UUID per session (OpenNOW random_uuid,
+                                  cloudmatch.rs :1675). F37: BOTH
+                                  profiles use it; NULL/empty degrades
+                                  to the device id (the old D-cm2
+                                  behaviour) so no caller can crash the
+                                  native leg. Required for profile 1. */
     const char *tz_name;       /* metaData clientTimezone IANA name,
                                   e.g. "Europe/Warsaw"; required for
-                                  profile 1 */
+                                  profile 1 (the native body carries the
+                                  offset only, like OpenNOW's) */
     int         user_age;      /* userAge; <= 0 falls back to 25 */
 } kn_cm_settings;
 
@@ -122,6 +151,21 @@ typedef struct kn_cm_session {
     long long ad_len_s;               /* sessionAds[0].adLengthInSeconds */
     char      ad_url[512];            /* sessionAds[0].adUrl (VAST/IMA) */
     int       ads_required;           /* session.sessionAdsRequired */
+    /* F37 (run-101 read, RTSP §59.2): the unusable-seat witness. A
+     * browser-identity session reaches status 2 with connectionInfo
+     * entries that conn_signaling REJECTS (usage 14 + appLevelProtocol
+     * 5 = the WebRTC /nvst/ sign_in endpoint on :443) — run 101 polled
+     * that "ready:0" state for 217 s in silence until the cloud tore
+     * the seat down with INTERNAL_ERROR 02F12011. These fields let the
+     * session loop name the failure on its FIRST poll instead: the
+     * caller emits one conn_unusable event and stops with a stop_reason
+     * that points at --cm-profile. First entry only (a diagnostic, not
+     * a model of the array). */
+    int       conn_count;             /* connectionInfo entries seen */
+    long long conn0_usage;            /* entry[0].usage (-1 = absent) */
+    long long conn0_alp;              /* entry[0].appLevelProtocol */
+    long long conn0_port;             /* entry[0].port */
+    char      conn0_path[48];         /* entry[0].resourcePath */
 } kn_cm_session;
 
 /* Build the POST v2/session body ({"sessionRequestData":{...}}) —

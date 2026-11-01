@@ -118,14 +118,25 @@ int kn_cm_build_create_body(const kn_cm_settings *s, char *out,
     }
 
     if (!s->title) return KN_HTTP_ERR_ARGS;
-    /* Field-for-field with build_create_body (:1643-1762) for the
-     * H264/8-bit/no-HDR envelope: codec stays client-selected (never
-     * sent), bitDepth=0 chromaFormat=0, reflex = fps>=120 (no cloud gsync
-     * in bring-up), persistence false. UNVERIFIED-at-R7 fields
-     * (documented): networkTestSessionId null (D-cm1), displayData null,
-     * dlssOverrides null, appLaunchMode 0, userAge 25 (reference
-     * constant), SubSessionId = device id (D-cm2 — the reference uses a
-     * fresh random UUID; R7 measures whether the cloud cares). */
+    /* F37 (RTSP §59.3): OpenNOW-strict NATIVE body — field-for-field
+     * with build_create_body (:1643-1762 @ 1cb3479) for the H264/8-bit/
+     * no-HDR envelope: codec stays client-selected (never sent),
+     * bitDepth=0 chromaFormat=0, reflex = fps>=120 (no cloud gsync in
+     * bring-up), persistence false. This is the identity that
+     * provisions the RTSP seat (secureRTSPSupported true +
+     * streamerVersion "14" + NO GSStreamerType metadata — the server
+     * answers with connectionInfo usage 16 or usage 14/alp 1|6 on
+     * :322; the browser profile's WebRTC seat is unstreamable here).
+     * F37 deltas vs the legacy chimera body: SubSessionId is the fresh
+     * per-draw UUID when the caller supplies one (random_uuid :1675;
+     * D-cm2's device-id reuse was NOT the reference — it stays only as
+     * the NULL fallback), appLaunchMode is 1 ("default", :2979-2985 —
+     * the legacy 0 matched no real client) and dlssOverrides is the
+     * dlss.rs default_overrides object (:22-24; the legacy null was the
+     * browser-diff's tell). Still UNVERIFIED-at-R7: networkTestSessionId
+     * null (D-cm1 — the QT front end never sets it, so null IS the
+     * reference value; kept), displayData null (:1602-1604 non-HDR),
+     * userAge 25 (:1740 constant). */
     n = snprintf(out, outsz,
         "{\"sessionRequestData\":{"
         "\"appId\":%lld,"
@@ -157,27 +168,31 @@ int kn_cm_build_create_body(const kn_cm_settings *s, char *out,
         "\"remoteControllersBitmap\":0,"
         "\"clientTimezoneOffset\":%ld,"
         "\"enhancedStreamMode\":0,"
-        "\"appLaunchMode\":0,"
+        "\"appLaunchMode\":1,"
         "\"secureRTSPSupported\":true,"
         "\"partnerCustomData\":null,"
         "\"accountLinked\":false,"
         "\"enablePersistingInGameSettings\":false,"
         "\"requestedAudioFormat\":0,"
-        "\"userAge\":25,"
+        "\"userAge\":%d,"
         "\"requestedStreamingFeatures\":{"
             "\"reflex\":%s,\"bitDepth\":0,\"cloudGsync\":false,"
             "\"enabledL4S\":false,\"supportedHidDevices\":0,\"profile\":0,"
             "\"fallbackToLogicalResolution\":false,\"chromaFormat\":0,"
             "\"prefilterMode\":0,\"prefilterSharpness\":0,"
             "\"prefilterNoiseReduction\":0,\"hudStreamingMode\":0,"
-            "\"dlssOverrides\":null,\"mouseMovementFlags\":0,"
+            "\"dlssOverrides\":{\"srMode\":0,\"srModel\":0,\"srScale\":100,"
+                "\"rrModel\":0,\"fgMode\":0,\"fgModel\":0},"
+            "\"mouseMovementFlags\":0,"
             "\"trueHdr\":false,\"hidDevices\":null},"
         "\"transport\":null}}",
         s->app_id, s->title, s->device_id,
         (unsigned)(s->width % 100000u), (unsigned)(s->height % 100000u),
         (unsigned)(s->fps % 100000u),
-        s->device_id,
+        (s->subsession_id && s->subsession_id[0]) ? s->subsession_id
+                                                  : s->device_id,
         s->timezone_offset_ms,
+        s->user_age > 0 ? s->user_age : 25,
         s->fps >= 120u ? "true" : "false");
     if (n < 0 || (size_t)n >= outsz) return KN_HTTP_ERR_BIG;
     *out_len = (size_t)n;
@@ -273,18 +288,30 @@ int kn_cm_fixed_headers(const kn_cm_settings *s, kn_http_header *h, int max)
         return n;
     }
 
-    if (max < 10) return 0;
+    /* F37 (RTSP §59.3): the NATIVE table, byte-for-byte from
+     * cloudmatch_headers (:2263-2287 @ 1cb3479): the Bifrost UA FIRST,
+     * the text/plain JSON quirk, LCARS id, NVIDIA-CLASSIC/NATIVE,
+     * 2.0.87.131, the device quartet WINDOWS/DESKTOP/UNKNOWN/UNKNOWN
+     * (the legacy "Windows 7"/PC/Dell/"Latitude E5500" chimera described
+     * a machine no GFN client reports — OpenNOW's device_*() are
+     * compile-time constants), x-device-id and x-nv-client-identity
+     * (= the UA again). Authorization is appended by cm_round, landing
+     * last instead of second (order after the first line is not
+     * semantic in HTTP; disclosed residual, same as F35's). */
+    if (max < 12) return 0;
+    h[n].name = "user-agent";         h[n].value = KN_CM_BIFROST_UA; n++;
     h[n].name = "Content-Type";       h[n].value = "text/plain"; n++;  /* quirk */
     h[n].name = "nv-client-id";       h[n].value = KN_CM_LCARS_CLIENT_ID; n++;
     h[n].name = "nv-client-streamer"; h[n].value = "NVIDIA-CLASSIC"; n++;
     h[n].name = "nv-client-type";     h[n].value = "NATIVE"; n++;
     h[n].name = "nv-client-version";  h[n].value = KN_CM_CLIENT_VERSION; n++;
-    h[n].name = "nv-device-os";       h[n].value = "Windows 7"; n++;
-    h[n].name = "nv-device-type";     h[n].value = "PC"; n++;
-    h[n].name = "nv-device-make";     h[n].value = "Dell"; n++;
-    h[n].name = "nv-device-model";    h[n].value = "Latitude E5500"; n++;
+    h[n].name = "nv-device-os";       h[n].value = "WINDOWS"; n++;
+    h[n].name = "nv-device-type";     h[n].value = "DESKTOP"; n++;
+    h[n].name = "nv-device-make";     h[n].value = "UNKNOWN"; n++;
+    h[n].name = "nv-device-model";    h[n].value = "UNKNOWN"; n++;
     h[n].name = "x-device-id";
     h[n].value = s->device_id ? s->device_id : ""; n++;
+    h[n].name = "x-nv-client-identity"; h[n].value = KN_CM_BIFROST_UA; n++;
     return n;
 }
 
@@ -446,11 +473,21 @@ int kn_cm_extract_session(const char *json_text, kn_cm_session *out)
 
     conns = kn_json_get(&d, session, "connectionInfo");
     nconns = kn_json_len(&d, conns);
+    out->conn_count = nconns > 0 ? nconns : 0;
+    out->conn0_usage = out->conn0_alp = out->conn0_port = -1;
     for (i = 0; nconns > 0 && i < nconns; ++i) {
         const kn_jnode *conn = kn_json_at(&d, conns, i);
         long long usage = -1;
         char ep[256];
         if (!conn) continue;
+        if (i == 0) {           /* F37: the unusable-seat witness (§59.2) */
+            (void)jint(kn_json_get(&d, conn, "usage"), &out->conn0_usage);
+            (void)jint(kn_json_get(&d, conn, "appLevelProtocol"),
+                       &out->conn0_alp);
+            (void)jint(kn_json_get(&d, conn, "port"), &out->conn0_port);
+            (void)jstr(&d, kn_json_get(&d, conn, "resourcePath"),
+                       out->conn0_path, sizeof out->conn0_path);
+        }
         if (!out->have_rtsps &&
             conn_signaling(&d, conn, ep, sizeof ep,
                            out->server_ip[0] ? NULL : out->server_ip,

@@ -23,6 +23,8 @@
 # payload keys when the known ones are missing, so the first live run
 # settles it without a code change.
 
+from __future__ import annotations
+
 import base64
 import json
 import time

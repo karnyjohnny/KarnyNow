@@ -95,3 +95,40 @@ NATIVE client identity headers — `User-Agent: {bifrost_user_agent()}`
   the device-authorize RESPONSE (the reference reads `device_code`,
   `interval` and forwards the rest of the payload to the UI layer) —
   measure at stage 4 against the live endpoint.
+
+## 6. Stage-4 status (2026-11-01, slice 4o): the PyQt5 launcher, its two real bugs, and the Python-3.8 rule
+
+`tools/kn_launcher/` is the stage-4 login UI — implemented NOT as the TUI
+sketched in §5 but as a PyQt5 + httpx dark-mode GUI (operator decision),
+covering the §1-§3 flow end to end: saved-token check + API verify ->
+device grant (copyable verification URI + user code, interval poll) ->
+the unlocked GFN game-list tab (GraphQL, owned games marked, smart
+search) -> param box + launch of `build\knvstd.exe`. Token handling
+follows §5's contract: DPAPI vault (store.py), the C side receives the
+token ONLY as `--session-token=` on argv (redacted from console/log),
+and an operator-typed `--session` in the param box is REJECTED with a
+dialog — the launcher owns the session contract.
+
+Two rules this slice proved the hard way:
+
+* **The target is Python 3.8.20 (Win7) — every launcher module MUST
+  start with `from __future__ import annotations`.** PEP 604/585
+  annotations (`X | None`, `list[str]`) are EVALUATED at import on 3.8
+  and raise TypeError before any Qt code runs — the "failed gui" the
+  operator saw. A sandbox on a modern Python can NEVER reproduce it.
+  The guard is permanent: `test_launcher.py` greps every module for the
+  future import AND runs `ast.parse(..., feature_version=(3,8))` over
+  every .py in the package. Any new module inherits both checks
+  automatically.
+* **The param box is split with CommandLineToArgvW rules, not shlex.**
+  `shlex.split` (posix) ate Windows backslashes (`logs\wire_r1.txt` ->
+  `logswire_r1.txt`); `posix=False` keeps mid-token quotes
+  (`--session-title="My Game"`). `tools/kn_launcher/params.py`
+  implements the MSVCRT rules (backslash literal except before a quote;
+  2n backslashes + quote -> n + toggle grouping; 2n+1 -> n + literal
+  quote) and single-sources `DEFAULT_PARAMS`.
+
+Test discipline: run `test_launcher.py` AS A SCRIPT with
+`QT_QPA_PLATFORM=offscreen` (never via pytest — the checks are
+script-mode). Current: **71 checks, 0 failures**. Flow details live in
+RTSP §59.4 and START-HERE §32.

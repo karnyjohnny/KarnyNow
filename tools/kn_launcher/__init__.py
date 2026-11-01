@@ -16,4 +16,6 @@
 # All GFN client constants here are PUBLIC identifiers transcribed from
 # docs/AUTH.md (OpenNOW provenance) — no secrets live in this package.
 
+from __future__ import annotations
+
 __version__ = "1.0.0"

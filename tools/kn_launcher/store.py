@@ -14,6 +14,8 @@
 # `sub_hash` is a SHA-256 PREFIX of the account sub claim — enough to
 # detect an account switch, never the claim itself (run-46 lesson).
 
+from __future__ import annotations
+
 import ctypes
 import hashlib
 import json

@@ -141,6 +141,91 @@ cross ×2 · ctest 27/27 ×2 · T10 dry 79 · T13 63 · e2e 48/48 · skeleton
 113 vs three live summaries · knvstd -O0/2/3 -Werror. Rig rebuild
 before run 44 (T10 89, stamp N).
 
+## Rev 45 slice 4o (2026-11-01): RUNS 100/101 READ — THE AD GATE (F36) AND THE IDENTITY->SEAT VERDICT (F37); THE LAUNCHER'S TWO REAL BUGS FIXED
+(Note: the per-slice delta sections in this file paused after slice 4e —
+slices 4f-4n are documented in `docs/RTSP.md` §45-57 and `START-HERE.md`
+§23-31; deltas resume here with 4o.)
+
+**Run 100 read -> F36 (queue-ad participation).** The F35
+browser-parity build queued and died on BOTH draws: HTTP 500,
+`statusCode 79 SESSION_WAITING_ADS_TIME_EXPIRED`. Free-tier
+browser-identity sessions are offered a video ad in `sessionAds[0]`
+from the first queued poll (`sessionAdsRequired:true`); the cloud
+waits ~120 s + grace for an ad report and kills the session when none
+arrives. The native era (runs 22-48) never saw a `sessionAds` key —
+the gate is identity-conditional. F36 answers it the reference way:
+`kn_cm_extract_session` gained the six ad fields; `kn_cm_build_ad_body`
++ `kn_cm_report_ad` PUT `{control}/v2/session/{id}` with
+`{"action":6,"adUpdates":[...]}` — key order byte-for-byte from the
+browser's own IMA cancel PUT in the R2 capture, adAction map from
+OpenNOW `report_ad` (1 start / 2 pause / 3 resume / 4 finish /
+5 cancel). `sess_ad_play` in the poll loop: GET the VAST over fresh
+TLS, <=3 `<Wrapper>` hops, quartile-schedule tracker set only; no fill
+-> CANCEL `"VAST_NO_ADS_AFTER_WRAPPER"` (the capture's exact reason)
+and the queue proceeds; fill -> START, beacons on schedule, FINISH with
+watched==duration; a failed report degrades to CANCEL `"error"`
+(OpenNOW's InvalidMedia path). Cap 3 slots, dedupe by adId. The video
+is NOT rendered — disclosed residual (RTSP §58.4). **Run 101 proves
+the gate closed**: no fill -> cancel -> `sessionAdsRequired:false` ->
+seat allocated (status 2 at t≈182 s).
+
+**Run 101 read -> F37 (OpenNOW-strict native identity, the new
+default).** The seat the browser identity bought is a WebRTC seat:
+`connectionInfo {usage:14, appLevelProtocol:5, port:443,
+resourcePath:"/nvst/"}` — consumed by the browser as
+`wss://<rig>/nvst/sign_in?...`, unspeakable for an RTSP client.
+`ready:0` for 217 s, then INTERNAL_ERROR `02F12011`. OpenNOW confirms
+identity->seat allocation is client-driven (the
+`allianceWebrtcCompatibility` branch flips sdkVersion/streamerVersion/
+secureRTSPSupported and sets transportMode "webrtc";
+`reported_native_session = secureRTSPSupported || streamerVersion==14`
+— the F35 body broke it). Browser parity as the DEFAULT is dead;
+`--cm-profile` keeps it one flag away for A/B. F37 rewrites the native
+path field-for-field from OpenNOW @ 1cb3479: headers 10 -> 12 (added
+`user-agent` + `x-nv-client-identity` = `KN_CM_BIFROST_UA`
+`GFN-PC/30.0 (Windows NT 10.0) BifrostClientSDK/4.9 (38495286)`;
+device os/type/make/model -> WINDOWS/DESKTOP/UNKNOWN/UNKNOWN), body
+deltas (fresh-UUID `SubSessionId` per flight, `dlssOverrides` default
+object instead of null, `appLaunchMode` 0 -> 1, `userAge` honoured),
+and the unusable-seat fail-fast: extract keeps the first-entry witness
+(`conn_count`, `conn0_usage/alp/port/path`), the poll loop names
+`conn_unusable` + `stop_reason "seat_unusable"` on the FIRST bad poll
+and releases the seat. Full text: RTSP §59.
+
+**Launcher slice (tools/kn_launcher): the "failed gui" is Python 3.8,
+not Qt.** The target's Python 3.8.20 evaluates PEP 604/585 annotations
+at import -> TypeError before any Qt code runs (sandbox 3.11 can never
+reproduce it). Fix: `from __future__ import annotations` in ALL
+modules + a permanent guard test (future-import grep AND
+`ast.parse(feature_version=(3,8))` over every package .py). Second
+real bug: `shlex` ate the param box's backslashes
+(`logs\wire_r1.txt` -> `logswire_r1.txt`); new `params.py` implements
+the CommandLineToArgvW/MSVCRT rules (shlex posix=False rejected —
+mid-token quotes survive on `-`-prefixed tokens). gui.py: an
+operator-typed `--session` is rejected with a dialog (the launcher owns
+the session contract); the no-app warning returns without spawning;
+DEFAULT_PARAMS single-sourced. `test_launcher.py`: **71 checks, 0
+failures** (script mode, offscreen; never pytest).
+
+Files: NEW `streamer/include/kn/kn_cm.h` constants + session/settings
+fields, `tools/kn_launcher/params.py`; EDITED `streamer/src/kn_cm.c`
+(ad extract/report, native body + 12-header table, conn witness),
+`streamer/src/knvstd_main.c` (VAST pipeline, sess_ad_play,
+conn_unusable fail-fast, profile default + usage),
+`streamer/tests/test_kncm.c` (195 -> **232** checks),
+`tools/kn_launcher/{gui,auth,catalog,search,store,__main__,__init__,
+test_launcher}.py`. No summary-key change: skeleton **113 == 113** vs
+FOUR live summaries (run48a, run60/1, run60/2, run61/2; run101 has
+none — it died before teardown). Gates (sandbox, all re-run after the
+last edit): native battery PASS zero warnings · ctest **29/29 x2**
+(mbedtls + schannel) · T10 dry **ALL PASS 79** · T13 **ALL PASS 63**
+(`srtp_backend:1`) · cross `-Werror` x2 zero warnings · e2e **48/48
+deletes:1** · ASan+UBSan test_kncm 0 diagnostics · test_launcher
+**71/0**. Rig: REBUILD — T10 expected **ALL PASS 89** on the F37
+stamp; fly the DEFAULT (native identity) via the launcher; a
+`conn_unusable` line on a native draw would falsify the model outright.
+Docs: RTSP §58 + §59, START-HERE §32, AUTH.md §6, this section.
+
 ## Rev 45 changed files (round N slice 4)
 
 - `streamer/include/kn/kn_audio.h` — `kn_audio_stats.prerolls`;

@@ -4,6 +4,8 @@
 #
 # Run:  python3 tools/kn_launcher/test_launcher.py     (from repo root)
 
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -230,6 +232,58 @@ check(by_title["Arknights: Endfield"]["owned"] is True and
       by_title["Fortnite"]["owned"] is False,
       "catalog: ownership flags after the merge")
 check(games[0]["owned"] is True, "catalog: owned sort first")
+
+# ---------------------------------------------------- params (F37 fix)
+from kn_launcher import params as kn_params  # noqa: E402
+
+split = kn_params.split_params(
+    "--session-seconds=1200 --input-anti-afk=60000 --session-present "
+    "--session-audio-play --session-release --session-interactive "
+    "--wire-dump=logs\\wire_r1.txt")
+check(split[-1] == "--wire-dump=logs\\wire_r1.txt",
+      "params: Windows backslash path survives the split (the run-101 "
+      "GUI regression: posix shlex ate it into 'logswire_r1.txt')")
+check(len(split) == 7 and split[0] == "--session-seconds=1200",
+      "params: the operator's default block splits into 7 argv entries")
+check(kn_params.split_params('--session-title="My Game"') ==
+      ["--session-title=My Game"],
+      "params: quoted value with spaces stays one entry, quotes stripped")
+check(kn_params.split_params('"--session-title=My Game"') ==
+      ["--session-title=My Game"],
+      "params: fully quoted entry")
+check(kn_params.split_params('--x=a\\"b --y=c') == ['--x=a"b', "--y=c"],
+      "params: escaped quote stays literal (CommandLineToArgvW rules)")
+check(kn_params.split_params("  --a\t--b  ") == ["--a", "--b"],
+      "params: runs of whitespace collapse")
+check(kn_params.split_params("") == [], "params: empty box -> empty argv")
+check(kn_params.DEFAULT_PARAMS.startswith("--session-seconds=1200") and
+      "\\wire_r1.txt" in kn_params.DEFAULT_PARAMS,
+      "params: DEFAULT_PARAMS carries the operator's recipe verbatim")
+
+# --------------------------------------------- python 3.8 target guard
+# The rig runs Python 3.8.20 on Win7 (tests/requirements.txt). Two
+# guards so the "failed gui" class (PEP 604/585 annotations raising
+# TypeError AT IMPORT on 3.8) can never ship again:
+#   (a) every module carries `from __future__ import annotations`
+#       (annotations become lazy strings — never evaluated);
+#   (b) every module still parses under the 3.8 grammar (ast
+#       feature_version) — catches match-statements & friends.
+import ast  # noqa: E402
+
+_pkg_dir = os.path.dirname(os.path.abspath(kn_params.__file__))
+_mods = sorted(f for f in os.listdir(_pkg_dir) if f.endswith(".py"))
+check(len(_mods) >= 8, "py38: the package modules are all visible")
+for _m in _mods:
+    _src = open(os.path.join(_pkg_dir, _m), encoding="utf-8").read()
+    check("from __future__ import annotations" in _src,
+          "py38: %s has the lazy-annotations future import" % _m)
+    try:
+        ast.parse(_src, filename=_m, feature_version=(3, 8))
+        _ok = True
+    except SyntaxError as _exc:
+        _ok = False
+        print("  %s: 3.8 syntax error: %s" % (_m, _exc))
+    check(_ok, "py38: %s parses under the Python 3.8 grammar" % _m)
 
 # ----------------------------------------------------------------- GUI
 try:

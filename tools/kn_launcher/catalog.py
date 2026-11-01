@@ -13,6 +13,8 @@
 # Headers: graphql_headers (gfn.rs :3599) = GFNJWT + the LCARS identity
 # + application/json + play.geforcenow.com origin/referer.
 
+from __future__ import annotations
+
 import httpx
 
 from . import auth

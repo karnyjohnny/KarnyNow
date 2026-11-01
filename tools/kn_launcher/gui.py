@@ -11,10 +11,16 @@
 #
 # The token is injected into argv by the GUI — never typed, never
 # written to the log file or the console (argv is displayed redacted).
+#
+# Python 3.8 target (the Win7 rig — tests/requirements.txt): the
+# future import makes annotations lazy so PEP 604/585 spellings never
+# evaluate at import time (F37, round N slice 4o — their absence was
+# the "failed gui" TypeError on the rig).
+
+from __future__ import annotations
 
 import os
 import re
-import shlex
 import sys
 import time
 from pathlib import Path
@@ -28,14 +34,10 @@ from PyQt5.QtWidgets import (
 )
 
 from . import auth, catalog, search, store
+from .params import DEFAULT_PARAMS, split_params
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOGS_DIR = REPO_ROOT / "logs"
-
-DEFAULT_PARAMS = ("--session-seconds=1200 --input-anti-afk=60000 "
-                  "--session-present --session-audio-play "
-                  "--session-release --session-interactive "
-                  "--wire-dump=logs\\wire_r1.txt")
 
 ACCENT = "#76b900"      # NVIDIA green
 DARK_QSS = """
@@ -564,7 +566,7 @@ class MainWindow(QMainWindow):
         app_id = self._selected_app_id()
         user_params = self.params.toPlainText().strip()
         try:
-            extra = shlex.split(user_params)
+            extra = split_params(user_params)
         except ValueError as exc:
             QMessageBox.critical(self, "params", "cannot parse: %s" % exc)
             return
@@ -572,6 +574,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "params",
                                  "--session-token must NOT be typed here — "
                                  "the GUI injects it. Remove it.")
+            return
+        if "--session" in extra:
+            QMessageBox.critical(self, "params",
+                                 "--session is added automatically — "
+                                 "remove it from the parameters.")
             return
         argv = [str(exe), "--session",
                 "--session-token=" + auth.service_token(self.bundle)]
@@ -581,10 +588,10 @@ class MainWindow(QMainWindow):
         elif not has_app:
             QMessageBox.warning(self, "params",
                                 "no game selected and no --session-app in "
-                                "the parameters — knvstd will refuse")
+                                "the parameters — knvstd would refuse, so "
+                                "nothing was launched")
+            return
         argv += extra
-        if "--session" not in extra:
-            pass                        # already first
         log_name = self.logname.text().strip() or self._suggest_log_name()
         if not re.match(r"^[\w.\-]+\.log$", log_name):
             QMessageBox.critical(self, "log", "bad log name: %s" % log_name)

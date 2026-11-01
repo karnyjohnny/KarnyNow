@@ -1,4 +1,6 @@
 # __main__.py — entry: python -m kn_launcher
+from __future__ import annotations
+
 import sys
 
 
