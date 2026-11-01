@@ -79,3 +79,4 @@ dist/
 .vscode/
 .DS_Store
 *.sqlite3
+*.patch
