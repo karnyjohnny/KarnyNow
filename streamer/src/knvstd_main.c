@@ -73,6 +73,7 @@
 #endif
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>      /* F35: the real local UTC offset for the CM body */
 #ifndef _WIN32
 #include <pthread.h>   /* round XXVIII: the pre-PLAY pump thread (POSIX;
                           Win32 uses kernel32 CreateThread — the F1 set) */
@@ -239,7 +240,18 @@ static void usage(void)
            "                            in place — lengths stay true. Session\n"
            "                            mode only; lottery draws append under\n"
            "                            per-draw headers. The file is\n"
-           "                            operator-sensitive: never push raw.\n");
+           "                            operator-sensitive: never push raw.\n"
+           "       [--cm-profile=browser|native]\n"
+           "                            round N slice 4n (F35): the CloudMatch\n"
+           "                            identity profile. browser (DEFAULT)\n"
+           "                            mirrors the play.geforcenow.com 2.0.89.154\n"
+           "                            wiretap field-for-field (body + headers);\n"
+           "                            native = the legacy OpenNOW-transcribed\n"
+           "                            chimera (A/B and rollback only).\n"
+           "       [--cm-user-age=N]    userAge in the session body (default 25;\n"
+           "                            the reference sends the account value).\n"
+           "       [--cm-timezone=NAME] clientTimezone metaData IANA name\n"
+           "                            (default Europe/Warsaw).\n");
 }
 
 /* THE stdout-JSON string sanitizer for knvstd (name is historical — it
@@ -1450,6 +1462,48 @@ static volatile sig_atomic_t g_knv_stop;
 static int  g_sess_present = 0;   /* round N (F20): --session-present */
 static int  g_sess_interactive = 0; /* round N slice 4j (F33): --session-interactive */
 static int  g_sess_audio_play = 0; /* round N slice 3 (F21): --session-audio-play */
+
+/* F35 (round N slice 4n): the CM identity profile. Browser parity is the
+ * DEFAULT — the run-60/61 wiretap audit (RTSP §57) showed our legacy
+ * identity was a chimera (NATIVE/Dell/Win7 headers + WebRTC-signaling
+ * metadata + a static branded deviceHashId) while the reference web
+ * client announces BROWSER/WEBRTC/CHROME with fresh random UUIDs. */
+static int         g_cm_profile  = 1;              /* 1 = browser */
+static int         g_cm_user_age = 25;             /* --cm-user-age=N */
+static const char *g_cm_tz_name  = "Europe/Warsaw";/* --cm-timezone=NAME */
+static char        g_cm_subsession[37];            /* fresh per draw (F35) */
+
+/* RFC-4122-style random UUID (v4) from SHA-1 over monotonic ms + a
+ * process counter + stack-address entropy. Identification only, not a
+ * security primitive — exactly the freshness the browser's
+ * deviceHashId/SubSessionId have (they are localStorage/session
+ * randoms, not signed attestations). */
+static void sess_uuid4(char out[37])
+{
+    static unsigned long long ctr = 0;
+    unsigned char seed[48], dig[20];
+    unsigned long long now = (unsigned long long)kn_sock_now_ms();
+    void *entropy = (void *)out;
+    size_t i;
+    int o = 0;
+    ctr += 0x9E3779B97F4A7C15ull;
+    memcpy(seed, &now, sizeof now);
+    memcpy(seed + sizeof now, &ctr, sizeof ctr);
+    memcpy(seed + 2 * sizeof now, &entropy, sizeof entropy);
+    memset(seed + 2 * sizeof now + sizeof entropy, 0xA5,
+           sizeof seed - (2 * sizeof now + sizeof entropy));
+    kn_sha1(seed, sizeof seed, dig);
+    dig[6] = (unsigned char)((dig[6] & 0x0F) | 0x40);   /* version 4 */
+    dig[8] = (unsigned char)((dig[8] & 0x3F) | 0x80);   /* variant 10 */
+    o += snprintf(out + o, 37 - (size_t)o, "%02x%02x%02x%02x-",
+                  dig[0], dig[1], dig[2], dig[3]);
+    o += snprintf(out + o, 37 - (size_t)o, "%02x%02x-", dig[4], dig[5]);
+    o += snprintf(out + o, 37 - (size_t)o, "%02x%02x-", dig[6], dig[7]);
+    o += snprintf(out + o, 37 - (size_t)o, "%02x%02x-", dig[8], dig[9]);
+    for (i = 10; i < 16; i++)
+        o += snprintf(out + o, 37 - (size_t)o, "%02x", dig[i]);
+    out[36] = '\0';
+}
 
 #ifdef _WIN32
 static BOOL WINAPI knv_ctrl_handler(DWORD type)
@@ -6647,7 +6701,40 @@ static int run_session(const char *token, const char *device_id,
     st.app_id = app_id;
     st.title = title;
     st.width = 1280; st.height = 720; st.fps = 30;      /* D14 */
-    st.timezone_offset_ms = 0;                          /* UTC-neutral */
+    /* F35 (round N slice 4n): the browser-parity identity. Fresh random
+     * SubSessionId per draw (the browser generates one per session; the
+     * legacy build reused the static device id — D-cm2), the real local
+     * UTC offset (the browser sends its own; UTC-neutral 0 was another
+     * tell), and the profile / tz / age knobs from main. Whether the
+     * cloud weighs any of it is exactly what the F35 flights measure. */
+    {
+        char sub_id[37];
+        time_t tnow = time(NULL);
+        struct tm gmt;
+        sess_uuid4(sub_id);
+        st.subsession_id = g_cm_subsession;
+        memcpy(g_cm_subsession, sub_id, sizeof sub_id);
+        st.profile  = g_cm_profile;
+        st.tz_name  = g_cm_tz_name;
+        st.user_age = g_cm_user_age;
+#ifdef _WIN32
+        gmtime_s(&gmt, &tnow);
+#else
+        gmtime_r(&tnow, &gmt);
+#endif
+        st.timezone_offset_ms = (long)difftime(tnow, mktime(&gmt)) * 1000L;
+        printf("{\"mode\":\"session\",\"event\":\"cm_identity\","
+               "\"profile\":\"%s\",\"device_hash_id\":\"%.40s\","
+               "\"subsession_id\":\"%.40s\",\"tz_name\":\"%.64s\","
+               "\"tz_offset_ms\":%ld,\"user_age\":%d,"
+               "\"client_version\":\"%s\"}\n",
+               st.profile == 1 ? "browser" : "native",
+               device_id ? device_id : "", g_cm_subsession,
+               g_cm_tz_name, st.timezone_offset_ms, g_cm_user_age,
+               st.profile == 1 ? KN_CM_CLIENT_VERSION_BROWSER
+                               : KN_CM_CLIENT_VERSION);
+        fflush(stdout);
+    }
 
     {
         kn_lctx b;
@@ -9300,7 +9387,12 @@ int main(int argc, char **argv)
     int loopback_seconds = 600;           /* G1 default: 10 minutes */
     int no_audio = 0;
     int capture = 0, decode = 0, session = 0;
-    const char *sess_token = NULL, *sess_device = "karnynow-win7-e5500";
+    const char *sess_token = NULL, *sess_device = NULL;  /* F35: NULL =
+        persisted random GUID (the branded "karnynow-win7-e5500" default
+        was a static fingerprint shared by EVERY flight ever — RTSP §57) */
+    int sess_cm_profile = 1;               /* F35: --cm-profile=browser */
+    int sess_cm_user_age = 25;             /* F35: --cm-user-age=N */
+    const char *sess_cm_tz = "Europe/Warsaw"; /* F35: --cm-timezone=NAME */
     const char *sess_title = "KarnyNow session", *sess_cm_host = NULL;
     const char *sess_au_dir = NULL;
     const char *sess_audio_out = NULL;   /* round XLVIII (F11) */
@@ -9397,6 +9489,21 @@ int main(int argc, char **argv)
             sess_token = a + 16;
         else if (strncmp(a, "--wire-dump=", 12) == 0)
             sess_wire_dump = a + 12;   /* round N slice 4m (F34) */
+        else if (strncmp(a, "--cm-profile=", 13) == 0) {
+            if (strcmp(a + 13, "browser") == 0)      sess_cm_profile = 1;
+            else if (strcmp(a + 13, "native") == 0)  sess_cm_profile = 0;
+            else {
+                printf("{\"mode\":\"session\",\"event\":\"usage_error\","
+                       "\"reason\":\"--cm-profile= takes browser|native\"}\n");
+                fflush(stdout);
+                usage();
+                return 2;
+            }
+        }
+        else if (strncmp(a, "--cm-user-age=", 14) == 0)
+            sess_cm_user_age = (int)strtol(a + 14, NULL, 10);
+        else if (strncmp(a, "--cm-timezone=", 14) == 0)
+            sess_cm_tz = a + 14;
         else if (strncmp(a, "--session-device=", 17) == 0)
             sess_device = a + 17;
         else if (strncmp(a, "--session-title=", 16) == 0)
@@ -9541,6 +9648,42 @@ int main(int argc, char **argv)
             sess_present = 1;            /* the window IS the product */
             sess_audio_play = 1;         /* playing means sound */
             if (!afk_explicit) sess_afk_ms = 60000;  /* the reference pulse */
+        }
+        /* F35 (round N slice 4n): the CM identity knobs + the persisted
+         * device GUID. Without an explicit --session-device=, the device
+         * identity is a random UUID kept in <log-dir>/kn_device_id.txt —
+         * the browser's localStorage equivalent: stable across flights
+         * (a real device id is stable) but NEVER the branded constant
+         * every past flight shared. Deleting the file rotates it. */
+        g_cm_profile  = sess_cm_profile;
+        g_cm_user_age = sess_cm_user_age;
+        g_cm_tz_name  = sess_cm_tz;
+        {
+            static char dev_buf[64];
+            if (!sess_device) {
+                char idpath[600];
+                FILE *idf;
+                snprintf(idpath, sizeof idpath, "%s/kn_device_id.txt",
+                         log_dir && log_dir[0] ? log_dir : "logs");
+                dev_buf[0] = '\0';
+                idf = fopen(idpath, "rb");
+                if (idf) {
+                    if (fgets(dev_buf, (int)sizeof dev_buf, idf)) {
+                        size_t dl = strlen(dev_buf);
+                        while (dl && (dev_buf[dl - 1] == '\n' ||
+                                      dev_buf[dl - 1] == '\r'))
+                            dev_buf[--dl] = '\0';
+                    }
+                    fclose(idf);
+                    if (strlen(dev_buf) != 36) dev_buf[0] = '\0';
+                }
+                if (!dev_buf[0]) {
+                    sess_uuid4(dev_buf);
+                    idf = fopen(idpath, "wb");
+                    if (idf) { fputs(dev_buf, idf); fclose(idf); }
+                }
+                sess_device = dev_buf;
+            }
         }
         /* F34 (round N slice 4m): open the TLS wire dump BEFORE the first
          * handshake byte flies. A failed open is fatal for the flight —

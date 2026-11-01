@@ -34,6 +34,12 @@ extern "C" {
  * reference binary): docs/AUTH.md §1 + cloudmatch.rs:16-17. */
 #define KN_CM_LCARS_CLIENT_ID  "ec7e38d4-03af-4b58-b131-cfb0495903ab"
 #define KN_CM_CLIENT_VERSION   "2.0.87.131"
+/* F35 (round N slice 4n): the web client's version, transcribed from the
+ * operator's SSLKEYLOGFILE capture of play.geforcenow.com, 2026-11-01
+ * (tools/wiretap): nv-client-version: 2.0.89.154 on every /v2/session
+ * request. The browser profile announces THIS; the legacy profile keeps
+ * the OpenNOW-transcribed 2.0.87.131. */
+#define KN_CM_CLIENT_VERSION_BROWSER "2.0.89.154"
 #define KN_CM_DEFAULT_BASE_HOST "prod.cloudmatchbeta.nvidiagrid.net"
 
 typedef struct kn_cm_settings {
@@ -41,9 +47,25 @@ typedef struct kn_cm_settings {
                                   logging layer must never see it (§7) */
     const char *device_id;     /* deviceHashId + x-device-id */
     long long   app_id;        /* numeric GFN appId */
-    const char *title;         /* internalTitle */
+    const char *title;         /* internalTitle (legacy profile only —
+                                  the browser profile sends null) */
     uint32_t    width, height, fps;
     long        timezone_offset_ms;   /* clientTimezoneOffset */
+    /* F35 (round N slice 4n): the browser-parity identity profile.
+     * RTSP §57: our old identity was a chimera (NATIVE headers + Dell
+     * Win7 device strings + WebRTC signaling metadata + a static
+     * branded deviceHashId) while our transport IS browser-shaped
+     * (WSS signaling, no secure RTSP). The browser profile mirrors the
+     * reference capture field-for-field. */
+    int         profile;       /* 0 = legacy native-chimera,
+                                  1 = browser parity (knvstd default) */
+    const char *subsession_id; /* metaData SubSessionId — a FRESH random
+                                  UUID per session (browser behaviour);
+                                  required for profile 1 */
+    const char *tz_name;       /* metaData clientTimezone IANA name,
+                                  e.g. "Europe/Warsaw"; required for
+                                  profile 1 */
+    int         user_age;      /* userAge; <= 0 falls back to 25 */
 } kn_cm_settings;
 
 /* session_phase mapping (cloudmatch.rs:2698-2707). */

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>      /* F35: traceparent seeding */
 
 const char *kn_cm_phase(long long status)
 {
@@ -27,7 +28,96 @@ int kn_cm_build_create_body(const kn_cm_settings *s, char *out,
 {
     int n;
     if (!s || !out || outsz < 2048 || !out_len) return KN_HTTP_ERR_ARGS;
-    if (!s->device_id || !s->title) return KN_HTTP_ERR_ARGS;
+    if (!s->device_id) return KN_HTTP_ERR_ARGS;
+
+    if (s->profile == 1) {
+        /* F35 (round N slice 4n): the BROWSER-PARITY body — a
+         * field-for-field, key-order-for-key-order mirror of the
+         * play.geforcenow.com 2.0.89.154 POST /v2/session captured by
+         * the operator on 2026-11-01 (tools/wiretap, RTSP §57.2).
+         * Differences from legacy: internalTitle null, controllers [],
+         * platform "browser", sdk "1.0", streamerVersion the NUMBER 1,
+         * secureRTSPSupported false, enhancedStreamMode/appLaunchMode 1,
+         * partnerCustomData "", 8 metaData entries (fresh-UUID
+         * SubSessionId, clientTimezone, GSStreamerType=WebRTC,
+         * networkType, ClientImeSupport, clientPhysicalResolution),
+         * monitor settings without monitorId/position/dpi/hdr10Plus,
+         * displayData luminance zeros, profile 1 + dlssOverrides object
+         * in requestedStreamingFeatures, and NO preferredController /
+         * requestedAudioFormat / transport / mouseMovementFlags /
+         * trueHdr / hidDevices keys. */
+        if (!s->subsession_id || !s->tz_name) return KN_HTTP_ERR_ARGS;
+        n = snprintf(out, outsz,
+            "{\"sessionRequestData\":{"
+            "\"appId\":%lld,"
+            "\"audioMode\":2,"
+            "\"remoteControllersBitmap\":0,"
+            "\"sdrHdrMode\":0,"
+            "\"networkTestSessionId\":null,"
+            "\"availableSupportedControllers\":[],"
+            "\"clientVersion\":\"30.0\","
+            "\"deviceHashId\":\"%.64s\","
+            "\"internalTitle\":null,"
+            "\"clientPlatformName\":\"browser\","
+            "\"metaData\":["
+                "{\"key\":\"SubSessionId\",\"value\":\"%.64s\"},"
+                "{\"key\":\"wssignaling\",\"value\":\"1\"},"
+                "{\"key\":\"clientTimezone\",\"value\":\"%.64s\"},"
+                "{\"key\":\"GSStreamerType\",\"value\":\"WebRTC\"},"
+                "{\"key\":\"networkType\",\"value\":\"Unknown\"},"
+                "{\"key\":\"ClientImeSupport\",\"value\":\"0\"},"
+                "{\"key\":\"clientPhysicalResolution\","
+                 "\"value\":\"{\\\"horizontalPixels\\\":%u,"
+                             "\\\"verticalPixels\\\":%u}\"},"
+                "{\"key\":\"surroundAudioInfo\",\"value\":\"2\"}],"
+            "\"surroundAudioInfo\":0,"
+            "\"clientTimezoneOffset\":%ld,"
+            "\"clientIdentification\":\"GFN-PC\","
+            "\"parentSessionId\":null,"
+            "\"streamerVersion\":1,"
+            "\"clientRequestMonitorSettings\":[{"
+                "\"widthInPixels\":%u,\"heightInPixels\":%u,"
+                "\"framesPerSecond\":%u,\"sdrHdrMode\":0,"
+                "\"displayData\":{"
+                    "\"desiredContentMaxLuminance\":0,"
+                    "\"desiredContentMinLuminance\":0,"
+                    "\"desiredContentMaxFrameAverageLuminance\":0},"
+                "\"dpi\":0}],"
+            "\"appLaunchMode\":1,"
+            "\"sdkVersion\":\"1.0\","
+            "\"enhancedStreamMode\":1,"
+            "\"useOps\":true,"
+            "\"clientDisplayHdrCapabilities\":null,"
+            "\"accountLinked\":false,"
+            "\"partnerCustomData\":\"\","
+            "\"enablePersistingInGameSettings\":false,"
+            "\"secureRTSPSupported\":false,"
+            "\"userAge\":%d,"
+            "\"requestedStreamingFeatures\":{"
+                "\"reflex\":%s,\"bitDepth\":0,\"cloudGsync\":false,"
+                "\"enabledL4S\":false,\"profile\":1,"
+                "\"fallbackToLogicalResolution\":false,"
+                "\"chromaFormat\":0,\"prefilterMode\":0,"
+                "\"hudStreamingMode\":0,"
+                "\"dlssOverrides\":{\"srMode\":0,\"srModel\":0,"
+                    "\"srScale\":100,\"rrModel\":0,\"fgMode\":0,"
+                    "\"fgModel\":0}}}}",
+            s->app_id,
+            s->device_id,
+            s->subsession_id,
+            s->tz_name,
+            (unsigned)(s->width % 100000u), (unsigned)(s->height % 100000u),
+            s->timezone_offset_ms,
+            (unsigned)(s->width % 100000u), (unsigned)(s->height % 100000u),
+            (unsigned)(s->fps % 100000u),
+            s->user_age > 0 ? s->user_age : 25,
+            s->fps >= 120u ? "true" : "false");
+        if (n < 0 || (size_t)n >= outsz) return KN_HTTP_ERR_BIG;
+        *out_len = (size_t)n;
+        return KN_HTTP_OK;
+    }
+
+    if (!s->title) return KN_HTTP_ERR_ARGS;
     /* Field-for-field with build_create_body (:1643-1762) for the
      * H264/8-bit/no-HDR envelope: codec stays client-selected (never
      * sent), bitDepth=0 chromaFormat=0, reflex = fps>=120 (no cloud gsync
@@ -103,13 +193,87 @@ int kn_cm_auth_header(const kn_cm_settings *s, char *out, size_t outsz)
     return KN_HTTP_OK;
 }
 
+/* F35: W3C traceparent randomness without pulling in a RNG dependency —
+ * splitmix64 over a time-seeded state, three draws per header
+ * (00-<32 hex>-<16 hex>-01). NOT cryptographic; it only has to look
+ * fresh per request, exactly like the browser's tracing SDK output. */
+static unsigned long long cm_tp_next(void)
+{
+    static unsigned long long state = 0;
+    unsigned long long z;
+    if (!state)
+        state = ((unsigned long long)time(NULL) << 21) ^
+                0x9E3779B97F4A7C15ull;
+    state += 0x9E3779B97F4A7C15ull;
+    z = state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
 int kn_cm_fixed_headers(const kn_cm_settings *s, kn_http_header *h, int max)
 {
     /* Values transcribed from cloudmatch_headers (:2036-2059). The
      * Authorization header is added by the CALLER (it holds the token —
      * kept out of this table so the table can never leak it wholesale). */
     int n = 0;
-    if (!s || !h || max < 10) return 0;
+    static char tp[64];        /* traceparent buffer (single-threaded
+                                  handshake; static keeps the table's
+                                  const-char* contract) */
+    if (!s || !h) return 0;
+
+    if (s->profile == 1) {
+        /* F35 (round N slice 4n): the BROWSER header set, transcribed
+         * from the operator's 2026-11-01 wiretap of play.geforcenow.com
+         * (RTSP §57.2): BROWSER/WEBRTC/CHROME, WINDOWS/DESKTOP with
+         * UNKNOWN make/model (the web client knows no hardware),
+         * client version 2.0.89.154, application/json (NOT the legacy
+         * text/plain quirk), Chrome-109 UA + client hints, play.
+         * geforcenow.com origin, sec-fetch-*, pl-PL accept-language and
+         * a fresh W3C traceparent. Deliberately OMITTED: accept-encoding
+         * (our HTTP reader has no gzip decoder — an honest mismatch,
+         * documented) and HTTP/2 (we speak HTTP/1.1; residual). */
+        unsigned long long t1 = cm_tp_next(), t2 = cm_tp_next(),
+                           t3 = cm_tp_next();
+        if (max < 22) return 0;
+        snprintf(tp, sizeof tp,
+                 "00-%08lx%08lx%08lx%08lx-%08lx%08lx-01",
+                 (unsigned long)(t1 >> 32), (unsigned long)(t1 & 0xFFFFFFFFul),
+                 (unsigned long)(t2 >> 32), (unsigned long)(t2 & 0xFFFFFFFFul),
+                 (unsigned long)(t3 >> 32), (unsigned long)(t3 & 0xFFFFFFFFul));
+        h[n].name = "sec-ch-ua";
+        h[n].value = "\"Not_A Brand\";v=\"99\", \"Google Chrome\";v=\"109\", "
+                     "\"Chromium\";v=\"109\""; n++;
+        h[n].name = "nv-device-model";    h[n].value = "UNKNOWN"; n++;
+        h[n].name = "nv-browser-type";    h[n].value = "CHROME"; n++;
+        h[n].name = "nv-device-os";       h[n].value = "WINDOWS"; n++;
+        h[n].name = "nv-client-type";     h[n].value = "BROWSER"; n++;
+        h[n].name = "nv-device-make";     h[n].value = "UNKNOWN"; n++;
+        h[n].name = "sec-ch-ua-platform"; h[n].value = "\"Windows\""; n++;
+        h[n].name = "nv-client-streamer"; h[n].value = "WEBRTC"; n++;
+        h[n].name = "nv-client-id";       h[n].value = KN_CM_LCARS_CLIENT_ID; n++;
+        h[n].name = "traceparent";        h[n].value = tp; n++;
+        h[n].name = "sec-ch-ua-mobile";   h[n].value = "?0"; n++;
+        h[n].name = "user-agent";
+        h[n].value = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                     "AppleWebKit/537.36 (KHTML, like Gecko) "
+                     "Chrome/109.0.0.0 Safari/537.36"; n++;
+        h[n].name = "content-type";       h[n].value = "application/json"; n++;
+        h[n].name = "nv-device-type";     h[n].value = "DESKTOP"; n++;
+        h[n].name = "nv-client-version";  h[n].value = KN_CM_CLIENT_VERSION_BROWSER; n++;
+        h[n].name = "x-device-id";
+        h[n].value = s->device_id ? s->device_id : ""; n++;
+        h[n].name = "accept";             h[n].value = "*/*"; n++;
+        h[n].name = "origin";             h[n].value = "https://play.geforcenow.com"; n++;
+        h[n].name = "sec-fetch-site";     h[n].value = "cross-site"; n++;
+        h[n].name = "sec-fetch-mode";     h[n].value = "cors"; n++;
+        h[n].name = "sec-fetch-dest";     h[n].value = "empty"; n++;
+        h[n].name = "accept-language";
+        h[n].value = "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7"; n++;
+        return n;
+    }
+
+    if (max < 10) return 0;
     h[n].name = "Content-Type";       h[n].value = "text/plain"; n++;  /* quirk */
     h[n].name = "nv-client-id";       h[n].value = KN_CM_LCARS_CLIENT_ID; n++;
     h[n].name = "nv-client-streamer"; h[n].value = "NVIDIA-CLASSIC"; n++;
@@ -502,14 +666,15 @@ static int cm_round(kn_http_io io, const char *method, const char *host,
                     uint8_t *rxb, size_t rxbsz, char *jsonbuf,
                     size_t jsoncap, int *http_status, kn_cm_session *out)
 {
-    kn_http_header h[12];
+    kn_http_header h[24];      /* F35: the browser table needs 22 + auth */
     kn_http_response resp;
     char auth[2048];
     int nh, rc;
 
     if (kn_cm_auth_header(s, auth, sizeof auth) != KN_HTTP_OK)
         return KN_HTTP_ERR_ARGS;
-    nh = kn_cm_fixed_headers(s, h, 10);
+    nh = kn_cm_fixed_headers(s, h, 22);
+    if (nh == 0) return KN_HTTP_ERR_ARGS;
     h[nh].name = "Authorization";
     h[nh].value = auth;
     nh++;

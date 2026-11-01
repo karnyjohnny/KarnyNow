@@ -14,6 +14,7 @@
 #include "kn/kn_json.h"
 #include "test_port.h"
 
+#include <ctype.h>
 #include <string.h>
 
 /* ------------------------------------------------------- byte-stream io */
@@ -788,6 +789,185 @@ static void test_cm_cancel(void)
           "cancel: empty session_id rejected");
 }
 
+/* F35 (round N slice 4n): the browser-parity profile — body and header
+ * table must mirror the 2026-11-01 play.geforcenow.com wiretap
+ * field-for-field (RTSP §57.2). */
+static void test_cm_browser_profile(void)
+{
+    kn_cm_settings st;
+    static char body[8192];
+    kn_http_header hh[24];
+    size_t n = 0;
+    int i, nh;
+
+    printf("-- kn_cm browser profile (F35) --\n");
+    memset(&st, 0, sizeof st);
+    st.token = "TOKEN123";
+    st.device_id = "bab41204-5dd9-414f-b522-2f0ad181adc0";
+    st.app_id = 107057914;
+    st.title = "Ignored In Browser Profile";
+    st.width = 1280; st.height = 720; st.fps = 30;
+    st.timezone_offset_ms = 3600000;
+    st.profile = 1;
+    st.user_age = 34;
+
+    CHECK(kn_cm_build_create_body(&st, body, sizeof body, &n) ==
+              KN_HTTP_ERR_ARGS,
+          "browser profile requires subsession_id + tz_name");
+    st.subsession_id = "3fe004f6-e388-410d-9d22-170a968afdce";
+    st.tz_name = "Europe/Warsaw";
+    CHECK(kn_cm_build_create_body(&st, body, sizeof body, &n) ==
+              KN_HTTP_OK && n > 1000,
+          "browser body builds");
+    CHECK(strncmp(body,
+              "{\"sessionRequestData\":{\"appId\":107057914,\"audioMode\":2,"
+              "\"remoteControllersBitmap\":0,\"sdrHdrMode\":0,"
+              "\"networkTestSessionId\":null,"
+              "\"availableSupportedControllers\":[],"
+              "\"clientVersion\":\"30.0\",\"deviceHashId\":\"bab41204-",
+              158) == 0,
+          "key order mirrors the capture (prefix)");
+
+    CHECK(strstr(body, "\"clientPlatformName\":\"browser\"") != NULL,
+          "platform browser");
+    CHECK(strstr(body, "\"sdkVersion\":\"1.0\"") != NULL, "sdkVersion 1.0");
+    CHECK(strstr(body, "\"streamerVersion\":1,") != NULL,
+          "streamerVersion the NUMBER 1");
+    CHECK(strstr(body, "\"secureRTSPSupported\":false") != NULL,
+          "secureRTSP false");
+    CHECK(strstr(body, "\"enhancedStreamMode\":1") != NULL,
+          "enhancedStreamMode 1");
+    CHECK(strstr(body, "\"appLaunchMode\":1") != NULL, "appLaunchMode 1");
+    CHECK(strstr(body, "\"internalTitle\":null") != NULL,
+          "internalTitle null (title ignored)");
+    CHECK(strstr(body, "\"partnerCustomData\":\"\"") != NULL,
+          "partnerCustomData empty string");
+    CHECK(strstr(body, "\"userAge\":34") != NULL, "userAge from settings");
+    CHECK(strstr(body, "\"clientTimezoneOffset\":3600000") != NULL,
+          "tz offset passthrough");
+    CHECK(strstr(body, "\"clientIdentification\":\"GFN-PC\"") != NULL,
+          "GFN-PC kept");
+
+    CHECK(strstr(body, "{\"key\":\"SubSessionId\","
+                       "\"value\":\"3fe004f6-e388-410d-9d22-170a968afdce\"}")
+              != NULL, "metaData SubSessionId fresh UUID");
+    CHECK(strstr(body, "{\"key\":\"clientTimezone\","
+                       "\"value\":\"Europe/Warsaw\"}") != NULL,
+          "metaData clientTimezone");
+    CHECK(strstr(body, "{\"key\":\"GSStreamerType\",\"value\":\"WebRTC\"}")
+              != NULL, "metaData GSStreamerType WebRTC");
+    CHECK(strstr(body, "{\"key\":\"networkType\",\"value\":\"Unknown\"}")
+              != NULL, "metaData networkType");
+    CHECK(strstr(body, "{\"key\":\"ClientImeSupport\",\"value\":\"0\"}")
+              != NULL, "metaData ClientImeSupport");
+    CHECK(strstr(body, "\\\"horizontalPixels\\\":1280,"
+                       "\\\"verticalPixels\\\":720") != NULL,
+          "metaData clientPhysicalResolution");
+
+    CHECK(strstr(body, "\"displayData\":{\"desiredContentMaxLuminance\":0,")
+              != NULL, "displayData luminance zeros");
+    CHECK(strstr(body, "\"dpi\":0}") != NULL, "dpi 0");
+    CHECK(strstr(body, "monitorId") == NULL, "no monitorId");
+    CHECK(strstr(body, "hdr10PlusGamingData") == NULL, "no hdr10Plus");
+
+    CHECK(strstr(body, "\"profile\":1") != NULL, "features profile 1");
+    CHECK(strstr(body, "\"dlssOverrides\":{\"srMode\":0,\"srModel\":0,"
+                       "\"srScale\":100,\"rrModel\":0,\"fgMode\":0,"
+                       "\"fgModel\":0}") != NULL, "dlssOverrides object");
+    CHECK(strstr(body, "preferredController") == NULL,
+          "no preferredController");
+    CHECK(strstr(body, "requestedAudioFormat") == NULL,
+          "no requestedAudioFormat");
+    CHECK(strstr(body, "\"transport\"") == NULL, "no transport");
+    CHECK(strstr(body, "mouseMovementFlags") == NULL,
+          "no mouseMovementFlags");
+    CHECK(strstr(body, "trueHdr") == NULL, "no trueHdr");
+    CHECK(strstr(body, "supportedHidDevices") == NULL,
+          "no supportedHidDevices");
+    CHECK(strstr(body, "Ignored") == NULL, "no title leak");
+
+    CHECK(strstr(body, "\"reflex\":false") != NULL, "reflex false at 30fps");
+    st.fps = 120;
+    CHECK(kn_cm_build_create_body(&st, body, sizeof body, &n) ==
+              KN_HTTP_OK && strstr(body, "\"reflex\":true") != NULL,
+          "reflex true at 120fps");
+    st.fps = 30;
+    st.user_age = 0;
+    CHECK(kn_cm_build_create_body(&st, body, sizeof body, &n) ==
+              KN_HTTP_OK && strstr(body, "\"userAge\":25") != NULL,
+          "userAge falls back to 25");
+    st.user_age = 34;
+
+    nh = kn_cm_fixed_headers(&st, hh, 22);
+    CHECK(nh == 22, "22 browser fixed headers");
+    {
+        int got_type = 0, got_streamer = 0, got_ver = 0, got_ct = 0,
+            got_ua = 0, got_origin = 0, got_xdev = 0, got_tp = 0,
+            got_make = 0, got_model = 0, got_os = 0, got_dtype = 0,
+            got_btype = 0, got_lang = 0, got_chua = 0, j;
+        char tp1[64];
+        for (i = 0; i < nh; i++) {
+            const char *N = hh[i].name, *V = hh[i].value;
+            if (!strcmp(N, "nv-client-type"))
+                got_type = !strcmp(V, "BROWSER");
+            else if (!strcmp(N, "nv-client-streamer"))
+                got_streamer = !strcmp(V, "WEBRTC");
+            else if (!strcmp(N, "nv-browser-type"))
+                got_btype = !strcmp(V, "CHROME");
+            else if (!strcmp(N, "nv-client-version"))
+                got_ver = !strcmp(V, KN_CM_CLIENT_VERSION_BROWSER);
+            else if (!strcmp(N, "content-type"))
+                got_ct = !strcmp(V, "application/json");
+            else if (!strcmp(N, "user-agent"))
+                got_ua = strstr(V, "Chrome/109.0.0.0") != NULL;
+            else if (!strcmp(N, "origin"))
+                got_origin = !strcmp(V, "https://play.geforcenow.com");
+            else if (!strcmp(N, "x-device-id"))
+                got_xdev = !strcmp(V, st.device_id);
+            else if (!strcmp(N, "nv-device-make"))
+                got_make = !strcmp(V, "UNKNOWN");
+            else if (!strcmp(N, "nv-device-model"))
+                got_model = !strcmp(V, "UNKNOWN");
+            else if (!strcmp(N, "nv-device-os"))
+                got_os = !strcmp(V, "WINDOWS");
+            else if (!strcmp(N, "nv-device-type"))
+                got_dtype = !strcmp(V, "DESKTOP");
+            else if (!strcmp(N, "accept-language"))
+                got_lang = strstr(V, "pl-PL") != NULL;
+            else if (!strcmp(N, "sec-ch-ua"))
+                got_chua = strstr(V, "Google Chrome") != NULL;
+            else if (!strcmp(N, "traceparent")) {
+                /* 00-<32 hex>-<16 hex>-01 */
+                got_tp = strlen(V) == 55 && V[2] == '-' && V[35] == '-' &&
+                         V[52] == '-' && V[53] == '0' && V[54] == '1' &&
+                         V[0] == '0' && V[1] == '0';
+                for (j = 3; j < 52 && got_tp; j++)
+                    if (j != 35 && !isxdigit((unsigned char)V[j]))
+                        got_tp = 0;
+                snprintf(tp1, sizeof tp1, "%s", V);
+            }
+            if (!strcmp(N, "Content-Type"))
+                CHECK(0, "legacy text/plain absent from browser profile");
+            if (strstr(N, "uthorization"))
+                CHECK(0, "Authorization never in the fixed table");
+        }
+        CHECK(got_type && got_streamer && got_btype,
+              "BROWSER/WEBRTC/CHROME identity headers");
+        CHECK(got_ver, "nv-client-version 2.0.89.154");
+        CHECK(got_ct, "content-type application/json (no text/plain quirk)");
+        CHECK(got_ua, "Chrome-109 user-agent");
+        CHECK(got_origin, "origin play.geforcenow.com");
+        CHECK(got_xdev, "x-device-id = settings device_id");
+        CHECK(got_make && got_model && got_os && got_dtype,
+              "UNKNOWN make/model + WINDOWS/DESKTOP");
+        CHECK(got_lang && got_chua, "accept-language + sec-ch-ua");
+        CHECK(got_tp, "traceparent 00-<32hex>-<16hex>-01 shape");
+        (void)tp1;
+    }
+    CHECK(kn_cm_fixed_headers(&st, hh, 10) == 0,
+          "browser table refuses a too-small max");
+}
+
 int main(void)
 {
     test_json();
@@ -795,6 +975,7 @@ int main(void)
     test_cm_extract();
     test_cm_control();
     test_cm_body();
+    test_cm_browser_profile();
     test_cm_network();
     test_cm_cancel();
     return kn_test_summary("test_kncm");
