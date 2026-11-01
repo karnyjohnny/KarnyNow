@@ -79,6 +79,3 @@ dist/
 .vscode/
 .DS_Store
 *.sqlite3
-
-# Moje własne wykluczenia
-/tools/wiretap/gfn_ref_out/

@@ -417,6 +417,32 @@ int kn_cm_extract_session(const char *json_text, kn_cm_session *out)
             out->have_seat = 1;
         }
     }
+    {   /* F36: the free-tier ad gate (run-100). sessionAds is the FIRST
+         * key of the session object in every queued poll of a browser-
+         * identity session; sessionAdsRequired rides alongside it. Only
+         * the first ad entry is tracked — the reference plays ads[0]
+         * (QueueAdPlayback.qml) and a fresh offer arrives as a new adId
+         * on a later poll. */
+        const kn_jnode *ads = kn_json_get(&d, session, "sessionAds");
+        int b;
+        if (kn_json_bool(kn_json_get(&d, session, "sessionAdsRequired"),
+                         &b) == KN_JSON_OK)
+            out->ads_required = b;
+        if (ads && kn_json_len(&d, ads) > 0) {
+            const kn_jnode *a0 = kn_json_at(&d, ads, 0);
+            if (a0 &&
+                jstr(&d, kn_json_get(&d, a0, "adId"),
+                     out->ad_id, sizeof out->ad_id) == 0 &&
+                out->ad_id[0]) {
+                out->have_ad = 1;
+                (void)jint(kn_json_get(&d, a0, "adState"), &out->ad_state);
+                (void)jint(kn_json_get(&d, a0, "adLengthInSeconds"),
+                           &out->ad_len_s);
+                (void)jstr(&d, kn_json_get(&d, a0, "adUrl"),
+                           out->ad_url, sizeof out->ad_url);
+            }
+        }
+    }
 
     conns = kn_json_get(&d, session, "connectionInfo");
     nconns = kn_json_len(&d, conns);
@@ -746,4 +772,72 @@ int kn_cm_cancel(kn_http_io io, const char *host, const char *base_path,
     return cm_round(io, "DELETE", host, path, s, NULL, 0, timeout_ms,
                     now_ms, now_ctx, rxb, rxbsz, jsonbuf, jsoncap,
                     http_status, NULL);
+}
+
+/* F36: the ad-report body — key order transcribed from the browser's own
+ * IMA PUT in the R2 capture (gfn_ref_h2.json, stream 15):
+ * adId, adAction, clientTimestamp, [cancelReason], watchedTimeInMs,
+ * pausedTimeInMs, adDurationInMs. The outer envelope is the
+ * reference's {"action":6,"adUpdates":[{...}]} (cloudmatch.rs
+ * report_ad). clientTimestamp is UNIX SECONDS (capture: 1793523113). */
+int kn_cm_build_ad_body(const char *ad_id, int ad_action,
+                        long long client_ts, long long watched_ms,
+                        long long paused_ms, long long duration_ms,
+                        const char *cancel_reason,
+                        char *out, size_t outsz, size_t *out_len)
+{
+    int n;
+    if (!ad_id || !ad_id[0] || !out || !out_len) return KN_HTTP_ERR_ARGS;
+    if (ad_action < KN_CM_AD_START || ad_action > KN_CM_AD_CANCEL)
+        return KN_HTTP_ERR_ARGS;
+    if (watched_ms < 0) watched_ms = 0;
+    if (paused_ms < 0) paused_ms = 0;
+    if (duration_ms < 0) duration_ms = 0;
+    if (cancel_reason && cancel_reason[0])
+        n = snprintf(out, outsz,
+            "{\"action\":6,\"adUpdates\":[{"
+            "\"adId\":\"%.64s\",\"adAction\":%d,\"clientTimestamp\":%lld,"
+            "\"cancelReason\":\"%.64s\",\"watchedTimeInMs\":%lld,"
+            "\"pausedTimeInMs\":%lld,\"adDurationInMs\":%lld}]}",
+            ad_id, ad_action, client_ts, cancel_reason,
+            watched_ms, paused_ms, duration_ms);
+    else
+        n = snprintf(out, outsz,
+            "{\"action\":6,\"adUpdates\":[{"
+            "\"adId\":\"%.64s\",\"adAction\":%d,\"clientTimestamp\":%lld,"
+            "\"watchedTimeInMs\":%lld,\"pausedTimeInMs\":%lld,"
+            "\"adDurationInMs\":%lld}]}",
+            ad_id, ad_action, client_ts,
+            watched_ms, paused_ms, duration_ms);
+    if (n < 0 || (size_t)n >= outsz) return KN_HTTP_ERR_BIG;
+    *out_len = (size_t)n;
+    return KN_HTTP_OK;
+}
+
+int kn_cm_report_ad(kn_http_io io, const char *host, const char *base_path,
+                    const kn_cm_settings *s, const char *session_id,
+                    const char *ad_id,
+                    int ad_action, long long watched_ms, long long paused_ms,
+                    long long duration_ms, const char *cancel_reason,
+                    uint32_t timeout_ms,
+                    uint64_t (*now_ms)(void *), void *now_ctx,
+                    uint8_t *rxb, size_t rxbsz, char *jsonbuf,
+                    size_t jsoncap, int *http_status, kn_cm_session *out)
+{
+    char path[320], body[512];
+    size_t blen = 0;
+    int n;
+    if (!host || !s || !session_id || !session_id[0] || !ad_id || !ad_id[0])
+        return KN_HTTP_ERR_ARGS;
+    if (kn_cm_build_ad_body(ad_id, ad_action, (long long)time(NULL),
+                            watched_ms, paused_ms, duration_ms,
+                            cancel_reason, body, sizeof body,
+                            &blen) != KN_HTTP_OK)
+        return KN_HTTP_ERR_ARGS;
+    n = snprintf(path, sizeof path, "%sv2/session/%.64s",
+                 base_path ? base_path : "/", session_id);
+    if (n < 0 || (size_t)n >= sizeof path) return KN_HTTP_ERR_ARGS;
+    return cm_round(io, "PUT", host, path, s, body, blen, timeout_ms,
+                    now_ms, now_ctx, rxb, rxbsz, jsonbuf, jsoncap,
+                    http_status, out);
 }

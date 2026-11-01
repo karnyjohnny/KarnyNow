@@ -106,6 +106,22 @@ typedef struct kn_cm_session {
     long long error_code;             /* session.errorCode — 1 while queued
                                          (run-5 capture); the rejected-payload
                                          diagnostic (round XXVII) */
+    /* F36 (run-100 read): the FREE-TIER AD GATE. A browser-identity
+     * session gets sessionAds offered from the first poll (it is the
+     * FIRST key of the session object); ignoring it ends the session
+     * with statusCode 79 SESSION_WAITING_ADS_TIME_EXPIRED after the
+     * ~120 s window + grace. The client must fetch the VAST adUrl,
+     * honour its trackers and report start/finish (or cancel) via
+     * PUT v2/session/{id} {"action":6,"adUpdates":[...]} — the exact
+     * mechanism transcribed from OpenNOW cloudmatch.rs report_ad +
+     * QueueAdPlayback.qml and from the browser's own IMA cancel PUT in
+     * the R2 capture (gfn_ref_h2.json). */
+    char      ad_id[64];              /* sessionAds[0].adId — "" = none */
+    int       have_ad;                /* a non-empty sessionAds[0].adId */
+    long long ad_state;               /* sessionAds[0].adState (1=offered) */
+    long long ad_len_s;               /* sessionAds[0].adLengthInSeconds */
+    char      ad_url[512];            /* sessionAds[0].adUrl (VAST/IMA) */
+    int       ads_required;           /* session.sessionAdsRequired */
 } kn_cm_session;
 
 /* Build the POST v2/session body ({"sessionRequestData":{...}}) —
@@ -175,6 +191,35 @@ int kn_cm_cancel(kn_http_io io, const char *host, const char *base_path,
                  uint64_t (*now_ms)(void *), void *now_ctx,
                  uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
                  int *http_status);
+
+/* F36 (run-100 read): the queue-ad report. ad_action takes the
+ * reference's mapping (cloudmatch.rs report_ad): 1 start, 2 pause,
+ * 3 resume, 4 finish, 5 cancel (KN_CM_AD_* below). The body mirrors the
+ * browser IMA PUT captured in gfn_ref_h2.json byte-for-byte in key
+ * order: {"action":6,"adUpdates":[{"adId":..,"adAction":N,
+ * "clientTimestamp":<unix s>[,"cancelReason":..],"watchedTimeInMs":W,
+ * "pausedTimeInMs":P,"adDurationInMs":D}]}. cancel_reason NULL omits the
+ * key. The response is a full session payload — extract fills `out`
+ * (may be NULL). PUT {base_path}v2/session/{id} on the CONTROL host. */
+#define KN_CM_AD_START   1
+#define KN_CM_AD_PAUSE   2
+#define KN_CM_AD_RESUME  3
+#define KN_CM_AD_FINISH  4
+#define KN_CM_AD_CANCEL  5
+int kn_cm_build_ad_body(const char *ad_id, int ad_action,
+                        long long client_ts, long long watched_ms,
+                        long long paused_ms, long long duration_ms,
+                        const char *cancel_reason,
+                        char *out, size_t outsz, size_t *out_len);
+int kn_cm_report_ad(kn_http_io io, const char *host, const char *base_path,
+                    const kn_cm_settings *s, const char *session_id,
+                    const char *ad_id,
+                    int ad_action, long long watched_ms, long long paused_ms,
+                    long long duration_ms, const char *cancel_reason,
+                    uint32_t timeout_ms,
+                    uint64_t (*now_ms)(void *), void *now_ctx,
+                    uint8_t *rxb, size_t rxbsz, char *jsonbuf,
+                    size_t jsoncap, int *http_status, kn_cm_session *out);
 
 #ifdef __cplusplus
 }

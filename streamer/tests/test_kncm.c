@@ -968,6 +968,156 @@ static void test_cm_browser_profile(void)
           "browser table refuses a too-small max");
 }
 
+/* ---- F36 (run-100 read): the queue-ad gate — sessionAds extraction +
+ * the {"action":6,"adUpdates":[...]} report body (key order transcribed
+ * from the browser IMA PUT in the R2 capture) + the PUT round. ---- */
+static void test_cm_ads(void)
+{
+    static hio h;
+    kn_cm_settings st;
+    kn_cm_session s;
+    char body[512];
+    size_t blen = 0;
+    int status = 0, rc;
+
+    printf("-- kn_cm queue ads (F36) --\n");
+
+    /* extraction: sessionAds[0] + sessionAdsRequired (run-100 shape —
+     * sessionAds is the FIRST key of the session object) */
+    {
+        static const char k_poll[] =
+            "{\"session\":{"
+            "\"sessionAds\":[{\"adLengthInSeconds\":120,\"adMediaFiles\":[],"
+            "\"adId\":\"641ab9a0-33d1-47fc-b230-54077ac9e5fa\","
+            "\"adState\":1,\"adUrl\":\"https://pubads.g.doubleclick.net/"
+            "gampad/ads?env=vp\"}],"
+            "\"sessionAdsRequired\":true,"
+            "\"sessionId\":\"SESS-1\",\"status\":1,\"queuePosition\":3}}";
+        memset(&s, 0, sizeof s);
+        rc = kn_cm_extract_session(k_poll, &s);
+        CHECK(rc == 0 && s.have_ad == 1, "ads: offer extracted (have_ad)");
+        CHECK(!strcmp(s.ad_id, "641ab9a0-33d1-47fc-b230-54077ac9e5fa"),
+              "ads: adId transcribed");
+        CHECK(s.ad_state == 1 && s.ad_len_s == 120,
+              "ads: adState=1, adLengthInSeconds=120");
+        CHECK(!strncmp(s.ad_url, "https://pubads.g.doubleclick.net/", 33),
+              "ads: adUrl kept");
+        CHECK(s.ads_required == 1, "ads: sessionAdsRequired=true");
+        CHECK(s.queue_position == 3 && s.status == 1,
+              "ads: queue fields coexist with the ad block");
+    }
+    {   /* no offer: sessionAds null / empty */
+        static const char k_none[] =
+            "{\"session\":{\"sessionAds\":null,\"sessionAdsRequired\":false,"
+            "\"sessionId\":\"SESS-1\",\"status\":1}}";
+        static const char k_empty[] =
+            "{\"session\":{\"sessionAds\":[],"
+            "\"sessionId\":\"SESS-1\",\"status\":1}}";
+        memset(&s, 0, sizeof s);
+        CHECK(kn_cm_extract_session(k_none, &s) == 0 && s.have_ad == 0 &&
+              s.ads_required == 0, "ads: sessionAds null -> no offer");
+        memset(&s, 0, sizeof s);
+        CHECK(kn_cm_extract_session(k_empty, &s) == 0 && s.have_ad == 0,
+              "ads: sessionAds [] -> no offer");
+    }
+    {   /* a malformed ad entry (no adId) must not set have_ad */
+        static const char k_bad[] =
+            "{\"session\":{\"sessionAds\":[{\"adState\":1}],"
+            "\"sessionId\":\"SESS-1\",\"status\":1}}";
+        memset(&s, 0, sizeof s);
+        CHECK(kn_cm_extract_session(k_bad, &s) == 0 && s.have_ad == 0,
+              "ads: entry without adId is not an offer");
+    }
+
+    /* body builder: the cancel shape is byte-identical to the browser's
+     * own IMA PUT (gfn_ref_h2.json stream 15): adId, adAction,
+     * clientTimestamp, cancelReason, watchedTimeInMs, pausedTimeInMs,
+     * adDurationInMs */
+    rc = kn_cm_build_ad_body("0f731652-dfcb-4bfc-b89a-c976a15055a9",
+                             KN_CM_AD_CANCEL, 1793523113, 0, 0, 0,
+                             "VAST_NO_ADS_AFTER_WRAPPER",
+                             body, sizeof body, &blen);
+    CHECK(rc == KN_HTTP_OK &&
+          !strcmp(body,
+                  "{\"action\":6,\"adUpdates\":[{"
+                  "\"adId\":\"0f731652-dfcb-4bfc-b89a-c976a15055a9\","
+                  "\"adAction\":5,\"clientTimestamp\":1793523113,"
+                  "\"cancelReason\":\"VAST_NO_ADS_AFTER_WRAPPER\","
+                  "\"watchedTimeInMs\":0,\"pausedTimeInMs\":0,"
+                  "\"adDurationInMs\":0}]}"),
+          "ads: cancel body byte-mirrors the captured IMA PUT");
+    rc = kn_cm_build_ad_body("AD-1", KN_CM_AD_START, 123, 0, 0, 0, NULL,
+                             body, sizeof body, &blen);
+    CHECK(rc == KN_HTTP_OK && blen == strlen(body) &&
+          !strcmp(body,
+                  "{\"action\":6,\"adUpdates\":[{\"adId\":\"AD-1\","
+                  "\"adAction\":1,\"clientTimestamp\":123,"
+                  "\"watchedTimeInMs\":0,\"pausedTimeInMs\":0,"
+                  "\"adDurationInMs\":0}]}"),
+          "ads: start body omits cancelReason (OpenNOW conditional key)");
+    rc = kn_cm_build_ad_body("AD-1", KN_CM_AD_FINISH, 999, 120000, 0,
+                             120000, "", body, sizeof body, &blen);
+    CHECK(rc == KN_HTTP_OK && strstr(body, "\"adAction\":4") &&
+          strstr(body, "\"watchedTimeInMs\":120000") &&
+          strstr(body, "\"adDurationInMs\":120000") &&
+          !strstr(body, "cancelReason"),
+          "ads: finish body (empty reason string omits the key)");
+    CHECK(kn_cm_build_ad_body("", KN_CM_AD_START, 0, 0, 0, 0, NULL,
+                              body, sizeof body, &blen) == KN_HTTP_ERR_ARGS,
+          "ads: empty adId refused");
+    CHECK(kn_cm_build_ad_body("AD-1", 0, 0, 0, 0, 0, NULL,
+                              body, sizeof body, &blen) == KN_HTTP_ERR_ARGS &&
+          kn_cm_build_ad_body("AD-1", 6, 0, 0, 0, 0, NULL,
+                              body, sizeof body, &blen) == KN_HTTP_ERR_ARGS,
+          "ads: adAction outside 1..5 refused");
+    CHECK(kn_cm_build_ad_body("AD-1", KN_CM_AD_START, 0, -5, -1, -9, NULL,
+                              body, sizeof body, &blen) == KN_HTTP_OK &&
+          strstr(body, "\"watchedTimeInMs\":0") &&
+          strstr(body, "\"pausedTimeInMs\":0") &&
+          strstr(body, "\"adDurationInMs\":0"),
+          "ads: negative times clamp to 0");
+    CHECK(kn_cm_build_ad_body("AD-1", KN_CM_AD_START, 0, 0, 0, 0, NULL,
+                              body, 40, &blen) == KN_HTTP_ERR_BIG,
+          "ads: undersized buffer -> ERR_BIG, no overflow");
+
+    /* networked PUT on the control host */
+    memset(&st, 0, sizeof st);
+    st.token = "T0KEN"; st.device_id = "dev-1"; st.app_id = 42;
+    st.title = "T"; st.width = 1280; st.height = 720; st.fps = 30;
+    hio_reset(&h);
+    {   static const char k_upd[] =
+            "{\"requestStatus\":{\"statusCode\":1},"
+            "\"session\":{\"sessionId\":\"SESS-1\",\"status\":1,"
+            "\"sessionAds\":null,\"queuePosition\":2}}";
+        char framed[512];
+        snprintf(framed, sizeof framed,
+                 "HTTP/1.1 200 OK\r\nContent-Length: %lu\r\n\r\n%s",
+                 (unsigned long)strlen(k_upd), k_upd);
+        hio_queue(&h, framed);
+    }
+    g_now = 0;
+    memset(&s, 0, sizeof s);
+    rc = kn_cm_report_ad(hio_io(&h), "np-waw-01.example", "/", &st,
+                         "SESS-1", "AD-1", KN_CM_AD_START, 0, 0, 0, NULL,
+                         1000, fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
+                         sizeof g_body, &status, &s);
+    CHECK(rc == KN_HTTP_OK && status == 200, "ads: PUT 200 accepted");
+    h.from[h.flen] = '\0';
+    CHECK(strstr((char *)h.from, "PUT /v2/session/SESS-1 HTTP/1.1\r\n") ==
+          (char *)h.from, "ads: PUT targets the control host's session URL");
+    CHECK(strstr((char *)h.from, "{\"action\":6,\"adUpdates\":[{\"adId\":"
+                 "\"AD-1\",\"adAction\":1,") != NULL,
+          "ads: the report body rides the PUT");
+    CHECK(!strcmp(s.session_id, "SESS-1") && s.queue_position == 2 &&
+          s.have_ad == 0,
+          "ads: the PUT response re-fills the session (queue resumes)");
+    CHECK(kn_cm_report_ad(hio_io(&h), "h", "/", &st, "SESS-1", "",
+                          KN_CM_AD_START, 0, 0, 0, NULL, 1000, fake_now,
+                          NULL, g_rxb, sizeof g_rxb, g_body, sizeof g_body,
+                          &status, NULL) == KN_HTTP_ERR_ARGS,
+          "ads: missing adId refused before any I/O");
+}
+
 int main(void)
 {
     test_json();
@@ -978,5 +1128,6 @@ int main(void)
     test_cm_browser_profile();
     test_cm_network();
     test_cm_cancel();
+    test_cm_ads();
     return kn_test_summary("test_kncm");
 }

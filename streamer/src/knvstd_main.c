@@ -74,6 +74,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>      /* F35: the real local UTC offset for the CM body */
+#include <ctype.h>     /* F36: VAST event-name normalization (tolower) */
 #ifndef _WIN32
 #include <pthread.h>   /* round XXVIII: the pre-PLAY pump thread (POSIX;
                           Win32 uses kernel32 CreateThread — the F1 set) */
@@ -6384,6 +6385,369 @@ static uint32_t sess_poll_gap(unsigned consec_fails)
     return gap > 20000u ? 20000u : gap;
 }
 
+
+/* ================= F36 (run-100 read): queue-ad participation ============
+ * Free-tier browser-identity sessions are gated on a video ad offered in
+ * sessionAds[0] from the FIRST queued poll. Ignoring the offer kills the
+ * session with SESSION_WAITING_ADS_TIME_EXPIRED (statusCode 79, HTTP
+ * 500) — measured live 2026-11-01, run 100, both draws (RTSP §58).
+ * Reference behaviour, transcribed from OpenNOW cloudmatch.rs report_ad +
+ * QueueAdPlayback.qml AND from the browser's own IMA cancel PUT in the R2
+ * capture (gfn_ref_h2.json stream 15):
+ *   1. GET the VAST at adUrl (pubads.g.doubleclick.net/gampad/ads),
+ *      following up to 3 <Wrapper> hops (VASTAdTagURI).
+ *   2. No playable MediaFile after the wrappers -> PUT-report CANCEL
+ *      with cancelReason "VAST_NO_ADS_AFTER_WRAPPER" — the exact reason
+ *      the browser's IMA SDK sent in the capture; the queue proceeds.
+ *   3. MediaFile present -> PUT-report START, fire the Impression and
+ *      start trackers, hold the slot in real time firing the quartile
+ *      trackers on schedule, fire Complete, PUT-report FINISH with
+ *      watchedTimeInMs = adDurationInMs = adLengthInSeconds*1000.
+ * The video itself is NOT rendered (no decoder in the queue path) — a
+ * disclosed residual (RTSP §58.4): every VAST beacon fires truthfully on
+ * schedule and the CM report, which is what the gate actually reads, is
+ * exactly the reference's. A failed report degrades to CANCEL(reason
+ * "error") — OpenNOW's InvalidMedia path — so the queue is released
+ * instead of sitting out the window. */
+typedef struct { char ev[20]; char url[512]; } vast_trk;
+
+static int sess_url_split(const char *url, char *host, size_t hsz,
+                          char *path, size_t psz)
+{
+    const char *p, *q;
+    if (!url || strncmp(url, "https://", 8) != 0) return -1;
+    p = url + 8;
+    q = strchr(p, '/');
+    if (!q) q = p + strlen(p);
+    if (q == p || (size_t)(q - p) >= hsz) return -1;
+    memcpy(host, p, (size_t)(q - p));
+    host[q - p] = '\0';
+    snprintf(path, psz, "%s", *q ? q : "/");
+    return 0;
+}
+
+/* in-place XML entity unescape (the five predefined entities) */
+static void sess_xml_unescape(char *s)
+{
+    char *r = s, *w = s;
+    while (*r) {
+        if (*r == '&') {
+            if (!strncmp(r, "&amp;", 5))  { *w++ = '&';  r += 5; continue; }
+            if (!strncmp(r, "&lt;", 4))   { *w++ = '<';  r += 4; continue; }
+            if (!strncmp(r, "&gt;", 4))   { *w++ = '>';  r += 4; continue; }
+            if (!strncmp(r, "&quot;", 6)) { *w++ = '"';  r += 6; continue; }
+            if (!strncmp(r, "&apos;", 6)) { *w++ = '\''; r += 6; continue; }
+        }
+        *w++ = *r++;
+    }
+    *w = '\0';
+}
+
+/* GET an https URL over a fresh TLS stream; body lands in body[] (NUL-
+ * terminated, truncated honestly at cap). Returns 0 on a parsed response
+ * (*status set), negative transport code otherwise. */
+static int sess_http_get(const char *url, char *body, size_t cap,
+                         int *status)
+{
+    static uint8_t rxb[64 * 1024];
+    char host[256], path[2048], lerr[160];
+    kn_http_header h[3];
+    kn_http_response resp;
+    kn_http_io io;
+    tls_ctx c;
+    void *tls;
+    int rc;
+    lerr[0] = '\0';
+    if (status) *status = 0;
+    if (sess_url_split(url, host, sizeof host, path, sizeof path) != 0)
+        return -1;
+    tls = kn_net_tls_stream_open(host, 443, 15000, lerr, sizeof lerr);
+    if (!tls) return KN_HTTP_ERR_IO;
+    c.s = tls;
+    io.send = tls_send; io.recv = tls_recv; io.ctx = &c;
+    h[0].name = "user-agent";
+    h[0].value = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+                 "Chrome/109.0.0.0 Safari/537.36";
+    h[1].name = "accept";          h[1].value = "*/*";
+    h[2].name = "accept-language"; h[2].value = "pl-PL,pl;q=0.9";
+    rc = kn_http_request(io, "GET", path, host, h, 3, NULL, 0, 20000,
+                         sess_now, NULL, rxb, sizeof rxb, body, cap, &resp);
+    kn_net_tls_stream_close(tls);
+    if (status) *status = resp.status;
+    return rc == KN_HTTP_OK ? 0 : rc;
+}
+
+/* Minimal VAST scan: the first playable MediaFile URL + the tracking
+ * URLs whose events matter for the quartile schedule (event names are
+ * normalized to lowercase; CDATA wrappers are stripped). Returns the
+ * tracker count stored. */
+static int sess_vast_collect(const char *xml, char *media, size_t msz,
+                             vast_trk *trk, int max)
+{
+    int n = 0;
+    const char *p = xml;
+    if (!media) return 0;
+    media[0] = '\0';
+    while ((p = strstr(p, "<MediaFile")) != NULL) {
+        const char *gt = strchr(p, '>');
+        const char *end;
+        char buf[1024];
+        size_t l;
+        if (!gt) break;
+        /* "<MediaFiles>" is the CONTAINER — skip it, keep scanning for
+         * the item tags (the container's text would otherwise swallow
+         * the first real entry) */
+        if (p[10] == 's') { p += 11; continue; }
+        end = strstr(gt, "</MediaFile>");
+        if (!end) break;
+        ++gt;
+        l = (size_t)(end - gt);
+        while (l && (*gt == ' ' || *gt == '\t' || *gt == '\r' || *gt == '\n')) { ++gt; --l; }
+        while (l && (gt[l-1] == ' ' || gt[l-1] == '\t' || gt[l-1] == '\r' || gt[l-1] == '\n')) --l;
+        if (l > 0 && l < sizeof buf) {
+            memcpy(buf, gt, l); buf[l] = '\0';
+            sess_xml_unescape(buf);
+            if (!strncmp(buf, "http", 4)) { snprintf(media, msz, "%s", buf); break; }
+        }
+        p = end + 12;
+    }
+    p = xml;
+    while (n < max) {
+        const char *imp = strstr(p, "<Impression");
+        const char *trk_p = strstr(p, "<Tracking");
+        const char *tag;
+        const char *gt, *end, *close;
+        char ev[20], buf[600];
+        size_t l;
+        int is_imp;
+        if (!imp && !trk_p) break;
+        is_imp = imp && (!trk_p || imp < trk_p);
+        tag = is_imp ? imp : trk_p;
+        /* "<TrackingEvents>" is the CONTAINER — only real "<Tracking "
+         * / "<Tracking>" item tags carry events */
+        if (!is_imp && tag[9] != ' ' && tag[9] != '>') { p = tag + 10; continue; }
+        gt = strchr(tag, '>');
+        if (!gt) break;
+        ev[0] = '\0';
+        if (!is_imp) {
+            const char *a = strstr(tag, "event=\"");
+            if (a && a < gt) {
+                size_t k = 0;
+                a += 7;
+                while (*a && *a != '"' && k + 1 < sizeof ev)
+                    ev[k++] = (char)tolower((unsigned char)*a++);
+                ev[k] = '\0';
+            }
+            close = "</Tracking>";
+        } else {
+            snprintf(ev, sizeof ev, "impression");
+            close = "</Impression>";
+        }
+        end = strstr(gt, close);
+        if (!end) break;
+        ++gt;
+        l = (size_t)(end - gt);
+        if (l > 0 && l < sizeof buf) {
+            memcpy(buf, gt, l); buf[l] = '\0';
+            sess_xml_unescape(buf);
+            {   /* trim + strip CDATA */
+                char *b = buf;
+                while (*b == ' ' || *b == '\t' || *b == '\r' || *b == '\n') ++b;
+                if (!strncmp(b, "<![CDATA[", 9)) {
+                    char *z;
+                    b += 9;
+                    z = strstr(b, "]]>");
+                    if (z) *z = '\0';
+                }
+                /* store only the events the quartile schedule fires,
+                 * capped at 4 per event — a real IMA VAST carries
+                 * dozens of trackers and an unfiltered first-N table
+                 * could starve the late quartiles */
+                if (!strncmp(b, "http", 4) && ev[0] &&
+                    (!strcmp(ev, "impression") || !strcmp(ev, "start") ||
+                     !strcmp(ev, "firstquartile") || !strcmp(ev, "midpoint") ||
+                     !strcmp(ev, "thirdquartile") || !strcmp(ev, "complete"))) {
+                    int same = 0, i;
+                    for (i = 0; i < n; ++i)
+                        if (!strcmp(trk[i].ev, ev)) ++same;
+                    if (same < 4) {
+                        snprintf(trk[n].ev, sizeof trk[n].ev, "%s", ev);
+                        snprintf(trk[n].url, sizeof trk[n].url, "%.511s", b);
+                        ++n;
+                    }
+                }
+            }
+        }
+        p = end + strlen(close);
+    }
+    return n;
+}
+
+/* the first <VASTAdTagURI> of a Wrapper (followed up to 3 hops);
+ * CDATA-wrapped URIs (the common case) are unwrapped */
+static int sess_vast_wrapper_uri(const char *xml, char *out, size_t sz)
+{
+    const char *p = strstr(xml, "<VASTAdTagURI>");
+    const char *e;
+    char *o;
+    size_t l;
+    if (!p) return -1;
+    p += 14;
+    e = strstr(p, "</VASTAdTagURI>");
+    if (!e || (size_t)(e - p) >= sz) return -1;
+    l = (size_t)(e - p);
+    memcpy(out, p, l); out[l] = '\0';
+    sess_xml_unescape(out);
+    o = out;
+    while (*o == ' ' || *o == '\t' || *o == '\r' || *o == '\n') ++o;
+    if (!strncmp(o, "<![CDATA[", 9)) {
+        char *z = strstr(o + 9, "]]>");
+        if (z) *z = '\0';
+        o += 9;
+    }
+    if (o != out) memmove(out, o, strlen(o) + 1);
+    return strncmp(out, "http", 4) == 0 ? 0 : -1;
+}
+
+static void sess_trk_fire(vast_trk *trk, int n, const char *ev, int *fired)
+{
+    int i;
+    for (i = 0; i < n; ++i) {
+        char sink[256];
+        int st = 0;
+        if (strcmp(trk[i].ev, ev) != 0) continue;
+        (void)sess_http_get(trk[i].url, sink, sizeof sink, &st);
+        ++*fired;
+        printf("{\"mode\":\"session\",\"event\":\"ad_tracker\",\"phase\":\"%s\","
+               "\"http_status\":%d}\n", ev, st);
+        fflush(stdout);
+    }
+}
+
+/* PUT {"action":6,"adUpdates":[...]} to the CONTROL host (the reference
+ * reports to the learned control base, cloudmatch.rs report_ad). */
+static int sess_ad_report(const kn_cm_settings *st, const kn_cm_session *sess,
+                          const char *poll_host, uint16_t poll_port,
+                          int action, long long watched, long long paused,
+                          long long duration, const char *reason,
+                          int *http_status)
+{
+    static uint8_t rxb[64 * 1024];
+    static char jbuf[16 * 1024];
+    kn_cm_session upd;
+    char err[160];
+    kn_http_io io;
+    tls_ctx c;
+    void *tls;
+    int rc;
+    tls = kn_net_tls_stream_open(poll_host, poll_port, 15000, err, sizeof err);
+    if (!tls) { *http_status = 0; return KN_HTTP_ERR_IO; }
+    c.s = tls;
+    io.send = tls_send; io.recv = tls_recv; io.ctx = &c;
+    rc = kn_cm_report_ad(io, poll_host, "/", st, sess->session_id,
+                         sess->ad_id, action, watched, paused, duration,
+                         reason, 20000, sess_now, NULL, rxb, sizeof rxb,
+                         jbuf, sizeof jbuf, http_status, &upd);
+    kn_net_tls_stream_close(tls);
+    return rc;
+}
+
+static void sess_ad_play(const kn_cm_settings *st, const kn_cm_session *sess,
+                         const char *poll_host, uint16_t poll_port,
+                         char *handled, size_t handledsz,
+                         uint64_t *t_start, int *ads_done)
+{
+    static char vast[96 * 1024];
+    static vast_trk trk[24];
+    char media[1024], wrap[1024];
+    uint64_t t0 = kn_sock_now_ms();
+    long long len, elapsed;
+    int status = 0, rc, ntrk = 0, fired = 0, hops, hs = 0, q1 = 0, q2 = 0,
+        q3 = 0;
+    len = sess->ad_len_s > 0 && sess->ad_len_s <= 600 ? sess->ad_len_s : 120;
+    printf("{\"mode\":\"session\",\"event\":\"ad_offered\",\"ad_id\":\"%.64s\","
+           "\"len_s\":%lld,\"state\":%lld,\"required\":%d}\n",
+           sess->ad_id, len, (long long)sess->ad_state, sess->ads_required);
+    fflush(stdout);
+
+    /* fetch the VAST, following Wrapper hops like the IMA SDK does */
+    vast[0] = '\0'; media[0] = '\0';
+    snprintf(wrap, sizeof wrap, "%s", sess->ad_url);
+    for (hops = 0; hops < 4; ++hops) {
+        rc = sess_http_get(wrap, vast, sizeof vast, &status);
+        if (rc != 0 || status != 200) break;
+        ntrk = sess_vast_collect(vast, media, sizeof media, trk,
+                                 (int)(sizeof trk / sizeof trk[0]));
+        if (media[0]) break;
+        if (sess_vast_wrapper_uri(vast, wrap, sizeof wrap) != 0) break;
+        printf("{\"mode\":\"session\",\"event\":\"ad_wrapper\",\"hop\":%d}\n",
+               hops + 1);
+        fflush(stdout);
+    }
+    printf("{\"mode\":\"session\",\"event\":\"ad_vast\",\"rc\":%d,"
+           "\"http_status\":%d,\"media\":%d,\"trackers\":%d}\n",
+           rc, status, media[0] ? 1 : 0, ntrk);
+    fflush(stdout);
+
+    if (!media[0]) {
+        /* no fill after the wrappers: the browser's own IMA cancel,
+         * reason string transcribed from the R2 capture */
+        rc = sess_ad_report(st, sess, poll_host, poll_port, KN_CM_AD_CANCEL,
+                            0, 0, 0, "VAST_NO_ADS_AFTER_WRAPPER", &hs);
+        printf("{\"mode\":\"session\",\"event\":\"ad_cancel\",\"rc\":%d,"
+               "\"http_status\":%d,\"reason\":\"VAST_NO_ADS_AFTER_WRAPPER\"}\n",
+               rc, hs);
+        fflush(stdout);
+        goto done;
+    }
+    rc = sess_ad_report(st, sess, poll_host, poll_port, KN_CM_AD_START,
+                        0, 0, 0, NULL, &hs);
+    printf("{\"mode\":\"session\",\"event\":\"ad_start\",\"rc\":%d,"
+           "\"http_status\":%d}\n", rc, hs);
+    fflush(stdout);
+    sess_trk_fire(trk, ntrk, "impression", &fired);
+    sess_trk_fire(trk, ntrk, "start", &fired);
+    /* hold the slot in real time; quartiles fire on schedule */
+    for (;;) {
+        elapsed = (long long)(kn_sock_now_ms() - t0);
+        if (elapsed >= len * 1000 || g_knv_stop) break;
+        if (!q1 && elapsed >= len * 250) {
+            q1 = 1; sess_trk_fire(trk, ntrk, "firstquartile", &fired);
+        }
+        if (!q2 && elapsed >= len * 500) {
+            q2 = 1; sess_trk_fire(trk, ntrk, "midpoint", &fired);
+        }
+        if (!q3 && elapsed >= len * 750) {
+            q3 = 1; sess_trk_fire(trk, ntrk, "thirdquartile", &fired);
+        }
+        sess_sleep(250, NULL);
+    }
+    elapsed = (long long)(kn_sock_now_ms() - t0);
+    if (g_knv_stop) {
+        rc = sess_ad_report(st, sess, poll_host, poll_port, KN_CM_AD_CANCEL,
+                            elapsed, 0, len * 1000, "error", &hs);
+        printf("{\"mode\":\"session\",\"event\":\"ad_cancel\",\"rc\":%d,"
+               "\"http_status\":%d,\"reason\":\"interrupted\"}\n", rc, hs);
+        fflush(stdout);
+    } else {
+        sess_trk_fire(trk, ntrk, "complete", &fired);
+        rc = sess_ad_report(st, sess, poll_host, poll_port, KN_CM_AD_FINISH,
+                            len * 1000, 0, len * 1000, NULL, &hs);
+        printf("{\"mode\":\"session\",\"event\":\"ad_finish\",\"rc\":%d,"
+               "\"http_status\":%d,\"watched_ms\":%lld,\"trackers_fired\":%d}\n",
+               rc, hs, len * 1000, fired);
+        fflush(stdout);
+    }
+done:
+    snprintf(handled, handledsz, "%s", sess->ad_id);
+    ++*ads_done;
+    *t_start += (uint64_t)(kn_sock_now_ms() - t0); /* ad time is not queue
+                                                      time — the deadline
+                                                      extends by what the
+                                                      ad cost */
+}
+
 static int run_session(const char *token, const char *device_id,
                        long long app_id, const char *title,
                        const char *cm_host, long seconds,
@@ -6487,6 +6851,8 @@ static int run_session(const char *token, const char *device_id,
     uint64_t next_ka_ms = 0;
     unsigned long long ka_sent = 0;
     unsigned relearns = 0;                /* cm_control re-learn events */
+    char ad_handled[64] = "";             /* F36: last served adId */
+    int ads_done = 0;                     /* F36: ad slots served (cap 3) */
     static sess_pump pump;
     static sess_input si;                 /* round L (F19): real input */
     static sess_fb_outbox fb;           /* round XXXVI: main -> pump */
@@ -6919,6 +7285,16 @@ static int run_session(const char *token, const char *device_id,
                    (long long)sess.queue_position, sess.have_queue,
                    (long long)sess.seat_setup_step, sess.ready);
             fflush(stdout);
+            /* F36: the free-tier ad gate. A fresh sessionAds offer while
+             * queued MUST be answered (start+finish or cancel) or the
+             * cloud kills the session at the window's end (run-100:
+             * statusCode 79 SESSION_WAITING_ADS_TIME_EXPIRED). The cap
+             * of 3 slots bounds a pathological re-offer loop. */
+            if (sess.have_ad && sess.status == 1 && ads_done < 3 &&
+                strcmp(sess.ad_id, ad_handled) != 0)
+                sess_ad_play(&st, &sess, poll_host, poll_port,
+                             ad_handled, sizeof ad_handled, &t_start,
+                             &ads_done);
             continue;
         }
         if (rc == KN_HTTP_OK && http_status == 404) {
