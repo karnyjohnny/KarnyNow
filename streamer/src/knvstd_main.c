@@ -45,6 +45,7 @@
 #include "kn/kn_http.h"
 #include "kn/kn_input.h"
 #include "kn/kn_net.h"
+#include "kn/kn_wire.h"   /* F34 (slice 4m): the TLS plaintext wire dump */
 #include "kn/kn_perf.h"
 #include "kn/kn_rtsp.h"
 #include "kn/kn_rx.h"
@@ -227,6 +228,18 @@ static void usage(void)
            "loopback source order: FILE.264, ./synthetic720.264, <exe dir>/\n"
            "synthetic720.264, embedded 320x240 clip (budget_valid:false).\n"
            "exit codes: 0 ok/skipped, 1 failed verdict, 2 usage, 3 internal\n");
+    /* F34 help lives in its OWN printf: the second one is at the C99
+     * 4095-char concatenated-literal ceiling (slice 4j lesson). */
+    printf("       [--wire-dump=FILE]     round N slice 4m (F34): dump ALL\n"
+           "                            TLS plaintext (CM HTTPS + RTSP +\n"
+           "                            WS signaling, BOTH directions) to\n"
+           "                            FILE as timestamped hex lines.\n"
+           "                            Secrets (JWT, ice-pwd, Authorization,\n"
+           "                            long base64 runs) are redacted to 'X'\n"
+           "                            in place — lengths stay true. Session\n"
+           "                            mode only; lottery draws append under\n"
+           "                            per-draw headers. The file is\n"
+           "                            operator-sensitive: never push raw.\n");
 }
 
 /* THE stdout-JSON string sanitizer for knvstd (name is historical — it
@@ -3144,6 +3157,23 @@ static int run_decode(uint16_t port, const char *bind_ip, long seconds,
  * of refactoring the T13-verified function (churn discipline); unification
  * is planned once --session has its own target evidence.
  */
+
+/* F34 (round N slice 4m): close the wire dump (if open) and report its
+ * counters as the LAST session evidence line. Called on every session
+ * exit path in main() (single draw + lottery). */
+static void sess_wire_dump_end(void)
+{
+    unsigned long recs = 0, reds = 0;
+    unsigned long long bo = 0, bi = 0;
+    if (!kn_wire_dump_is_open()) return;
+    kn_wire_dump_stats(&recs, &reds, &bo, &bi);
+    kn_wire_dump_close();
+    printf("{\"mode\":\"session\",\"event\":\"wire_dump_end\","
+           "\"records\":%lu,\"redactions\":%lu,"
+           "\"bytes_out\":%llu,\"bytes_in\":%llu}\n",
+           recs, reds, bo, bi);
+    fflush(stdout);
+}
 
 typedef struct {
     kn_net_tls_stream *s;
@@ -9283,6 +9313,7 @@ int main(int argc, char **argv)
     long sess_afk_ms = 0;                /* --input-anti-afk[=MS] */
     long sess_present = 0;               /* --session-present (F20) */
     long sess_interactive = 0;           /* --session-interactive (F33) */
+    const char *sess_wire_dump = NULL;   /* --wire-dump=FILE (F34) */
     long afk_explicit = 0;               /* --input-anti-afk[=MS] given */
     long sess_audio_play = 0;   /* --session-audio-play (F21, slice 3) */
     long sess_text_gap_ms = 30;          /* --input-text-gap=MS */
@@ -9364,6 +9395,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--session-keep") == 0) sess_keep = 1;
         else if (strncmp(a, "--session-token=", 16) == 0)
             sess_token = a + 16;
+        else if (strncmp(a, "--wire-dump=", 12) == 0)
+            sess_wire_dump = a + 12;   /* round N slice 4m (F34) */
         else if (strncmp(a, "--session-device=", 17) == 0)
             sess_device = a + 17;
         else if (strncmp(a, "--session-title=", 16) == 0)
@@ -9509,16 +9542,33 @@ int main(int argc, char **argv)
             sess_audio_play = 1;         /* playing means sound */
             if (!afk_explicit) sess_afk_ms = 60000;  /* the reference pulse */
         }
+        /* F34 (round N slice 4m): open the TLS wire dump BEFORE the first
+         * handshake byte flies. A failed open is fatal for the flight —
+         * a diagnostic flight without its dump is a wasted draw. */
+        if (sess_wire_dump && sess_wire_dump[0]) {
+            char wdp[512];
+            int wrc;
+            lb_json_path(wdp, sizeof wdp, sess_wire_dump);
+            wrc = kn_wire_dump_open(sess_wire_dump);
+            printf("{\"mode\":\"session\",\"event\":\"wire_dump_begin\","
+                   "\"ok\":%d,\"path\":\"%s\"}\n", wrc == 0 ? 1 : 0, wdp);
+            fflush(stdout);
+            if (wrc != 0) {
+                usage();
+                return 2;
+            }
+        }
         sicfg.script = sess_input_script;
         sicfg.live = sess_input_live;
         sicfg.afk_ms = (unsigned)sess_afk_ms;
         sicfg.text_gap_ms = (unsigned)sess_text_gap_ms;
         sicfg.interactive = (int)sess_interactive;
         if (lottery_n == 1) {
+            int srcc;
             g_sess_present = (int)sess_present;
             g_sess_audio_play = (int)sess_audio_play;
             g_sess_interactive = (int)sess_interactive;
-            return run_session(sess_token, sess_device, sess_app,
+            srcc = run_session(sess_token, sess_device, sess_app,
                                sess_title,
                                sess_cm_host && sess_cm_host[0] ? sess_cm_host
                                    : KN_CM_DEFAULT_BASE_HOST,
@@ -9527,6 +9577,8 @@ int main(int argc, char **argv)
                                sess_jiggle_ms, sess_au_dir,
                                sess_audio_out, sess_video_out,
                                sess_release, &sicfg, 0L, log_dir);
+            sess_wire_dump_end();        /* F34 */
+            return srcc;
         }
         /* Round XLIII (F5): lottery driver. run_session() is re-callable
          * by construction — every stateful static is re-initialised at
@@ -9613,6 +9665,7 @@ int main(int argc, char **argv)
                    "\"draws\":%ld,\"of\":%ld,\"last_rc\":%d}\n",
                    done, lottery_n, lrc);
             fflush(stdout);
+            sess_wire_dump_end();        /* F34 */
             return lrc;
         }
     }

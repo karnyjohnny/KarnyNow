@@ -1,5 +1,6 @@
 /* kn_net_mbedtls.c — Win32 network probes using the pinned mbedTLS backend. */
 #include "kn/kn_net.h"
+#include "kn/kn_wire.h"   /* F34: the TLS plaintext wire dump hook */
 
 #include <stdio.h>    /* unconditional: the POSIX stub section (round XXI
                          TLS-stream stubs) formats error text too */
@@ -659,6 +660,7 @@ int kn_net_tls_stream_send(kn_net_tls_stream *s, const uint8_t *buf,
         if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
         return -1;                       /* timeout/send failure: fatal */
     }
+    if (len) kn_wire_dump_record(1, buf, len);   /* F34: outgoing wire */
     return 0;
 }
 
@@ -697,7 +699,10 @@ int kn_net_tls_stream_recv(kn_net_tls_stream *s, uint8_t *buf, size_t cap,
     setsockopt(s->sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&io_timeout,
                sizeof io_timeout);
     ret = mbedtls_ssl_read(&s->ssl, buf, (int)(cap > INT_MAX ? INT_MAX : cap));
-    if (ret > 0) return ret;
+    if (ret > 0) {
+        kn_wire_dump_record(0, buf, (size_t)ret);  /* F34: incoming wire */
+        return ret;
+    }
     if (ret == 0) return -2;                              /* orderly EOF */
     if (ret == MBEDTLS_ERR_SSL_TIMEOUT || ret == MBEDTLS_ERR_SSL_WANT_READ)
         return 0;                                         /* retryable */

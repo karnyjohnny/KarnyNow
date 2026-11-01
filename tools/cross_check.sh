@@ -32,6 +32,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS -c streamer/src/kn_selftest.c -o build/cross/kn_selftest_$arch.o
     $CC $CFLAGS -c streamer/src/kn_decode.c -o build/cross/kn_decode_$arch.o
     $CC $CFLAGS -c streamer/src/kn_d3d.c   -o build/cross/kn_d3d_$arch.o
+    $CC $CFLAGS -c streamer/src/kn_wire.c  -o build/cross/kn_wire_$arch.o
     $CC $CFLAGS -c streamer/src/kn_gs.c    -o build/cross/kn_gs_$arch.o
     $CC $CFLAGS -c streamer/src/kn_rx.c    -o build/cross/kn_rx_$arch.o
     $CC $CFLAGS -c streamer/src/kn_perf.c  -o build/cross/kn_perf_$arch.o
@@ -191,7 +192,8 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_diag.c streamer/src/kn_selftest.c \
         streamer/src/kn_decode.c streamer/src/kn_d3d.c streamer/src/kn_gs.c \
         streamer/src/kn_perf.c streamer/src/kn_audio.c \
-        streamer/src/kn_net.c streamer/src/kn_rx.c streamer/src/kn_sock.c \
+        streamer/src/kn_net.c streamer/src/kn_wire.c \
+        streamer/src/kn_rx.c streamer/src/kn_sock.c \
         streamer/src/kn_ws.c streamer/src/kn_rtsp.c \
         streamer/src/kn_json.c streamer/src/kn_http.c streamer/src/kn_cm.c \
         streamer/src/kn_cert.c streamer/src/kn_dtls.c \

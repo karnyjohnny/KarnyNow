@@ -43,6 +43,7 @@ add_library(kncore STATIC
   streamer/src/kn_perf.c
   streamer/src/kn_audio.c
   streamer/src/kn_net.c
+  streamer/src/kn_wire.c
   streamer/src/kn_rx.c
   streamer/src/kn_sock.c
   streamer/src/kn_ws.c
@@ -256,7 +257,7 @@ else()
 endif()
 
 enable_testing()
-foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert kndtls knsctp kninput kndrawpath knd3d knfreeze knbw knogg knarx knopus)
+foreach(t knlog knring knfec knsrtp kndiag knselftest kngs knaudio knrx knsock knws knrtsp kncm kncert kndtls knsctp kninput kndrawpath knd3d knfreeze knbw knogg knarx knopus knwire)
   add_executable(test_${t} streamer/tests/test_${t}.c)
   target_link_libraries(test_${t} PRIVATE kncore)
   # tests include the generated KAT vector headers, which live in src/
