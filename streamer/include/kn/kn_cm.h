@@ -173,6 +173,13 @@ typedef struct kn_cm_session {
     long long conn0_alp;              /* entry[0].appLevelProtocol */
     long long conn0_port;             /* entry[0].port */
     char      conn0_path[48];         /* entry[0].resourcePath */
+    /* B-track (browser pivot): entry[0].ip. For the WebRTC seat this is
+     * the DASHED signaling host ("80-250-97-39.cloudmatchbeta.
+     * nvidiagrid.net" in the 2026-11-02 web capture, gfn_ref_urls.txt —
+     * the WS target is wss://{ip}{resourcePath}sign_in?...); while
+     * queued the cloud sends the bare domain with an empty label
+     * (".cloudmatchbeta.nvidiagrid.net"). Empty until the seat lands. */
+    char      conn0_ip[128];          /* entry[0].ip */
 } kn_cm_session;
 
 /* Build the POST v2/session body ({"sessionRequestData":{...}}) —
@@ -302,34 +309,41 @@ int kn_cm_resume(kn_http_io io, const char *host, const char *base_path,
                  uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
                  int *http_status, kn_cm_session *out);
 
-/* F36 (run-100 read): the queue-ad report. ad_action takes the
- * reference's mapping (cloudmatch.rs report_ad): 1 start, 2 pause,
- * 3 resume, 4 finish, 5 cancel (KN_CM_AD_* below). The body mirrors the
- * browser IMA PUT captured in gfn_ref_h2.json byte-for-byte in key
- * order: {"action":6,"adUpdates":[{"adId":..,"adAction":N,
- * "clientTimestamp":<unix s>[,"cancelReason":..],"watchedTimeInMs":W,
- * "pausedTimeInMs":P,"adDurationInMs":D}]}. cancel_reason NULL omits the
- * key. The response is a full session payload — extract fills `out`
- * (may be NULL). PUT {base_path}v2/session/{id} on the CONTROL host. */
+/* F36 (run-100 read) + B-track (2026-11-02 web capture, h2_extracted.txt
+ * bodies 1-9): the queue-ad report. ad_action takes the reference's
+ * mapping (cloudmatch.rs report_ad): 1 start, 2 pause, 3 resume,
+ * 4 finish, 5 cancel, 6 IMA EVENT (KN_CM_AD_* below). The body mirrors
+ * the browser IMA PUT byte-for-byte in key order:
+ * {"action":6,"adUpdates":[{"adId":..,"adAction":N,
+ * "clientTimestamp":<unix s>[,"eventName":..|,"cancelReason":..],
+ * "watchedTimeInMs":W,"pausedTimeInMs":P,"adDurationInMs":D}]}.
+ * cancel_reason / event_name NULL omit their key; adAction 6 REQUIRES
+ * event_name (the capture's nine PUTs: 6/LOADED, 1, 6/IMPRESSION,
+ * 6/STARTED, 6/FIRST_QUARTILE, 6/MIDPOINT, 6/THIRD_QUARTILE,
+ * 6/COMPLETE, 4 — eventName appears on the 6s only). The response is a
+ * full session payload — extract fills `out` (may be NULL).
+ * PUT {base_path}v2/session/{id} on the CONTROL host. */
 #define KN_CM_AD_START   1
 #define KN_CM_AD_PAUSE   2
 #define KN_CM_AD_RESUME  3
 #define KN_CM_AD_FINISH  4
 #define KN_CM_AD_CANCEL  5
+#define KN_CM_AD_EVENT   6    /* IMA lifecycle event; needs eventName */
 int kn_cm_build_ad_body(const char *ad_id, int ad_action,
                         long long client_ts, long long watched_ms,
                         long long paused_ms, long long duration_ms,
-                        const char *cancel_reason,
+                        const char *cancel_reason, const char *event_name,
                         char *out, size_t outsz, size_t *out_len);
 int kn_cm_report_ad(kn_http_io io, const char *host, const char *base_path,
                     const kn_cm_settings *s, const char *session_id,
                     const char *ad_id,
                     int ad_action, long long watched_ms, long long paused_ms,
                     long long duration_ms, const char *cancel_reason,
+                    const char *event_name,
                     uint32_t timeout_ms,
                     uint64_t (*now_ms)(void *), void *now_ctx,
-                    uint8_t *rxb, size_t rxbsz, char *jsonbuf,
-                    size_t jsoncap, int *http_status, kn_cm_session *out);
+                    uint8_t *rxb, size_t rxbsz, char *jsonbuf, size_t jsoncap,
+                    int *http_status, kn_cm_session *out);
 
 #ifdef __cplusplus
 }

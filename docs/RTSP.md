@@ -6123,3 +6123,326 @@ tests are the spine, which log fields decide, the current state of knowledge, th
 protocol, the dead ends) — `README.md`'s documentation map now lists both. C sources
 untouched: the 4r gate results stand (`CROSS-CHECK PASS` ×2, `NATIVE TESTS PASS` 25
 suites, skeleton 113 == 113 ×2, `test_launcher` 156/0).
+
+## 64. Slice 5a (B-TRACK): THE BROWSER PIVOT — the native bisect is closed inconclusive-because-universal, the 2026-11-02 web-client capture + OpenNOW's WebRTC module together spec the /nvst/ path END TO END, and B1 ships the ad-eventName sequence + the WebRTC-seat signaling probe
+
+### 64.1 The verdict that closes the native track
+
+Every bisect build died the same death: `a339b52`, `0c63a49`, `9409213`,
+`ee75d37` and HEAD all reached the full native contract — RTSP
+OPTIONS/DESCRIBE/SETUP/ANNOUNCE 200 (SDP 4137 B), ctrl burst at
+828–853 ms (`020e` input-version + `0111` + 6× `010a` Serenity),
+`sctp_channels opened:8 acked:8`, PLAY 200, `dtls_ready` in 739 ms —
+and then the rig's `0x0101` heartbeat logged **0–5 beats** and the
+client died `ctrl_dead`/`recovery_exhausted` at 13–20 s. The r46
+keeper rebuild (run 200) flew 87.3 s vs its own 1020 s history with a
+per-second-identical wire (confound named in §63: that build had no
+FFmpeg). The heartbeat oracle (§63) reads: keeper 1001 beats, run 200
+73, bisect builds 0–2. **A bisect in which every candidate is dead
+measures nothing** — the variable is the server's native-seat contract,
+not our history. Operator decision (2026-11-02): thick line, fly the
+browser path — the official web client played a FULL HOUR on the same
+account, laptop and network the same evening the native builds died in
+under 20 s.
+
+### 64.2 The web-client capture (`priv-logs/gfn_ref_out/`) — what it proves
+
+Session `62c3f40e-664d-410d-9c2f-82b576cb34ca`, Chrome 109 (F35
+identity), client 2.0.89.154, origin play.geforcenow.com, 19:45 UTC.
+Extraction: `gfn_ref_out/h2_extracted.txt` (all 55 H2 connections,
+time-ordered headers+bodies, built from `gfn_ref_h2.json`).
+
+1. **CREATE** `POST eu-poland.cloudmatchbeta…/v2/session?keyboardLayout=en-US&languageCode=pl_PL`
+   with `nv-client-streamer: WEBRTC`, `nv-client-type: BROWSER`,
+   `nv-browser-type: CHROME`; body `appId 107057914, clientPlatformName
+   "browser", sdkVersion "1.0", streamerVersion 1, secureRTSPSupported
+   false, enhancedStreamMode 1, appLaunchMode 1, profile 1, userAge 34,
+   monitor 1280×800@60, metaData 8 incl. GSStreamerType WebRTC`.
+   **Field-identical to `kn_cm.c`'s F35 profile-1 builder — the create
+   leg needs zero work** (measured, not assumed: field-by-field diff
+   against the captured body).
+2. **CREATE RESP**: `status 1, sessionAdsRequired true,
+   queuePosition 0/eta 30000, connectionInfo [{protocol 1, usage 14,
+   appLevelProtocol 5, port 443, resourcePath "/nvst/"}]` — the exact
+   seat F37's `conn_unusable` fail-fast rejects. While queued the
+   entry's `ip` is `".cloudmatchbeta.nvidiagrid.net"` (empty label);
+   at seat time it becomes the **dashed-IP signaling host**
+   `"80-250-97-39.cloudmatchbeta.nvidiagrid.net"`.
+3. **THE AD GATE, complete protocol** (nine `PUT /v2/session/<sid>` on
+   the control host, bodies verbatim in `h2_extracted.txt`):
+   `sessionAds {adId a4dca4e4-…, adState 1, adLengthInSeconds 120,
+   adUrl pubads.g.doubleclick.net/gampad/ads (xml_vast4,
+   iu=/23368951970/gfn_video_preroll, cust_params mtier=FREE)}`;
+   queuePosition 173→0 during the ad; adState 1→2. The nine bodies —
+   every one `{"action":6,"adUpdates":[{…}]}` with key order `adId,
+   adAction, clientTimestamp (UNIX s), [eventName], watchedTimeInMs,
+   pausedTimeInMs, adDurationInMs`:
+
+   | # | adAction | eventName | clientTimestamp | watchedTimeInMs |
+   |---|----------|-----------|-----------------|-----------------|
+   | 1 | 6 | LOADED | 1793648745 | 0 |
+   | 2 | 1 | — | 1793648745 | 0 |
+   | 3 | 6 | IMPRESSION | 1793648747 | 0 |
+   | 4 | 6 | STARTED | 1793648747 | 0 |
+   | 5 | 6 | FIRST_QUARTILE | 1793648773 | 26017 |
+   | 6 | 6 | MIDPOINT | 1793648796 | 48696 |
+   | 7 | 6 | THIRD_QUARTILE | 1793648818 | 71136 |
+   | 8 | 6 | COMPLETE | 1793648841 | 93667 |
+   | 9 | 4 | — | 1793648841 | 93715 |
+
+   **`adDurationInMs` is 90000 in ALL nine while the seat's
+   `adLengthInSeconds` said 120** — the browser reports the VAST
+   creative's own `<Duration>`, not the session field. Wall time
+   LOADED→finish ≈ 96 s; the seat was assigned right after body 9.
+   The VAST URL itself was fetched 9× by the browser (IMA tracker
+   pattern). Our a339b52 cancel-only path was also ACCEPTED (3× HTTP
+   200, queue advanced) — cancel remains the proven no-fill escape.
+4. **WS wire form** (`gfn_ref_urls.txt`):
+   `wss://80-250-97-39.cloudmatchbeta.nvidiagrid.net/nvst/sign_in?peer_id=peer-7905084000&version=3.0&peer_role=1&pairing_id=<sid>`
+   and a `&reconnect=1` variant later in the session. Media UDP flowed
+   from `80.250.97.39:5004` (netlog: ~910 pps inbound, prflx/srflx —
+   no TURN).
+5. **Netlog limits (measured)**: WS frames are HEADER-ONLY (65 recv
+   text 8–13 B every ~2 s = the hb/ack cadence; 25 sent binary
+   15–18 KB every ~5 s = a telemetry stream), UDP events carry byte
+   counts only, window 81 s. **No dump contains the SDP exchange** —
+   that gap is what §64.3 closes from the reference.
+6. **Media map** (`event_log_20261102_2057_5_4.log`, 169 783 events /
+   181.4 s + `webrtc_internals_dump.txt`): video H264 **PT 96 SSRC 2**
+   (42001f, pkt-mode 1, max-br 15360k, ~500 pps ≈ 4.1 Mbps, loss
+   ~1.1%), RTX PT 98 SSRC 4 + PT 97 SSRC 3; audio SSRC 1 ~98 pps
+   ~744 kbps 5.1 (wire PT 63 vs stats "opus 111" — likely RED
+   wrapping; no SDP to settle it, B3 must sniff the first packets);
+   mic Opus 111; RTCP TWCC both directions; RTT 31–302 ms;
+   `rtcConfiguration {iceServers: [], bundlePolicy balanced,
+   rtcpMuxPolicy require}`.
+
+### 64.3 OpenNOW @ `1cb3479` — the WebRTC reference, module by module
+
+OpenNOW (github.com/OpenCloudGaming/OpenNOW, the same commit §59.2
+already cites for cloudmatch) ships a working GFN WebRTC client:
+`native/opennow-streamer/crates/opennow-streamer-core/src/webrtc/`
+(`mod.rs` 818 ln, `signaling.rs` 470 ln, `sdp.rs` 210 ln, `input.rs`,
+`video_attributes.sdp`) + `opennow-streamer-transport/src/webrtc/`
+(`mod.rs`, `input.rs`, `stats.rs`). Reference copies:
+**`priv-logs/gfn_ref_out/opennow_webrtc_ref/`** (nine files). Read
+like nvst.rs was read: port the SEMANTICS to C with KATs, never run it
+(Win7 can't).
+
+**Signaling (signaling.rs) — the complete /nvst/ WS protocol:**
+
+1. URL: `wss://{conn.ip}{resourcePath}sign_in?peer_id=peer-{…}&version={v}&peer_role=1&pairing_id={sessionId}`;
+   OpenNOW: fresh `v=2` with a 24-hex peer id, reconnect `v=3.0` +
+   `&reconnect=1`. Today's browser capture used `v=3.0` fresh with a
+   10-digit peer id — **both forms work against today's fleet; B1 flies
+   the capture's** (`peer-%010llu` from CSPRNG, version=3.0).
+   `signalingUrl` must be explicit, wss, credential-free; path gets
+   `/sign_in` appended if absent.
+2. Handshake headers: `Origin: https://play.geforcenow.com`,
+   `User-Agent: Mozilla/5.0 … Chrome/…`, **`Sec-WebSocket-Protocol:
+   x-nv-sessionid.{sessionId}`** (the subprotocol IS the session
+   binding — not a plain header like the rtsps leg).
+3. First client frame: `{"ackid":1,"peer_info":{"browser":"Chrome",
+   "browserVersion":"131","connected":true,"id":0,"name":"peer-…",
+   "peerRole":0,"resolution":"WxH","version":2}}`. The server echoes a
+   peer_info with OUR name and the assigned numeric id — learn it by
+   name match.
+4. Ack duty: every inbound packet with an `ackid` that is not our own
+   peer_info echo gets `{"ack":N}`.
+5. Heartbeat: client sends `{"hb":1}` every **5 s**; an inbound
+   non-zero `{"hb":N}` is answered `{"hb":1}` and otherwise ignored.
+6. Payload envelope: `{"ackid":N,"peer_msg":{"from":F,"to":T,
+   "msg":"<JSON-encoded string>"}}` — the inner message is a STRING.
+   Inner types: server `{"type":"offer","sdp":"…"}` (≤256 KiB),
+   trickle `{"candidate":"…","sdpMid":…,"sdpMLineIndex":…}` (≤64,
+   both directions), literal `"BYE"` closes; client answers
+   `{"type":"answer","sdp":<webrtc answer>,"nvstSdp":<NVIDIA blob>}`
+   then its own local candidate JSON.
+7. `{"error":"peerRemoved"}` → session over; any other non-null
+   `error` → rejection.
+
+**The flow is SERVER-offers / CLIENT-answers** (`negotiate(offer_sdp,…)`
+in core `mod.rs`): connect WS → peer_info → wait ≤20 s for the offer
+(collecting pre-offer candidates) → build the answer → send
+answer+nvstSdp → send local candidate → add remote candidates →
+media. Candidates may ALSO ride inside the offer SDP as `a=candidate:`
+lines (`normalize_offer` rewrites them, cap 64, relay-only refused —
+there is no TURN on this path, matching the capture's prflx/srflx).
+
+**nvstSdp (sdp.rs) — the NVIDIA-proprietary answer blob** sent
+alongside the standard WebRTC answer: `v=0` / `o=SdpTest test_id_13 14
+IN IPv4 127.0.0.1` / `s=-` / `t=0 0`, then
+`a=general.icePassword`, `a=general.iceUserNameFragment`,
+`a=general.dtlsFingerprint` (sha-256, colon-hex) **taken from our WebRTC
+answer**, then the fixed `video_attributes.sdp` block (~70 lines:
+`m=video 0 RTP/AVP`, `a=msid:fbc-video-0`, vqos/fec/qpg/aq/
+framePacing/packetPacing/nack-queue/bitrate-estimation attributes),
+then `a=video.framePacing.pid.minTargetFrameTimeUs:{950000/fps}`,
+fps>60 and fps≥240 add-ons, `a=packetPacing.numGroups:{120fps?3:5}`,
+viewport/bitrate block (`clientViewportWd/Ht`, `maxFPS`, `bitDepth`,
+`initialBitrateKbps`=clamp-derived, `vqos.bw.{maximum,minimum,peak,
+serverPeak}BitrateKbps` + `vqos.grc.maximumBitrateKbps` from the
+configured kbps: `max=clamp(kbps,1000,200000)`, `min=max.min(5000)`,
+`initial=min.max(max/4)`), then `m=audio 0 RTP/AVP` + `a=msid:audio`,
+then `m=application 0 RTP/AVP` + `a=msid:input_1` +
+`a=ri.partialReliableThresholdMs:{from offer, default 30}`,
+`a=ri.hidDeviceMask:{from offer, default 0xffffffff}`,
+`a=ri.enablePartiallyReliableTransferGamepad:{offer, default 15}`,
+`a=ri.enablePartiallyReliableTransferHid:{offer, default hidMask}`.
+**This is the same attribute language as our native ANNOUNCE SDP** —
+`kn_rtsp.c`'s table is the porting source for the video block.
+
+**Transport (transport/webrtc/) — the session plane:**
+
+- Codecs: opus always; H264 offered as PT 96 (42002a) / 98 (42e02a) /
+  100 (4d002a) / 102 (64002a), or H265 Main/Main10 — codec chosen from
+  the negotiated stream profile, SDR only. (The capture's rig sent
+  42001f on PT 96 — the answer must reflect the OFFER's payload types
+  and profile-level-as, not a fixed table.)
+- **Client-created data channels** (DCEP): `stats_channel`
+  (unordered, maxRetransmits 0), `input_channel_v1` (ordered,
+  reliable), `input_channel_partially_reliable` (unordered,
+  maxPacketLifetime = the offer's `ri.partialReliableThresholdMs`,
+  default 30 ms). The server's `control_channel`/`remote_trace_channel`
+  (§50–51) arrive as inbound DCEP.
+- **Input handshake**: the server sends on `input_channel_v1`
+  `0e 02 03 00` (LE u16 526 = our old friend **0x020e**, then version
+  u16 LE = 3; legacy `0e 02` = v2, `0e 03` = 0x030e). Ready = both
+  input channels open + handshake seen. (The 5-byte `0e 02 03 00 00`
+  of §50–51 is the same packet with a trailing byte — accept ≥4.)
+- **Input encoding**: body = kind u32 LE + fixed payload (2→4 B,
+  3|4|8|9→18 B, 5→26 B, 7|10→22 B, 12→38 B, 13→6 B, 19→5 B; anything
+  else refused). Handshake version ≥3 wraps every body EXCEPT kind 2:
+  `0x23` + µs-since-handshake u64 **BE** + `0x21` (batched kinds
+  5|7|12: + length u16 BE + body) or `0x22` (single: + body).
+- **LIVENESS = `[2,0,0,0]` on `input_channel_v1` every 2 s** (kind-2
+  heartbeat, never wrapped) — the WebRTC-path analogue of the native
+  `0x0101` oracle. Plus RTP/RTCP flowing.
+- Keyframes: PLI/FIR at ≤500 ms cadence until the first keyframe is
+  assembled; frames are gated on `reference_ready` (IDR-first).
+- **`stats_channel` is created but NEVER written** — OpenNOW holds
+  hour-long sessions without the §50–51 type-01/02 telemetry (the
+  browser sends it; it is evidently optional). B-track treats the
+  stats protocol as optional hardening, not liveness.
+- Timers/bounds: connect 15 s, offer wait 20 s, video start 8 s, input
+  flush budget 150 ms, SDP ≤256 KiB, signaling msg ≤512 KiB,
+  candidates ≤64, channel write buffer ≤64 KiB.
+
+### 64.4 Gap analysis — what the pivot still has to build
+
+**Already in the repo and flight-proven** (native era, all reusable):
+F35 create body (byte-identical — measured §64.2), `kn_ws` RFC 6455
+client (+ B1's port-0 Host rule), `kn_cm` create/poll/queue/sessionAds/
+cancel/resume, TLS stream seam, `kn_dtls` (real ECDSA P-256 cert,
+sha-256 fingerprint, **DTLS-SRTP via EXTRACTOR-dtls_srtp already
+extracted and feeding the audio path**), `kn_sctp` (SCTP-over-DTLS on
+the bundle + DCEP, str0m-ported — 8 channels flew live), bundle
+STUN/NATT cadence + DTLS-ACTIVE client, `knsrtp`, Opus decode +
+WASAPI, FFmpeg H264 decode + D3D9 present, VAST fetch/wrapper-hops/
+trackers, the input event encoder.
+**To build, in flight order:**
+- **B2 — signaling completion**: parse the captured offer (m-lines,
+  PT/RTX/TWCC ids, ice-ufrag/pwd, DTLS setup/fingerprint, sctp map),
+  build our standard answer (str0m-equivalent: reflect offered PTs,
+  one video + one audio m-line, rtcp-mux, bundle, DTLS passive/active
+  per offer's setup attr, ice credentials from our bundle stack) +
+  the nvstSdp blob (video_attributes ported from `kn_rtsp.c`'s
+  ANNOUNCE table + our cert's fingerprint). This is the biggest C
+  chunk; the captured B1 offer is its input fixture.
+- **B3 — media plane**: RFC 6184 H264 depacketizer (FU-A/STAP-A,
+  aggregate → AU → existing decoder), RTCP senders (TWCC feedback
+  from received transport-wide seqs, NACK, PLI), SRTP unprotect with
+  DTLS-SRTP keys (video included — the web path has no ANNOUNCE-derived
+  keys), the audio PT-63/RED question settled by sniffing B-flight
+  captures.
+- **B4 — channel plane**: DCEP open of the three client channels with
+  the exact labels/reliability, input handshake accept, v3 wrapper
+  encode (cross-check `kn_input`'s native kinds against the table —
+  the wire kinds are the same family), the 2 s kind-2 heartbeat,
+  cursor handling; server `control_channel` JSON (§50–51) monitored
+  but NOT required for liveness.
+- **B5 — ads for real** (optional): the reporting sequence is complete
+  in B1; actual media playback (FFmpeg demux + AAC/MP3 decode) only
+  matters if the server ever validates watched-time against something
+  — the capture's wall-vs-watched slack (96 s vs 93.7 s) says it does
+  not police tightly.
+- **B6 — resume/reconnect**: the `&reconnect=1` variant + F38's
+  session resume, for the G3 QoL goal.
+
+### 64.5 B1 — this slice's code (one patch, base `1fa7820`)
+
+- `kn_cm.h/.c`: **`KN_CM_AD_EVENT 6`** + `event_name` parameter on
+  `kn_cm_build_ad_body`/`kn_cm_report_ad` (eventName emitted for
+  action 6 ONLY, key position per capture: after clientTimestamp);
+  **`conn0_ip[128]`** witness field (the dashed signaling host).
+- `knvstd_main.c`: `sess_ad_play` now flies the **full nine-report
+  sequence** (§64.2 table) with `adDurationInMs` from the VAST
+  `<Duration>` (`sess_vast_duration_ms`; fallback `adLengthInSeconds`,
+  evidence line `ad_dur {ms, source}`), quartile PUTs carrying elapsed
+  `watchedTimeInMs`; no-fill keeps the proven cancel and gains a
+  `vast_excerpt` evidence field (a339b52's 200-but-media:0 mystery);
+  every PUT logs `ad_report {action, event_name, rc, http_status,
+  watched_ms, duration_ms}`.
+- `knvstd_main.c`: **`--webrtc-probe[=S]`** (default 30, clamp 5..600).
+  On a WebRTC seat (`status>=2 && !have_rtsps && conn0_usage==14 &&
+  conn0_ip`) the queue loop logs `webrtc_seat` and runs
+  `sess_webrtc_probe`: TLS → WSS handshake (bare Host on :443,
+  Origin/F35-UA/`Sec-WebSocket-Protocol: x-nv-sessionid.<sid>`) →
+  `peer_info` → hb/ack duty → capture **the server's offer SDP in
+  full** (`webrtc_offer` + `webrtc_offer_sdp` events, JSON-escaped on
+  stdout) + up to 8 `webrtc_candidate` lines + 5 s trickle linger →
+  `webrtc_probe_summary` counters → seat released via the existing
+  `cm_cancel` path (`stop_reason: webrtc_offer_captured |
+  webrtc_probe_failed`). F37's `conn_unusable` fail-fast is untouched
+  for non-probe runs.
+- `kn_ws.c/.h`: `port 0` → Host header without the port (browser rule
+  for scheme-default ports; the rtsps leg's `:322` form unchanged).
+- Tests: `test_kncm` **272** checks (golden vectors = capture bodies
+  1/5/9 byte-for-byte, EVENT-without-eventName refused, non-6 actions
+  ignore eventName, `conn0_ip` on the run-101 fixture), `test_knws`
+  **92** (port-0 bare Host, query-string path verbatim). Native suite
+  PASS, zero warnings, paranoid leg clean.
+
+### 64.6 B1 flight card (probe, not a keeper attempt)
+
+Build on the rig as usual (T10 gate first: expect **ALL PASS 89** +
+the new checks). One flight, off-peak preferred:
+
+```
+knvstd --session --session-token=<TOK> --session-app=<APPID> ^
+  --cm-profile=browser --webrtc-probe=45 --session-seconds=180 ^
+  --session-queue-timeout=1500 --log-dir=logs\runB1 --wire-dump=logs\runB1\wire.txt
+```
+
+(the launcher's typed-params field takes the same flags; the free tier
+WILL queue and WILL offer the ~90 s ad — budget ~5–8 min total).
+
+**Oracle — what to check and how much:**
+
+| line | healthy value | meaning |
+|------|---------------|---------|
+| `ad_report` ×9 | all `rc:0 http_status:200` | the eventName sequence is accepted |
+| `ad_dur` | `source:"vast"`, `ms:90000`-ish | the creative's duration drives the hold |
+| `webrtc_seat` | `conn0_usage:14 conn0_alp:5 conn0_port:443 conn0_ip:"…-…-…-….cloudmatchbeta…"` | the browser identity bought the WebRTC seat |
+| `webrtc_ws_open` | `rc:0 http_status:101` | the /nvst/ handshake passed (Host/Origin/subprotocol accepted) |
+| `webrtc_offer` | `sdp_bytes` in the thousands, `m_lines>=2` | the server sent its SDP offer |
+| `webrtc_offer_sdp` | full escaped SDP in the log | **B2's input fixture — archive it** |
+| `webrtc_candidate` ≥1 | `candidate:"…:5004 …"` typical | the media port + trickle shape |
+| `webrtc_probe_summary` | `got_offer:1 peer_info_seen>=1 frames_in>=3` | the protocol duty cycle ran |
+| final | `stop_reason:"webrtc_offer_captured"` + `cm_cancel http_status:200` | seat released cleanly |
+
+Failure branches and their first moves: `webrtc_ws_open rc!=0` →
+try `version=2` + 24-hex peer id (OpenNOW's fresh form) by editing the
+probe constants — the handshake headers are the only unverified byte;
+`ws_open 101` but no offer in 45 s → the `peer_info` shape is suspect
+(browserVersion 131 / peerRole / resolution) — the summary's
+`peer_info_seen` says whether the server echoed us at all;
+`error:"peerRemoved"` → identity mismatch against the create (device
+id / token) — relogin; `ad_report rc!=0` → capture the failing body +
+response, compare with §64.2's table.
+
+**Every B1 artifact (log dir + wire dump) goes to
+`karnyjohnny/karnynow-logs`** — the captured offer SDP is the single
+most valuable byte sequence in the project right now: it is the last
+piece of ground truth between us and a streaming browser-parity
+client.

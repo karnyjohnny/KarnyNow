@@ -527,6 +527,10 @@ int kn_cm_extract_session(const char *json_text, kn_cm_session *out)
             (void)jint(kn_json_get(&d, conn, "port"), &out->conn0_port);
             (void)jstr(&d, kn_json_get(&d, conn, "resourcePath"),
                        out->conn0_path, sizeof out->conn0_path);
+            /* B-track: the seat's signaling host (dashed-IP FQDN once
+             * the cloud assigns the rig; bare ".domain" while queued). */
+            (void)jstr(&d, kn_json_get(&d, conn, "ip"),
+                       out->conn0_ip, sizeof out->conn0_ip);
         }
         if (!out->have_rtsps &&
             conn_signaling(&d, conn, ep, sizeof ep,
@@ -863,25 +867,40 @@ int kn_cm_cancel(kn_http_io io, const char *host, const char *base_path,
 }
 
 /* F36: the ad-report body — key order transcribed from the browser's own
- * IMA PUT in the R2 capture (gfn_ref_h2.json, stream 15):
- * adId, adAction, clientTimestamp, [cancelReason], watchedTimeInMs,
- * pausedTimeInMs, adDurationInMs. The outer envelope is the
- * reference's {"action":6,"adUpdates":[{...}]} (cloudmatch.rs
- * report_ad). clientTimestamp is UNIX SECONDS (capture: 1793523113). */
+ * IMA PUT in the R2 capture (gfn_ref_h2.json, stream 15) and re-verified
+ * against the 2026-11-02 web capture (h2_extracted.txt, bodies 1-9):
+ * adId, adAction, clientTimestamp, [eventName | cancelReason],
+ * watchedTimeInMs, pausedTimeInMs, adDurationInMs. The outer envelope is
+ * the reference's {"action":6,"adUpdates":[{...}]} (cloudmatch.rs
+ * report_ad). clientTimestamp is UNIX SECONDS (capture: 1793648745).
+ * B-track: adAction 6 (KN_CM_AD_EVENT) carries the IMA lifecycle
+ * eventName — LOADED, IMPRESSION, STARTED, FIRST_QUARTILE, MIDPOINT,
+ * THIRD_QUARTILE, COMPLETE — and is REJECTED without one; every other
+ * action ignores event_name. */
 int kn_cm_build_ad_body(const char *ad_id, int ad_action,
                         long long client_ts, long long watched_ms,
                         long long paused_ms, long long duration_ms,
-                        const char *cancel_reason,
+                        const char *cancel_reason, const char *event_name,
                         char *out, size_t outsz, size_t *out_len)
 {
     int n;
     if (!ad_id || !ad_id[0] || !out || !out_len) return KN_HTTP_ERR_ARGS;
-    if (ad_action < KN_CM_AD_START || ad_action > KN_CM_AD_CANCEL)
+    if (ad_action == KN_CM_AD_EVENT) {
+        if (!event_name || !event_name[0]) return KN_HTTP_ERR_ARGS;
+    } else if (ad_action < KN_CM_AD_START || ad_action > KN_CM_AD_CANCEL)
         return KN_HTTP_ERR_ARGS;
     if (watched_ms < 0) watched_ms = 0;
     if (paused_ms < 0) paused_ms = 0;
     if (duration_ms < 0) duration_ms = 0;
-    if (cancel_reason && cancel_reason[0])
+    if (ad_action == KN_CM_AD_EVENT)
+        n = snprintf(out, outsz,
+            "{\"action\":6,\"adUpdates\":[{"
+            "\"adId\":\"%.64s\",\"adAction\":%d,\"clientTimestamp\":%lld,"
+            "\"eventName\":\"%.32s\",\"watchedTimeInMs\":%lld,"
+            "\"pausedTimeInMs\":%lld,\"adDurationInMs\":%lld}]}",
+            ad_id, ad_action, client_ts, event_name,
+            watched_ms, paused_ms, duration_ms);
+    else if (cancel_reason && cancel_reason[0])
         n = snprintf(out, outsz,
             "{\"action\":6,\"adUpdates\":[{"
             "\"adId\":\"%.64s\",\"adAction\":%d,\"clientTimestamp\":%lld,"
@@ -907,6 +926,7 @@ int kn_cm_report_ad(kn_http_io io, const char *host, const char *base_path,
                     const char *ad_id,
                     int ad_action, long long watched_ms, long long paused_ms,
                     long long duration_ms, const char *cancel_reason,
+                    const char *event_name,
                     uint32_t timeout_ms,
                     uint64_t (*now_ms)(void *), void *now_ctx,
                     uint8_t *rxb, size_t rxbsz, char *jsonbuf,
@@ -919,7 +939,7 @@ int kn_cm_report_ad(kn_http_io io, const char *host, const char *base_path,
         return KN_HTTP_ERR_ARGS;
     if (kn_cm_build_ad_body(ad_id, ad_action, (long long)time(NULL),
                             watched_ms, paused_ms, duration_ms,
-                            cancel_reason, body, sizeof body,
+                            cancel_reason, event_name, body, sizeof body,
                             &blen) != KN_HTTP_OK)
         return KN_HTTP_ERR_ARGS;
     n = snprintf(path, sizeof path, "%sv2/session/%.64s",

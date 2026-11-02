@@ -358,8 +358,11 @@ static void test_cm_extract(void)
         CHECK(s.status == 2 && s.ready == 0 && !s.have_rtsps,
               "run-101: status 2 but usage14+alp5 is NOT rtsps -> ready 0");
         CHECK(s.conn_count == 1 && s.conn0_usage == 14 && s.conn0_alp == 5 &&
-              s.conn0_port == 443 && strcmp(s.conn0_path, "/nvst/") == 0,
-              "run-101: conn0 witness fields (usage/alp/port/path)");
+              s.conn0_port == 443 && strcmp(s.conn0_path, "/nvst/") == 0 &&
+              strcmp(s.conn0_ip,
+                     "80-250-97-36.cloudmatchbeta.nvidiagrid.net") == 0,
+              "run-101: conn0 witness fields (usage/alp/port/path/ip — "
+              "the B-track probe's WSS host)");
         CHECK(s.have_seat && s.seat_setup_step == 3 && !s.have_queue,
               "run-101: seatSetupStep 3, queuePosition 0 filtered");
     }
@@ -1172,7 +1175,7 @@ static void test_cm_ads(void)
      * adDurationInMs */
     rc = kn_cm_build_ad_body("0f731652-dfcb-4bfc-b89a-c976a15055a9",
                              KN_CM_AD_CANCEL, 1793523113, 0, 0, 0,
-                             "VAST_NO_ADS_AFTER_WRAPPER",
+                             "VAST_NO_ADS_AFTER_WRAPPER", NULL,
                              body, sizeof body, &blen);
     CHECK(rc == KN_HTTP_OK &&
           !strcmp(body,
@@ -1184,7 +1187,7 @@ static void test_cm_ads(void)
                   "\"adDurationInMs\":0}]}"),
           "ads: cancel body byte-mirrors the captured IMA PUT");
     rc = kn_cm_build_ad_body("AD-1", KN_CM_AD_START, 123, 0, 0, 0, NULL,
-                             body, sizeof body, &blen);
+                             NULL, body, sizeof body, &blen);
     CHECK(rc == KN_HTTP_OK && blen == strlen(body) &&
           !strcmp(body,
                   "{\"action\":6,\"adUpdates\":[{\"adId\":\"AD-1\","
@@ -1193,28 +1196,82 @@ static void test_cm_ads(void)
                   "\"adDurationInMs\":0}]}"),
           "ads: start body omits cancelReason (OpenNOW conditional key)");
     rc = kn_cm_build_ad_body("AD-1", KN_CM_AD_FINISH, 999, 120000, 0,
-                             120000, "", body, sizeof body, &blen);
+                             120000, "", NULL, body, sizeof body, &blen);
     CHECK(rc == KN_HTTP_OK && strstr(body, "\"adAction\":4") &&
           strstr(body, "\"watchedTimeInMs\":120000") &&
           strstr(body, "\"adDurationInMs\":120000") &&
           !strstr(body, "cancelReason"),
           "ads: finish body (empty reason string omits the key)");
+    /* B-track golden vectors: bodies 1, 5 and 9 of the 2026-11-02 web
+     * capture (h2_extracted.txt), byte-for-byte — adAction 6 with
+     * eventName in the capture's key order (after clientTimestamp,
+     * before watchedTimeInMs) and the bare adAction-4 finish. */
+    rc = kn_cm_build_ad_body("a4dca4e4-fa57-4e3e-8763-9384f9c3109f",
+                             KN_CM_AD_EVENT, 1793648745, 0, 0, 90000,
+                             NULL, "LOADED", body, sizeof body, &blen);
+    CHECK(rc == KN_HTTP_OK && blen == strlen(body) &&
+          !strcmp(body,
+                  "{\"action\":6,\"adUpdates\":[{"
+                  "\"adId\":\"a4dca4e4-fa57-4e3e-8763-9384f9c3109f\","
+                  "\"adAction\":6,\"clientTimestamp\":1793648745,"
+                  "\"eventName\":\"LOADED\",\"watchedTimeInMs\":0,"
+                  "\"pausedTimeInMs\":0,\"adDurationInMs\":90000}]}"),
+          "ads: LOADED event body byte-mirrors capture body 1");
+    rc = kn_cm_build_ad_body("a4dca4e4-fa57-4e3e-8763-9384f9c3109f",
+                             KN_CM_AD_EVENT, 1793648773, 26017, 0, 90000,
+                             NULL, "FIRST_QUARTILE",
+                             body, sizeof body, &blen);
+    CHECK(rc == KN_HTTP_OK &&
+          !strcmp(body,
+                  "{\"action\":6,\"adUpdates\":[{"
+                  "\"adId\":\"a4dca4e4-fa57-4e3e-8763-9384f9c3109f\","
+                  "\"adAction\":6,\"clientTimestamp\":1793648773,"
+                  "\"eventName\":\"FIRST_QUARTILE\","
+                  "\"watchedTimeInMs\":26017,\"pausedTimeInMs\":0,"
+                  "\"adDurationInMs\":90000}]}"),
+          "ads: FIRST_QUARTILE body byte-mirrors capture body 5");
+    rc = kn_cm_build_ad_body("a4dca4e4-fa57-4e3e-8763-9384f9c3109f",
+                             KN_CM_AD_FINISH, 1793648841, 93715, 0, 90000,
+                             NULL, NULL, body, sizeof body, &blen);
+    CHECK(rc == KN_HTTP_OK &&
+          !strcmp(body,
+                  "{\"action\":6,\"adUpdates\":[{"
+                  "\"adId\":\"a4dca4e4-fa57-4e3e-8763-9384f9c3109f\","
+                  "\"adAction\":4,\"clientTimestamp\":1793648841,"
+                  "\"watchedTimeInMs\":93715,\"pausedTimeInMs\":0,"
+                  "\"adDurationInMs\":90000}]}"),
+          "ads: finish body byte-mirrors capture body 9");
     CHECK(kn_cm_build_ad_body("", KN_CM_AD_START, 0, 0, 0, 0, NULL,
-                              body, sizeof body, &blen) == KN_HTTP_ERR_ARGS,
+                              NULL, body, sizeof body,
+                              &blen) == KN_HTTP_ERR_ARGS,
           "ads: empty adId refused");
-    CHECK(kn_cm_build_ad_body("AD-1", 0, 0, 0, 0, 0, NULL,
+    CHECK(kn_cm_build_ad_body("AD-1", 0, 0, 0, 0, 0, NULL, NULL,
                               body, sizeof body, &blen) == KN_HTTP_ERR_ARGS &&
-          kn_cm_build_ad_body("AD-1", 6, 0, 0, 0, 0, NULL,
-                              body, sizeof body, &blen) == KN_HTTP_ERR_ARGS,
-          "ads: adAction outside 1..5 refused");
+          kn_cm_build_ad_body("AD-1", 7, 0, 0, 0, 0, NULL, NULL,
+                              body, sizeof body, &blen) == KN_HTTP_ERR_ARGS &&
+          kn_cm_build_ad_body("AD-1", KN_CM_AD_EVENT, 0, 0, 0, 0, NULL,
+                              NULL, body, sizeof body,
+                              &blen) == KN_HTTP_ERR_ARGS &&
+          kn_cm_build_ad_body("AD-1", KN_CM_AD_EVENT, 0, 0, 0, 0, NULL,
+                              "", body, sizeof body,
+                              &blen) == KN_HTTP_ERR_ARGS,
+          "ads: adAction outside 1..6 refused; 6 without eventName "
+          "refused");
+    {   /* a non-6 action IGNORES a stray event_name (no eventName key —
+         * the capture's adAction 1/4/5 bodies never carry one) */
+        rc = kn_cm_build_ad_body("AD-1", KN_CM_AD_START, 1, 0, 0, 0,
+                                 NULL, "LOADED", body, sizeof body, &blen);
+        CHECK(rc == KN_HTTP_OK && !strstr(body, "eventName"),
+              "ads: eventName is emitted for adAction 6 only");
+    }
     CHECK(kn_cm_build_ad_body("AD-1", KN_CM_AD_START, 0, -5, -1, -9, NULL,
-                              body, sizeof body, &blen) == KN_HTTP_OK &&
+                              NULL, body, sizeof body, &blen) == KN_HTTP_OK &&
           strstr(body, "\"watchedTimeInMs\":0") &&
           strstr(body, "\"pausedTimeInMs\":0") &&
           strstr(body, "\"adDurationInMs\":0"),
           "ads: negative times clamp to 0");
     CHECK(kn_cm_build_ad_body("AD-1", KN_CM_AD_START, 0, 0, 0, 0, NULL,
-                              body, 40, &blen) == KN_HTTP_ERR_BIG,
+                              NULL, body, 40, &blen) == KN_HTTP_ERR_BIG,
           "ads: undersized buffer -> ERR_BIG, no overflow");
 
     /* networked PUT on the control host */
@@ -1236,8 +1293,8 @@ static void test_cm_ads(void)
     memset(&s, 0, sizeof s);
     rc = kn_cm_report_ad(hio_io(&h), "np-waw-01.example", "/", &st,
                          "SESS-1", "AD-1", KN_CM_AD_START, 0, 0, 0, NULL,
-                         1000, fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
-                         sizeof g_body, &status, &s);
+                         NULL, 1000, fake_now, NULL, g_rxb, sizeof g_rxb,
+                         g_body, sizeof g_body, &status, &s);
     CHECK(rc == KN_HTTP_OK && status == 200, "ads: PUT 200 accepted");
     h.from[h.flen] = '\0';
     CHECK(strstr((char *)h.from, "PUT /v2/session/SESS-1 HTTP/1.1\r\n") ==
@@ -1249,10 +1306,17 @@ static void test_cm_ads(void)
           s.have_ad == 0,
           "ads: the PUT response re-fills the session (queue resumes)");
     CHECK(kn_cm_report_ad(hio_io(&h), "h", "/", &st, "SESS-1", "",
-                          KN_CM_AD_START, 0, 0, 0, NULL, 1000, fake_now,
-                          NULL, g_rxb, sizeof g_rxb, g_body, sizeof g_body,
-                          &status, NULL) == KN_HTTP_ERR_ARGS,
+                          KN_CM_AD_START, 0, 0, 0, NULL, NULL, 1000,
+                          fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
+                          sizeof g_body, &status,
+                          NULL) == KN_HTTP_ERR_ARGS,
           "ads: missing adId refused before any I/O");
+    CHECK(kn_cm_report_ad(hio_io(&h), "h", "/", &st, "SESS-1", "AD-1",
+                          KN_CM_AD_EVENT, 0, 0, 0, NULL, NULL, 1000,
+                          fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
+                          sizeof g_body, &status,
+                          NULL) == KN_HTTP_ERR_ARGS,
+          "ads: adAction 6 without eventName refused before any I/O");
 }
 
 /* ---- F38 (run-102 read): session resume — the 403 conflict payload

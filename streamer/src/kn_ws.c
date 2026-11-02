@@ -235,7 +235,7 @@ int kn_ws_client_open(kn_ws_client *c, kn_ws_io io, const char *host,
                       char *err, size_t errsz)
 {
     uint8_t keyraw[16];
-    char keyb64[32], expect[29], req[2048];
+    char keyb64[32], expect[29], req[2048], auth[300];
     int n, rc;
 
     if (err && errsz) err[0] = '\0';
@@ -248,6 +248,22 @@ int kn_ws_client_open(kn_ws_client *c, kn_ws_io io, const char *host,
     c->last_close_code = -1;
     c->msg = msgbuf;
     c->msg_cap = msgcap;
+    /* B-track: port 0 omits the port from the Host authority — the
+     * browser's own wss handshake on the default 443 sends a bare
+     * "Host: 80-250-97-39.cloudmatchbeta.nvidiagrid.net" (Chrome's
+     * rule: default ports never appear in Host/authority). The
+     * transport seam owns the real dial; this only shapes the header.
+     * Callers on explicit ports (the rtsps leg's :322) keep the
+     * host:port form verbatim. */
+    if (port != 0)
+        n = snprintf(auth, sizeof auth, "%s:%u", host, (unsigned)port);
+    else
+        n = snprintf(auth, sizeof auth, "%s", host);
+    if (n < 0 || (size_t)n >= sizeof auth) {
+        if (err && errsz) snprintf(err, errsz, "host authority too long");
+        c->last_error = KN_WS_ERR_ARGS;
+        return KN_WS_ERR_ARGS;
+    }
 
     if (kn_ws_rand(keyraw, sizeof keyraw) != 0) {
         if (err && errsz) snprintf(err, errsz, "CSPRNG unavailable");
@@ -260,13 +276,13 @@ int kn_ws_client_open(kn_ws_client *c, kn_ws_io io, const char *host,
     }
     n = snprintf(req, sizeof req,
                  "GET %s HTTP/1.1\r\n"
-                 "Host: %s:%u\r\n"
+                 "Host: %s\r\n"
                  "Upgrade: websocket\r\n"
                  "Connection: Upgrade\r\n"
                  "Sec-WebSocket-Key: %s\r\n"
                  "Sec-WebSocket-Version: 13\r\n"
                  "%s\r\n",
-                 path, host, (unsigned)port, keyb64,
+                 path, auth, keyb64,
                  extra_headers ? extra_headers : "");
     if (n < 0 || (size_t)n >= sizeof req) {
         if (err && errsz) snprintf(err, errsz, "handshake request too long");

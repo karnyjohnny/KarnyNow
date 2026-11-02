@@ -256,6 +256,28 @@ static void test_handshake(void)
           "extra headers pass through (content-length)");
     CHECK(strstr(req, "\r\n\r\n") != NULL, "header block terminated");
 
+    {   /* B-track: port 0 omits the port from Host (the browser rule on
+         * a scheme-default port — the /nvst/sign_in probe flies wss on
+         * :443 and Chrome sends a bare "Host: <dashed-seat-fqdn>"), and
+         * a path WITH a query string passes through verbatim. */
+        memset(&h, 0, sizeof h);
+        h.status = 101;
+        rc = kn_ws_client_open(&c, mio_hs_io(&h), "seat.example", 0,
+                               "/nvst/sign_in?peer_id=peer-1", NULL, 1000,
+                               g_msg, sizeof g_msg, err, sizeof err);
+        h.m.from_client[h.m.fc_len < MIO_CAP - 1 ? h.m.fc_len
+                                                 : MIO_CAP - 1] = 0;
+        req = (const char *)h.m.from_client;
+        CHECK(rc == KN_WS_OK, "port-0 handshake completes");
+        CHECK(strstr(req, "Host: seat.example\r\n") != NULL,
+              "port 0 -> bare Host authority");
+        CHECK(strstr(req, "Host: seat.example:") == NULL,
+              "no colon-port suffix on the bare authority");
+        CHECK(strstr(req,
+                     "GET /nvst/sign_in?peer_id=peer-1 HTTP/1.1\r\n") == req,
+              "query-string path verbatim in the request line");
+    }
+
     /* failure classes */
     rc = hs_open(&h, &c, 404, NULL, NULL, err, sizeof err);
     CHECK(rc == KN_WS_ERR_HTTP && c.http_status == 404,
