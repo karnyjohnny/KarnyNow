@@ -24,8 +24,87 @@ from __future__ import annotations
 
 DEFAULT_PARAMS = ("--session-seconds=1200 --input-anti-afk=60000 "
                   "--session-present --session-audio-play "
-                  "--session-release --session-interactive "
-                  "--wire-dump=logs\\wire_r1.txt")
+                  "--session-release --session-interactive")
+
+# Slice 4q: --wire-dump is NO LONGER in the default block. The launcher
+# owns it now — every draw gets its own folder and the dump goes inside
+# it, so two draws of one run can never overwrite each other's
+# wire_r1.txt (they used to: logs\wire_r1.txt was a single fixed path).
+WIRE_DUMP_NAME = "wire_r1.txt"
+CONSOLE_LOG_NAME = "console.log"
+
+
+def flag_value(argv, name):
+    # type: (list, str) -> str
+    """The value of --name=VALUE in argv, or None when absent. `name`
+    is given without the leading dashes."""
+    prefix = "--%s=" % name
+    for a in argv or []:
+        if a.startswith(prefix):
+            return a[len(prefix):]
+    return None
+
+
+def has_flag(argv, name):
+    # type: (list, str) -> bool
+    """True when --name or --name=... is present (boolean flags too)."""
+    bare = "--%s" % name
+    for a in argv or []:
+        if a == bare or a.startswith(bare + "="):
+            return True
+    return False
+
+
+def drop_flags(argv, names):
+    # type: (list, list) -> list
+    """argv minus every occurrence of the named flags (with or without
+    a value). Used so an operator-typed --log-dir/--wire-dump cannot
+    fight the launcher's per-draw folder."""
+    out = []
+    for a in argv or []:
+        hit = False
+        for n in names:
+            if a == "--%s" % n or a.startswith("--%s=" % n):
+                hit = True
+                break
+        if not hit:
+            out.append(a)
+    return out
+
+
+def draw_flags(draw_dir):
+    # type: (str) -> list
+    """The two flags that make a draw self-contained inside its folder:
+    knvstd's own per-channel logs (--log-dir, which also receives the
+    diag bundle) and the TLS plaintext mirror (--wire-dump)."""
+    import os as _os
+    return ["--log-dir=%s" % draw_dir,
+            "--wire-dump=%s" % _os.path.join(draw_dir, WIRE_DUMP_NAME)]
+
+
+def inject_draw_flags(argv, draw_dir):
+    # type: (list, str) -> list
+    """argv + the per-draw log flags. An operator-typed --log-dir or
+    --wire-dump is REPLACED (not duplicated) — the run folder is the
+    contract, so the flags always point inside it."""
+    out = drop_flags(argv, ["log-dir", "wire-dump"])
+    return out + draw_flags(draw_dir)
+
+
+def redact_argv(argv, token=""):
+    # type: (list, str) -> list
+    """argv safe to print: the session token becomes a length marker.
+    The token reaches knvstd through argv only (never the parameter box,
+    never a log file) — this is the one place it is displayed."""
+    out = []
+    for a in argv or []:
+        if a.startswith("--session-token="):
+            v = a[len("--session-token="):]
+            out.append("--session-token=<redacted:%d>" % (len(token) if token
+                                                          else len(v)))
+        else:
+            out.append(a)
+    return out
 
 
 def split_params(text):

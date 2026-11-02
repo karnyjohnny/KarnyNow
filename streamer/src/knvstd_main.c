@@ -266,6 +266,18 @@ static void usage(void)
            "                            (PUT RESUME on its control node, then\n"
            "                            poll) instead of waiting out the backoff\n"
            "                            ladder. 0 = the legacy ladder only.\n"
+           "       [--session-zombie-ms=N]\n"
+           "                            default 12000 (F40a): a draw that has\n"
+           "                            seen ZERO rig heartbeats (0x0101) for\n"
+           "                            this many ms — while resumed, or while\n"
+           "                            video still flows from the rig's buffer\n"
+           "                            — ends as stop_reason \"rig_zombie\".\n"
+           "                            run103 d4/d5: the cloud hands out a seat\n"
+           "                            whose rig is already gone (status 3,\n"
+           "                            valid addresses, ~11 s of buffered\n"
+           "                            encoder output, no heartbeat ever, so\n"
+           "                            F30's silence-after-beat key never\n"
+           "                            armed). 0 disables the verdict.\n"
            "       [--device-id-file=PATH]\n"
            "                            persist the random device GUID at PATH\n"
            "                            instead of <log-dir>/kn_device_id.txt —\n"
@@ -1501,6 +1513,11 @@ static int         g_sess_resume = 1;              /* F38: --session-resume=
                                                       named in a 403 conflict
                                                       instead of waiting out
                                                       the backoff ladder */
+static unsigned    g_sess_zombie_ms = 12000u;      /* F40a: --session-zombie-ms=
+                                                      zero rig heartbeats for
+                                                      this long -> the draw is
+                                                      a ZOMBIE RIG, verdict
+                                                      now (0 disables) */
 
 /* RFC-4122-style random UUID (v4) from SHA-1 over monotonic ms + a
  * process counter + stack-address entropy. Identification only, not a
@@ -8618,6 +8635,42 @@ static int run_session(const char *token, const char *device_id,
                 c.now_ms = now_ms;
                 (void)kn_rx_video_poll(&v, now_ms, dec_frame_in_cb, &c);
                 dec_drain_events(&c);
+                /* F40a (round N slice 4q): the ZOMBIE RIG verdict.
+                 * run103 named a death family F30 structurally cannot
+                 * see. The cloud hands out a seat whose rig is already
+                 * gone: status 3, working addresses, the encoder
+                 * streaming ~11 s more FROM ITS BUFFER — the operator's
+                 * "zbuforowany obraz umierający przed oczami". The
+                 * physical cursor disappears because F39 correctly hides
+                 * it in cursor-hidden mode; nothing on the far side is
+                 * steering any more. The discriminator is the rig's
+                 * 1 Hz 0x0101 renderer heartbeat: run102's survivor
+                 * logged 244 of them over 268 s, every run103 zombie
+                 * logged ZERO from the first second. F30 keys off
+                 * heartbeat SILENCE *after* a beat was seen
+                 * (fw_hb_last_ms != 0), so a rig that never beat once
+                 * fell through to the ~21 s no-frames path and the
+                 * operator watched a corpse instead of getting a
+                 * verdict. Gate: zero heartbeats ever AND (resumed —
+                 * run103 d4/d5 — OR video has been seen, i.e. the
+                 * buffer is talking while the rig is not). A fresh draw
+                 * with no video at all still belongs to the no-frames /
+                 * recovery paths, so this never steals their verdicts.
+                 * --session-zombie-ms=0 restores the old wait. */
+                if (g_sess_zombie_ms && !pump.fw_hb_last_ms &&
+                    now_ms - t_start >= (uint64_t)g_sess_zombie_ms &&
+                    (sess_resumed || c.fw_last_video_ms)) {
+                    printf("{\"mode\":\"session\",\"event\":\"rig_zombie\","
+                           "\"at_rel_ms\":%llu,\"thr_ms\":%u,"
+                           "\"resumed\":%d,\"video_seen\":%d,"
+                           "\"hb_count\":0}\n",
+                           (unsigned long long)(now_ms - t_start),
+                           g_sess_zombie_ms, sess_resumed,
+                           c.fw_last_video_ms ? 1 : 0);
+                    fflush(stdout);
+                    stop_reason = "rig_zombie";
+                    break;
+                }
                 /* Round N slice 4e (F30): the ctrl-plane watchdog. The
                  * rig's renderer heartbeat (0x0101, 1 Hz) is the first
                  * plane to die in the ctrl-first freeze family (runs
@@ -9200,7 +9253,8 @@ static int run_session(const char *token, const char *device_id,
              * families plus a pushed .264 and an operator's eyes to
              * reconstruct exactly this; the next one prints it. */
             if (strcmp(stop_reason, "recovery_exhausted") == 0 ||
-                strcmp(stop_reason, "ctrl_dead") == 0) {
+                strcmp(stop_reason, "ctrl_dead") == 0 ||
+                strcmp(stop_reason, "rig_zombie") == 0) {
                 char ramp[512];
                 kn_bw_feedback bwf2;
                 kn_lctx fw;
@@ -9546,6 +9600,14 @@ static int run_session(const char *token, const char *device_id,
                         "silent for >=8 s with video already dark >=2 s "
                         "(F30 watchdog): a ctrl-first dead-rig draw; the "
                         "death_cascade line dates every plane";
+            } else if (strcmp(stop_reason, "rig_zombie") == 0) {
+                fcode = "E_SESSION_RIG_ZOMBIE";
+                fwhy  = "the seat was handed out against a rig that is "
+                        "already gone (F40a): zero 0x0101 renderer "
+                        "heartbeats ever, while the encoder still "
+                        "streamed from its buffer — the video you saw "
+                        "was a corpse. death_cascade dates every plane; "
+                        "re-launch (F38 resume) or re-draw";
             } else if (strcmp(stop_reason, "server_termination") == 0) {
                 fcode = "E_SESSION_SERVER_TERMINATION";
                 fwhy  = "the server sent the 0x109 termination latch";
@@ -9742,6 +9804,23 @@ teardown:
     if (release_session) {
         if (sess.session_id[0]) {
             int c_rc = KN_HTTP_ERR_IO, c_status = 0, gone, attempts = 0;
+            /* F40b (round N slice 4q): WHERE the DELETE goes. run103
+             * draw 5 re-attached to a zombie through F38 and then lost
+             * the seat for good: cm_release fired at the *poll* front
+             * the resumed session had named (np-ams-05), unreachable
+             * from the operator's network — every connect came back
+             * rc:-2 — while the CREATE front (prod.cloudmatchbeta) WAS
+             * reachable; it is exactly where the 403 that triggered the
+             * resume came from. F26's second attempt therefore hit the
+             * same dead host, so the retry bought nothing and the seat
+             * stayed orphaned (the next create's 403 ladder). A
+             * transport-level death now falls back to the create front
+             * for attempt 2; an HTTP answer (any status, 404 included)
+             * still never retries. */
+            const char *rel_host = poll_host;
+            unsigned rel_port = poll_port;
+            int host_fallback = 0;
+            char rel_esc[300];
             /* the poll loop closes its own stream: open a fresh one, the
              * same idiom as the queue-abort cancel above */
             for (attempts = 1; attempts <= 2; attempts++) {
@@ -9757,13 +9836,19 @@ teardown:
                      * death with no response at all. */
                     sess_sleep(500, NULL);
                     c_status = 0;
+                    if (c_rc == KN_HTTP_ERR_IO && cm_host && cm_host[0] &&
+                        strcmp(rel_host, cm_host) != 0) {
+                        rel_host = cm_host;      /* F40b: the create front */
+                        rel_port = 443;
+                        host_fallback = 1;
+                    }
                 }
                 if (cm_tls) { kn_net_tls_stream_close(cm_tls); cm_tls = NULL; }
-                cm_tls = kn_net_tls_stream_open(poll_host, poll_port, 15000,
+                cm_tls = kn_net_tls_stream_open(rel_host, rel_port, 15000,
                                                 err, sizeof err);
                 if (cm_tls) {
                     cm_io_ctx.s = cm_tls;
-                    c_rc = kn_cm_cancel(hio, poll_host, "/", &st,
+                    c_rc = kn_cm_cancel(hio, rel_host, "/", &st,
                                         sess.session_id, 20000, sess_now,
                                         NULL, cm_rxb, sizeof cm_rxb, cm_json,
                                         sizeof cm_json, &c_status);
@@ -9784,21 +9869,24 @@ teardown:
                                               * attempts:3 for 2 DELETEs) */
             gone = (c_rc == KN_HTTP_OK &&
                     ((c_status >= 200 && c_status < 300) || c_status == 404));
+            lb_json_path(rel_esc, sizeof rel_esc, rel_host);
             printf("{\"mode\":\"session\",\"event\":\"cm_release\",\"rc\":%d,"
-                   "\"http_status\":%d,\"gone\":%d,\"attempts\":%d}\n",
-                   c_rc, c_status, gone, attempts);
+                   "\"http_status\":%d,\"gone\":%d,\"attempts\":%d,"
+                   "\"host\":\"%s\",\"host_fallback\":%d}\n",
+                   c_rc, c_status, gone, attempts, rel_esc, host_fallback);
             fflush(stdout);
             {
                 kn_lctx b;
                 kn_lctx_init(&b, KN_CH_HTTP, gone ? KN_INFO : KN_WARN,
                              "cm_release");
                 kn_lctx_str(&b, "method", "DELETE");
-                kn_lctx_str(&b, "host", poll_host);
+                kn_lctx_str(&b, "host", rel_host);
                 kn_lctx_str(&b, "session_id", sess.session_id);
                 kn_lctx_i64(&b, "rc", c_rc);
                 kn_lctx_i64(&b, "http_status", c_status);
                 kn_lctx_bool(&b, "gone", gone);
                 kn_lctx_i64(&b, "attempts", attempts);
+                kn_lctx_bool(&b, "host_fallback", host_fallback);
                 if (!gone)
                     kn_lctx_str(&b, "note", "the seat may still be held; the "
                                             "next create can hit 403 "
@@ -9936,6 +10024,7 @@ int main(int argc, char **argv)
         — a per-INSTALL persistence path (the log-dir default rotates the
         device every flight that uses a fresh log dir; run 102 flew five
         "devices" in one evening) */
+    unsigned long sess_zombie_ms = 12000ul;/* F40a: --session-zombie-ms= */
     int sess_resume = 1;                   /* F38: on a 403 SESSION_LIMIT
         conflict, attach to the live session instead of waiting it out */
     const char *sess_title = "KarnyNow session", *sess_cm_host = NULL;
@@ -10063,6 +10152,22 @@ int main(int argc, char **argv)
                 usage();
                 return 2;
             }
+        }
+        else if (strncmp(a, "--session-zombie-ms=", 20) == 0) {
+            /* F40a (round N slice 4q): how long a draw may run with ZERO
+             * rig heartbeats (0x0101) before it is declared a zombie
+             * rig. 0 disables the verdict and restores the pre-4q wait. */
+            char *endp = NULL;
+            long v = strtol(a + 20, &endp, 10);
+            if (!endp || endp == a + 20 || *endp || v < 0 || v > 600000) {
+                printf("{\"mode\":\"session\",\"event\":\"usage_error\","
+                       "\"reason\":\"--session-zombie-ms= takes 0..600000"
+                       " (milliseconds)\"}\n");
+                fflush(stdout);
+                usage();
+                return 2;
+            }
+            sess_zombie_ms = (unsigned long)v;
         }
         else if (strncmp(a, "--session-title=", 16) == 0)
             sess_title = a + 16;
@@ -10217,6 +10322,7 @@ int main(int argc, char **argv)
         g_cm_user_age = sess_cm_user_age;
         g_cm_tz_name  = sess_cm_tz;
         g_sess_resume = sess_resume;
+        g_sess_zombie_ms = (unsigned)sess_zombie_ms;
         {
             static char dev_buf[64];
             if (!sess_device) {

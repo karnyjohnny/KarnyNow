@@ -182,3 +182,205 @@ def bundle_expiry(bundle: dict) -> float:
 def bundle_expired(bundle: dict, skew_s: int = 600) -> bool:
     exp = bundle_expiry(bundle)
     return bool(exp) and time.time() >= exp - skew_s
+
+
+# ------------------------------------------------------- catalog cache
+# Slice 4q: the operator's complaint was startup latency, not the
+# network — "Pobieranie 6220 trwa za długo". The cheapest fix is to
+# never wait on the network to PAINT: the last catalog is kept on disk
+# and rendered the instant the tab opens, while a background refresh
+# corrects it. The cache lives next to the vault (NOT in the repo) and
+# holds no credentials — only public catalog metadata.
+CACHE_NAME = "catalog_cache.json"
+CACHE_SCHEMA = 1
+CACHE_MAX_AGE_S = 7 * 24 * 3600        # a week; the catalog shifts slowly
+
+
+def cache_path() -> str:
+    return os.path.join(app_dir(), CACHE_NAME)
+
+
+def save_catalog(games: list, vpc_id: str = "", kind: str = "library") -> bool:
+    """Atomic write of the catalog cache. Returns False on any failure —
+    a cache is an optimization and must never break the launcher."""
+    payload = {"schema": CACHE_SCHEMA, "saved_at": time.time(),
+               "vpc_id": vpc_id or "", "kind": kind or "library",
+               "count": len(games or []), "games": games or []}
+    path = cache_path()
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        if not is_dpapi():
+            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError) as exc:
+        print("catalog cache save failed: %s" % exc, file=sys.stderr)
+        return False
+
+
+def load_catalog() -> dict:
+    """The cache envelope, or an empty one. NEVER raises and never
+    returns None, so the caller can read .get("games") unconditionally
+    — a corrupt/truncated cache must degrade to "empty list", not to a
+    crash before the window exists (the F37 lesson)."""
+    empty = {"schema": CACHE_SCHEMA, "saved_at": 0.0, "vpc_id": "",
+             "kind": "", "count": 0, "games": []}
+    path = cache_path()
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or data.get("schema") != CACHE_SCHEMA:
+            return empty
+        games = data.get("games")
+        if not isinstance(games, list):
+            return empty
+        data["games"] = [g for g in games if isinstance(g, dict)]
+        data["count"] = len(data["games"])
+        data.setdefault("saved_at", 0.0)
+        return data
+    except (OSError, ValueError):
+        return empty
+
+
+def cache_age_s(meta: dict) -> float:
+    """Seconds since the cache was written; inf when it never was."""
+    try:
+        saved = float((meta or {}).get("saved_at") or 0.0)
+    except (TypeError, ValueError):
+        return float("inf")
+    if saved <= 0:
+        return float("inf")
+    return max(0.0, time.time() - saved)
+
+
+def cache_usable(meta: dict, max_age_s: float = CACHE_MAX_AGE_S) -> bool:
+    """Paint-worthy: has games and is not ancient."""
+    return bool((meta or {}).get("games")) and cache_age_s(meta) <= max_age_s
+
+
+def cache_summary(meta: dict) -> str:
+    """One human line for the status bar."""
+    if not (meta or {}).get("games"):
+        return "no cache yet"
+    age = cache_age_s(meta)
+    if age < 90:
+        when = "%d s ago" % age
+    elif age < 7200:
+        when = "%d min ago" % (age / 60)
+    elif age < 172800:
+        when = "%d h ago" % (age / 3600)
+    else:
+        when = "%d d ago" % (age / 86400)
+    return "%d games cached %s (%s)" % (meta.get("count", 0), when,
+                                        meta.get("kind") or "?")
+
+
+# --------------------------------------------------------- run folders
+# Slice 4q: "cały czas ręcznie robie foldery typu run103_logs i sam
+# przenoszę pliki z folderu logs, co jest bez sensu". The log FILE
+# became a log FOLDER: one directory per run, one numbered subdirectory
+# per DRAW, and the launcher puts everything for that draw inside it
+# (knvstd's own logs via --log-dir, the wire dump, the console copy and
+# a manifest). Archiving a run is now `zip run104_logs`, and a draw can
+# never again end up with no logs (run103/3 did exactly that).
+RUN_RE = r"^run(\d+)(?:_logs)?$"
+
+
+def run_number(name: str) -> int:
+    """104 from "run104_logs" or "run104.log"; -1 when not a run name."""
+    import re as _re
+    m = _re.match(RUN_RE, (name or "").strip())
+    return int(m.group(1)) if m else -1
+
+
+def suggest_run_name(logs_root) -> str:
+    """The next free "runNNN_logs". Scans BOTH the new folder spelling
+    and the legacy runNNN.log files, so an operator who numbered runs
+    by hand up to 103 is offered 104, not 100."""
+    best = 99
+    try:
+        entries = os.listdir(str(logs_root))
+    except OSError:
+        entries = []
+    for name in entries:
+        n = run_number(name)
+        if n < 0 and name.endswith(".log"):
+            n = run_number(name[:-4])
+        if n > best:
+            best = n
+    return "run%d_logs" % (best + 1)
+
+
+def valid_run_name(name: str) -> bool:
+    """runNNN or runNNN_logs, digits only — this string becomes a
+    directory name on Windows, so it is validated before use."""
+    import re as _re
+    return bool(_re.match(r"^run\d{1,4}(_logs)?$", (name or "").strip()))
+
+
+def draw_dirs(logs_root, run_name: str) -> list:
+    """The existing numeric draw subdirectories of a run, sorted."""
+    root = os.path.join(str(logs_root), run_name)
+    out = []
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return out
+    for name in entries:
+        if name.isdigit() and os.path.isdir(os.path.join(root, name)):
+            out.append(int(name))
+    out.sort()
+    return out
+
+
+def next_draw_index(logs_root, run_name: str) -> int:
+    """The next free draw number inside a run folder (1-based)."""
+    have = draw_dirs(logs_root, run_name)
+    return (have[-1] + 1) if have else 1
+
+
+def open_draw_dir(logs_root, run_name: str, index: int = 0):
+    """Create logs/<run_name>/<index> and return (path, index).
+
+    index=0 means "allocate the next free one", which is what a Launch
+    click does — so draw 2 of run104 lands in logs/run104_logs/2 with
+    no operator bookkeeping at all.
+    """
+    if index <= 0:
+        index = next_draw_index(logs_root, run_name)
+    path = os.path.join(str(logs_root), run_name, str(index))
+    os.makedirs(path, exist_ok=True)
+    return path, index
+
+
+MANIFEST_ORDER = ("run", "draw", "started_at", "utc", "game_title",
+                  "game_uuid", "app_id", "app_store", "variant_short_name",
+                  "owned", "device_id", "knvstd", "argv_redacted", "params",
+                  "log_dir", "wire_dump", "console_log")
+
+
+def write_manifest(path: str, fields: dict) -> bool:
+    """manifest.txt — the draw's birth certificate: what was launched,
+    when, which game AND WHICH STORE VARIANT, with which flags. Written
+    BEFORE the flight starts so a crash still leaves the provenance
+    behind. Unknown keys are appended sorted after the known ones."""
+    try:
+        lines = []
+        keys = [k for k in MANIFEST_ORDER if k in fields]
+        keys += sorted(k for k in fields if k not in MANIFEST_ORDER)
+        for k in keys:
+            v = fields[k]
+            if isinstance(v, (list, tuple)):
+                v = " ".join(str(x) for x in v)
+            lines.append("%-20s %s" % (k + ":", v))
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# KarnyNow launcher — draw manifest (slice 4q)\n")
+            f.write("\n".join(lines) + "\n")
+        return True
+    except OSError as exc:
+        print("manifest write failed: %s" % exc, file=sys.stderr)
+        return False

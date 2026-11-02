@@ -5659,3 +5659,165 @@ Discipline note (the operator's standing correction): no death is blamed on "the
 
 ### 60.6 Gates
 Host: native battery PASS zero warnings (**test_kncm 258** incl. the F38 legs: run-102's real 403 fixture, trust/port/appId/status refusals, the resume body's exact key-order prefix + no-renegotiation absences, the PUT round-trip with the preference query; **test_kninput 802** incl. the 8 cursor-info checks), ctest **29/29 x2**, T10 POSIX dry **ALL PASS 79**, T13 **ALL PASS 63** (`srtp_backend:1`), cross-check x86_64+i686 PASS `-Werror` zero warnings (the Win32 cursor-capture code compiles clean both arches), `sandbox_session_e2e` **48/48 deletes:1**, summary skeleton **113 == 113** vs run48a + run61/2 live (F38/F39 add event lines only), ASan+UBSan clean on both touched suites, test_launcher **71/0**. Rig: REBUILD — T10 expected **ALL PASS 89** on the F38/F39 stamp, then the §60.5 flight plan.
+
+---
+
+## 61. Slice 4q: the RUN 103 read — F38/F39/F38a all PROVEN LIVE on their first flight, a fourth death family named (ZOMBIE RIG), and the release-front bug that turned one dead rig into two dead draws. F40a + F40b ship; the launcher gets the responsiveness/provenance rewrite
+
+### 61.1 What run 103 proved (the three slice-4p features, live, first try)
+* **F38 resume worked.** Draws 2/4/5 show the full reference sequence on
+  the wire: `403 SESSION_LIMIT` -> `cm_resumed {status:6, phase:"resuming"}`
+  -> `cm_created {..., "resumed":1}` -> new `cm_control` endpoints -> media.
+  No queue, no backoff ladder. The operator's "udało się przywrócić sesję z
+  pierwszego uruchomienia" was this mechanism, and it is now a shipped path
+  rather than a curiosity.
+* **F39 cursor fidelity worked.** Draw 4 sent **660 relative type-7 samples
+  and zero absolute** once the rig announced cursor-Hidden — exactly the
+  reference's `hidden_rel` switch. The in-game cursor is no longer flying
+  ignored absolute reports into a captured rig.
+* **F38a one-device-per-install worked.** Every draw carried the same
+  `device_hash_id`; the run-102 habit of burning five "devices" an evening
+  is gone.
+
+### 61.2 The new family: ZOMBIE RIG (why the operator watched a corpse)
+The cloud handed out seats whose rig was **already gone**: `status 3`,
+valid `sessionControlInfo`, and an encoder that kept streaming **~11 more
+seconds from its own buffer**. That is the operator's exact words — "to co
+widzę to już zbuforowany obraz umierający przed moimi oczami, bo żadnej
+reakcji kursora nie ma". The physical cursor vanishing was F39 behaving
+*correctly* (Hidden mode hides it); there was simply nobody left to steer.
+
+The discriminator is the rig's **1 Hz 0x0101 renderer heartbeat**. Run 102's
+268 s survivor logged 244 of them. The run-103 zombies logged **zero from
+the first second**.
+
+**Why F30 could not see it:** F30 keys off heartbeat *silence after a beat
+was seen* (`fw_hb_last_ms != 0` && gap >= 8 s && video dark >= 2 s). A rig
+that never beat once leaves `fw_hb_last_ms == 0`, so the watchdog never
+armed and the draw fell through to the ~21 s no-frames path. Run 103 draw 1
+is the *other* shape and still belongs to F30: its summary reads
+`stop_reason:"ctrl_dead"` at `wall_ms:14017` with `datagrams:3262
+aus:361 frames_decoded:361 frames_failed:0 gaps:0` — it DID beat, then went
+silent (rig quiet after 8.6 s), and F30 named it correctly.
+
+**F40a ships the verdict.** In the media loop, before the F30 block:
+zero heartbeats ever AND `--session-zombie-ms` (default **12000**, 0
+disables) elapsed AND (`sess_resumed` OR video has been seen) ->
+`stop_reason:"rig_zombie"`, a `rig_zombie` event line
+(`at_rel_ms/thr_ms/resumed/video_seen/hb_count:0`), inclusion in the F31
+`death_cascade`, and `E_SESSION_RIG_ZOMBIE` in the failure verdict. The
+`video_seen` arm is what catches a *fresh* zombie; the `resumed` arm is what
+catches run-103 d4/d5. A fresh draw with no video at all still belongs to
+the no-frames/recovery paths, so F40a never steals their verdicts.
+
+### 61.3 Draw 1 breaks the "too much input kills it" theory
+Draw 1 sent **5 input records** (the macro fired three events) and still
+died at 14 s. Client-side everything held contract to the end
+(`datagrams==authenticated`, `gaps:0`, `withheld:0`, ack/pacing flowing) and
+the rig granted the full hour (`SESSION_LENGTH_TIMER 3599544 ms`). Two
+hypotheses remain and the run-104 A/B below discriminates them with ONE
+flag: **H1** — the new *stable* device id plus account history (run 102's
+five devices and their orphaned seats) triggers a server-side early-kill;
+**H2** — ordinary rig lottery.
+
+### 61.4 F40b — the release front bug (one dead rig became two dead draws)
+Draw 5 re-attached to the *same* corpse draw 4 had died on. Cause, on the
+wire:
+
+```
+cm_control poll_host:"np-ams-06..." source:"relearned"   (x12, ams/sth only)
+cm_release rc:-2 http_status:0 gone:0 attempts:2
+cm_resumed  -> cm_created {..., "resumed":1}
+```
+
+`cm_release` DELETEs the **poll** front, and after a dozen `relearned`
+control nodes that front was `np-ams-06`/`np-sth-04` — unreachable from the
+operator's network, so both F26 attempts died at transport level (`rc:-2`,
+no HTTP answer at all). The seat stayed orphaned, and the next create paid
+for it with the 403 that F38 then had to resume. Meanwhile the **create**
+front (`prod.cloudmatchbeta`) was reachable the whole time — it is where the
+403 came from.
+
+**F40b:** on a transport-level death, attempt 2 now falls back to the create
+front (`rel_host = cm_host`, port 443). HTTP answers (any status, 404
+included) still never retry — F26's rule is untouched. The `cm_release` line
+and log context grow `"host"` and `"host_fallback":0|1` so the next
+archaeology can see which front answered.
+
+### 61.5 The launcher, slice 4q (the operator's three asks, all delivered)
+1. **"Pobieranie 6220 trwa za długo."** Three changes, cheapest first:
+   startup paints the list **instantly from a disk cache**
+   (`store.load_catalog`, next to the vault, no credentials in it) before
+   any socket opens; the default refresh now pulls **only the owned
+   library** (`fetch_library`, one filtered query, <1 s) instead of walking
+   62 pages; and **"full catalog" is an opt-in checkbox** that *streams* —
+   `iter_browse` is a generator yielding one page at a time, so the list
+   grows on screen while the rest downloads and the selection survives every
+   re-render. On top of that the search box asks **NVIDIA's servers
+   directly** (`searchQuery`, OpenNOW `STORE_SEARCH_QUERY`, catalog.rs:133)
+   after a 350 ms debounce: any of the ~6200 titles is findable in one round
+   trip with nothing cached locally. Local smart-filter results still render
+   instantly and are merged with the server hits (server first, deduped by
+   UUID) so the box works offline too.
+2. **Steam/Epic variants.** `variants[]` is now carried through
+   `normalize()` with `appStore/shortName/library.status/library.selected`,
+   and the picker pre-selects **the variant the web app would launch** —
+   OpenNOW `catalog.rs:854` verbatim (`library.selected` -> in-library
+   (`MANUAL|PLATFORM_SYNC|IN_LIBRARY`) -> index 0) with the `launch_id` rule
+   from `:865`. The operator's War Thunder case resolves to
+   `STEAM · 100234911 (web default ✓, in library)` over
+   `GAIJIN · 10839111 (NOT_OWNED, free-to-play)`, and `--session-app` gets
+   whichever the operator picks. Single-variant titles hide the picker.
+3. **Log folder instead of log file.** The field is now `runNNN_logs`
+   (auto-suggested from BOTH the new folders and the legacy `runNNN.log`
+   files, so a hand-numbered 103 offers `run104_logs`). Every launch
+   allocates the next free `logs/<run>/<N>/` and puts **everything** for
+   that draw inside it: knvstd's own channel logs and diag bundle
+   (`--log-dir`), the TLS mirror (`--wire-dump`, now per-draw so two draws
+   can no longer overwrite one `wire_r1.txt`), the console copy
+   (`runNNN.log`) and `manifest.txt` — written **before** the flight starts
+   (run, draw, game, UUID, appId, store, variant shortName, device id, the
+   redacted argv, the typed params) and appended with
+   `finished_at/exit_code/crash` when it ends. Archiving a run is
+   `zip run104_logs`. **A draw with no logs (run103/3) is now impossible.**
+   `--wire-dump` was therefore REMOVED from `DEFAULT_PARAMS`: the launcher
+   owns it.
+
+### 61.6 Run 104 flight plan (A/B discriminate H1 vs H2 with one flag)
+* **LOT A — stable device (the new default), ~20 min:**
+  `--session-seconds=1200 --input-anti-afk=60000 --session-present
+  --session-audio-play --session-release --input-script=build\login_1h.txt`,
+  log folder `run104_logs`. Launch and touch nothing. Dies <30 s -> fly B.
+  Survives >600 s -> H2 (lottery) wins, go straight to C.
+* **LOT B — fresh random device:** identical, plus
+  `--session-device=b7e4d2a1-9c3f-4e8a-a5d6-0f1e2d3c4b5a`. B lives and A
+  died -> **H1 confirmed** (the stable id burns sessions) and the next slice
+  rotates the CloudMatch device per session while the login id stays stable.
+  Both die -> H2: a server wall; keep fishing on the resume net.
+* **LOT C — manual login (goal G1):**
+  `--session-seconds=1200 --input-anti-afk=60000 --session-present
+  --session-audio-play --session-release --session-interactive`. Log in by
+  hand inside the stream. Portal cursor = absolute; once in-game the console
+  must print `cursor_mode ... hidden_rel` and from then on **the in-game
+  cursor must follow the mouse**. Report whether it did.
+* **LOT D — goal G2:** after C, hands-off to 3600 s. After every death just
+  click Launch again (resume + the draw folder numbers itself).
+* **Logs:** zip the whole `logs/run104_logs` (subfolders 1,2,3...) -> push to
+  karnynow-logs. Reading key: `resumed:1`, `rig_zombie`, `host_fallback:1`,
+  `cursor_mode`, `sent_rel`/`sent_abs`.
+
+### 61.7 Gates
+Native battery **PASS, zero warnings** (`test_kncm` **258/0**,
+`test_kninput` **802/0** — unchanged, slice 4q touches neither unit).
+Cross-check `-Werror` **PASS x2** (x86_64 + i686) on `knvstd_main.c`
+including the paranoid leg (`-Wunused-but-set-variable
+-Wformat-truncation=2`). Summary skeleton **PASS x2** against run103's two
+LIVE stdout captures (`run103_logs/1/run103.log`, `run103_logs/2/run104.log`)
+— F40 adds event lines only, no summary key. `test_launcher` **146/0** (was
+71; +variants and the OpenNOW pick/launch_id rules, +cache, +server search,
++run folders and the manifest, +the per-draw flag injection, +the py3.8
+guard over the new code). Launcher launch path additionally proven
+end-to-end against a stub knvstd: correct `--session-app` from the picked
+variant, `--log-dir`/`--wire-dump` inside the draw folder, manifest written
+pre-flight and appended post-flight, draw 2 auto-numbered. Rig: **REBUILD**
+— T10 expected **ALL PASS 89** on the F40 stamp, then §61.6.
