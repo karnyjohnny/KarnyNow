@@ -516,6 +516,32 @@ check("redacted" in _mtxt and "SUPERSECRET" not in _mtxt,
 check(_mtxt.index("game_title") < _mtxt.index("unexpected_key"),
       "store: known manifest keys keep their order, extras sort last")
 
+# ------------------------------- store: run continuity across restarts (F42)
+# run 104's four draws produced manifests reading run104_logs, run105_logs,
+# run106_logs and run107_logs — one evening, four folders, consolidated by
+# hand. The launcher must continue the run it last flew.
+check(store.load_last_run() == "", "store: no remembered run at first")
+check(store.save_last_run("run104_logs") and
+      store.load_last_run() == "run104_logs",
+      "store: the last flown run is remembered")
+check(not store.save_last_run("../evil") and
+      not store.save_last_run(""),
+      "store: an invalid run name is never remembered")
+check(store.load_last_run() == "run104_logs",
+      "store: a rejected save leaves the previous value intact")
+check(store.continuing_run(_LOGS) == "run104_logs",
+      "store: continuing_run returns the REMEMBERED run, not max+1 (the "
+      "run-104 bug)")
+check(store.bump_run_name(_LOGS, "run104_logs") == "run108_logs",
+      "store: bump_run_name offers the next free number (run107 exists)")
+check(store.bump_run_name(_LOGS, "run108_logs") == "run109_logs",
+      "store: bump never returns the run you are already on")
+store.save_last_run("")
+open(store.last_run_path(), "w").write("not a run name")
+check(store.load_last_run() == "" and
+      store.continuing_run(_LOGS) == "run108_logs",
+      "store: a corrupt last-run file degrades to the max+1 suggestion")
+
 # ----------------------------------------------------------------- GUI
 try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -620,6 +646,20 @@ try:
     check(win._console_log_name("run104_logs") == "run104.log" and
           win._console_log_name("run104") == "run104.log",
           "gui: the console copy inside the draw folder is runNNN.log")
+
+    # F42: a launcher RESTART must continue the run it last flew
+    store.save_last_run("run321_logs")
+    win2 = gui.MainWindow()
+    check(win2.logfolder.text() == "run321_logs",
+          "gui: a RESTART continues the remembered run instead of silently "
+          "starting a new one (run 104 became four hand-merged folders)")
+    win2.close()
+    win.logfolder.setText("run700_logs")
+    win._new_run()
+    check(win.logfolder.text() != "run700_logs" and
+          store.load_last_run() == win.logfolder.text(),
+          "gui: the 'new run' button advances the number and remembers it")
+    store.save_last_run("")
     win.close()
 except ImportError as exc:
     print("(gui smoke skipped: %s)" % exc)

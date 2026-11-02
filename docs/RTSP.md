@@ -5821,3 +5821,178 @@ end-to-end against a stub knvstd: correct `--session-app` from the picked
 variant, `--log-dir`/`--wire-dump` inside the draw folder, manifest written
 pre-flight and appended post-flight, draw 2 auto-numbered. Rig: **REBUILD**
 — T10 expected **ALL PASS 89** on the F40 stamp, then §61.6.
+
+---
+
+## 62. Slice 4r: the RUN 104 read (F40a fired live and was RIGHT; H1 is DEAD — the stable device id is exonerated) and the operator's regression hypothesis, which the ledger CONFIRMS: **every long session in project history flew the run-46 CloudMatch identity, and the ceiling collapsed the slice F37 replaced it.** F41 ships `--cm-profile=r46`
+
+### 62.1 Run 104 — four draws, four rigs, 12-16 s
+| draw | lot | device_hash_id | rig | stop_reason | wall | hb_last_rel | relearns |
+|---|---|---|---|---|---|---|---|
+| 1 | A (macro, stable id) | `557e89aa…` | 80-250-98-37:322 | **rig_zombie** | 12.1 s | 0 (never) | 16 |
+| 2 | B (macro, FRESH id `b7e4d2a1…`) | `b7e4d2a1…` | 77-111-249-145:322 | ctrl_dead | 15.7 s | 3.08 s | 18 |
+| 3 | C (interactive) | `557e89aa…` | 80-250-98-40:322 | ctrl_dead | 15.8 s | 3.05 s | 21 |
+| 4 | C (interactive, RESUMED draw 3) | `557e89aa…` | 80-250-98-41:322 | **rig_zombie** | 12.1 s | 0 (never) | 0 |
+
+All four: `datagrams==authenticated`, `gaps:0`, `withheld:0`,
+`frames_failed:0`, ~300 AUs decoded at 720p, the full pipeline intact
+(queue -> ready -> RTSP -> DTLS -> SCTP -> input activation -> cursor_mode
+-> present). The client is exonerated again: `ctrl_out_gap` only ever
+exceeded threshold by 9-14 ms (`ack` 509-514 vs 500 ms) and those warns
+landed at 10.8-14.3 s, i.e. AFTER the rig had already stopped answering
+(`cping_sent:5, cpong_matched:0`).
+
+**F40a fired live twice and its verdict was TRUE, not premature.** Draw 1:
+`rig_zombie at_rel_ms:12018 thr_ms:12000 resumed:0 video_seen:1 hb_count:0`,
+cascade `video_last_rel:10369 audio_last_rel:12023 ctrl_last_rel:137
+hb_last_rel:0`, freeze witness `cping_sent:5 cpong_matched:0` and the encoder
+ramp `kbps:[4652,2542,1845,2071,1424,1119,1069,867,808,253]`. A rig that
+never beat once, never answered a ping, and whose video had already been
+dark 1.65 s is a corpse; naming it 12 s in instead of ~21 s is the whole
+point. Draw 4 is the same shape on a resumed seat (`resumed:1`).
+Draws 2/3 are F30's shape and stay F30's: heartbeats ran to 3.05-3.08 s
+(`hb_maxgap` ~1.04 s, a healthy 1 Hz) and then stopped, video lasted to
+13.7 s from buffer, verdict at 15.7-15.8 s. **Two sub-shapes, one mechanism:
+the rig's control plane dies 0-3 s in and the encoder runs ~10 s more from
+its buffer.**
+
+### 62.2 H1 is DEAD — the stable device id is exonerated
+LOT A (stable `557e89aa…`) died at 12.1 s. LOT B flew the fresh
+`b7e4d2a1-9c3f-4e8a-a5d6-0f1e2d3c4b5a` — confirmed in its own
+`cm_identity` line — and died at 15.7 s. Per §60.5's decision rule
+("both die -> H2"), **the device id is not the variable.** `relearns`
+is also dead as a variable: the long run-102 draws had 17/5/22 relearns,
+the short ones 10/16/0/12/0/0/16/18/21/0 — no correlation either way.
+
+### 62.3 F40b worked and still was not enough
+Draws 1 and 3 logged `cm_release rc:-2 http_status:0 gone:0 attempts:2
+host:"prod.cloudmatchbeta.nvidiagrid.net" host_fallback:1` — the fallback
+fired exactly as designed and the create front ALSO refused. Draws 2 and 4
+released cleanly (`rc:0 http_status:200 gone:1 host_fallback:0`) on
+`np-frk-07` and `np-waw-01`. Note WHICH host answered in draw 4: `np-waw-01`
+— the **first** `sessionControlInfo` node, the same one draws 1 and 3 opened
+with before 16 and 21 `relearned` hops bounced the poll host to ams/lon
+nodes that were already dead. Draw 3's teardown succeeded (`rtsp_teardown
+rc:0 status:200`) and its DELETE still failed on both fronts, so this is not
+"our network went down". **Parked as F41b: try the first-learned control
+host as a third release attempt** — the evidence says it is the node most
+likely to still own the session. Not shipped this slice: it needs its own
+live evidence and the identity question dominates.
+
+Consequence seen live: draw 3's release failed, the seat orphaned, and draw
+4 **resumed the same session id `8f18d5bd-36d4-49ad-afff-a27176404681`** and
+spent 12 s on a corpse. Cheap (12 s vs a queue cycle) but it can ping-pong;
+a per-install graveyard of session ids that died with a failed release is
+the fix if it ever loops.
+
+### 62.4 The operator's hypothesis, tested against the ledger — CONFIRMED
+The operator's read: *"run46 to był moment kiedy najdłużej działał stream,
+potem tylko było coraz gorzej … skasowano/zamieniono coś, co powodowało, że
+serwer nvidii nas lubił i nie ubijał sesji."* Longest flight per run, from
+the logs themselves:
+
+| run | build era | longest draw | verdicts |
+|---|---|---|---|
+| **46** | pre-interactive, **run-46 identity** | **1174.8 s**; draw b **1020.0 s `stop_reason:"time"` = KEEPER** (our own timer ended a healthy session) | 5 deaths + 1 keeper |
+| 48 | right after `interactive session` | **14 s / 14 s** | both ctrl_dead |
+| **60/61** | post-interactive, **still the run-46 identity** | **two 1200 s keepers** (RTSP §57.1) | — |
+| 100/101 | F35 **browser** identity | ad gate; WebRTC-only seat, `conn_unusable` | — |
+| 102 | F37 **OpenNOW-strict native** (first flight) | **317.6 s** (271/184/318) | 0 keepers |
+| 103 | same F37 build, no code change | **21.0 s** | 0/4 over 21 s |
+| **104** | F40 | **15.9 s** | 0/4 over 16 s |
+
+Two things follow. (a) **Interactive input is NOT the regression** — run 48
+died at 14 s right after it landed, but runs 60/61 flew two 1200 s keepers
+with interactive already in the tree. (b) **The ceiling tracks the identity,
+not the input path.** Every long session in project history — 1020 s, 1084.9 s,
+1174.8 s, 1200 s x2 — flew the run-46 CloudMatch header table. F37 (slice 4o)
+replaced that table, and the best draw since is 317.6 s, then 21.0 s, then
+15.9 s: **0/8 draws over 21 s on the F37 identity.**
+
+What F37 changed in the NATIVE table (`kn_cm_fixed_headers`, profile 0):
+
+| header | run-46 (1020-1200 s) | F37 native (12-21 s) |
+|---|---|---|
+| `user-agent` | **absent** | `GFN-PC/30.0 (Windows NT 10.0) BifrostClientSDK/4.9 (38495286)` — and FIRST |
+| `x-nv-client-identity` | **absent** | = the same Bifrost UA |
+| `nv-device-os` | `Windows 7` | `WINDOWS` |
+| `nv-device-type` | `PC` | `DESKTOP` |
+| `nv-device-make` | `Dell` | `UNKNOWN` |
+| `nv-device-model` | `Latitude E5500` | `UNKNOWN` |
+| `Content-Type` | `text/plain` | `text/plain` (same) |
+| `nv-client-version` | `2.0.87.131` | `2.0.87.131` (same) |
+| `nv-client-type` / `-streamer` / `-id` | NATIVE / NVIDIA-CLASSIC / LCARS | identical |
+
+F37's own comment calls the legacy quartet "a chimera describing a machine
+no GFN client reports" — and the chimera is what the cloud kept alive for
+twenty minutes. The create BODY barely moved (F37 inserted
+`srMode/srModel/srScale/rrModel/fgMode/fgModel` after `dlssOverrides`; every
+other field name and order is identical), which is why the header table is
+the prime suspect and why a header-only A/B is a legitimate first cut.
+
+### 62.5 F41 — `--cm-profile=r46` (alias `legacy`)
+Profile 2 restores the run-46 table byte-for-byte: ten headers, `Content-Type`
+first, **no** `user-agent`, **no** `x-nv-client-identity`, and the device
+quartet `"Windows 7"`/`PC`/`Dell`/`"Latitude E5500"`. `nv-client-version`,
+`nv-client-type`, `nv-client-streamer`, `nv-client-id`, `x-device-id` and the
+`text/plain` quirk are unchanged from profile 0, so **this profile isolates
+the UA + device-quartet delta and nothing else.** The body stays F37's
+(disclosed). `cm_identity` now prints `"profile":"r46"` so a flight's log
+states on its own which table flew. `test_kncm` 258 -> **267**: header count,
+the two absences, the exact quartet, the unchanged four, `Content-Type` first,
+the `max < 10` refusal, and a no-regression check that profile 0 still yields
+twelve headers with the UA first.
+
+**Residual suspects if r46 does NOT bring the long flights back** (in order):
+the body's F37 additions (`srMode/srModel/srScale/rrModel/fgMode/fgModel`,
+the `dlssOverrides` default object, `appLaunchMode 1`, honoured `userAge`,
+the fresh-per-flight `SubSessionId`); then F39's cursor/input path (type-7
+relative + abs coalescing — run 102's two heaviest-input draws drew 10.3 s
+and 12.1 s fuses, and run 104 draw 4 sent 961 relative samples before dying
+at 12.1 s, so input volume is not exonerated for the *instant*-fuse sub-family
+even though draw 1 died on 5 records); then F38a's device stability — already
+tested and dead (§62.2).
+
+### 62.6 Flight plan — INTERLEAVED A/B, because the pool moves under us
+run102 -> run103 degraded from 317.6 s to 21.0 s with **no code change**, so
+pool state is a real confound. Do NOT fly all r46 draws then all native
+draws; alternate, in one sitting, so both identities see the same pool.
+Same game (Arknights: Endfield, app 107057914), same log folder, macro
+(hands-off) to keep input constant.
+
+* **ODD draws — r46 identity:** params
+  `--session-seconds=1200 --input-anti-afk=60000 --session-present
+  --session-audio-play --session-release --input-script=build\login_1h.txt
+  --cm-profile=r46`
+* **EVEN draws — the current default:** the identical line **without**
+  `--cm-profile=r46`.
+* Fly at least 3 of each (6 draws). Stop early if an r46 draw passes 600 s —
+  that alone is the answer. Verdict rule: if the r46 draws' *maximum* is
+  an order of magnitude above the native draws' maximum (run-46 scale,
+  >600 s vs ~20 s), the identity is confirmed and the next slice makes r46
+  the default and re-derives the body from it. If both sit in the 12-21 s
+  band, the identity is exonerated too and the wall is the pool — the next
+  slice goes after F41b (the release front) and the input-rate pacing.
+* Check `cm_identity` in each draw's console log: it must read
+  `"profile":"r46"` on odd draws and `"profile":"native"` on even ones.
+  A flight whose identity line does not match the flag did not take.
+* **F42 also ships:** the launcher now CONTINUES the run it last flew
+  across restarts (run 104's four draws had silently become `run104_logs`,
+  `run105_logs`, `run106_logs`, `run107_logs` and had to be merged by hand),
+  and a **new run** button is the only way to advance the number.
+
+### 62.7 Gates — run through the project's OWN canonical scripts, not a hand-rolled subset
+`tools/cross_check.sh` -> **CROSS-CHECK PASS (zero warnings under -Wall -Wextra -Werror)** on BOTH x86_64 and i686: every kncore object, every cross-linkable test `.exe`, the full static `knvstd_x86_64.exe` + `knvstd_i686.exe` links, and the paranoid knvstd leg (`-Wunused-but-set-variable -Wformat-truncation=2`). The mbedtls / usrsctp / ffmpeg legs self-SKIP (trees absent, exactly as the script intends).
+
+`tools/build_native_tests.sh` -> **NATIVE TESTS PASS**, zero warnings across 26 suites: `test_kncm` **267/0** (was 258; +9 for the r46 table), `test_kninput` **802/0**, `test_kndrawpath` 1051/0, `test_knfreeze` 865/0, `knbw` 387/0, `test_knrx` 218/0, `test_knogg` 163/0 (+143 KAT), `test_knrtsp` 150/0, `test_knfec` 125/0, `test_kngs` 125/0 (+31/31 scenarios), `test_knselftest` 118/0, `test_kndiag` 109/0, `test_knopus` 105/0, `test_knlog` 105/0, `test_knsock` 102/0, `test_knws` 88/0, `test_knsrtp` 77/0, `test_knaudio` 74/0, `test_knd3d` 65/0, `test_knarx` 62/0 (+45 KAT), `test_knwire` 52/0, `test_knring` 34/0, `test_knsctp` 13/0, `test_kndtls` 6/0, `test_kncert` 4/0 — plus the json-lines contract check over four knvstd stdout captures.
+
+`tools/check_summary_skeleton.py` -> **PASS x2**: skeleton **113** recursive keys == live **113**, `only in skeleton: (none)`, `only in live: (none)`, against run103's two LIVE stdouts (`run103_logs/1/run103.log`, `run103_logs/2/run104.log`). F41 adds an event FIELD, not a summary key.
+
+`test_launcher` -> **156/0** (was 146), which includes its built-in py3.8 guard: `ast.parse(..., feature_version=(3, 8))` over every launcher module plus the lazy-annotations future-import check.
+
+**Two gate breaks this slice caught IN ITSELF**, both fixed, both worth recording because they are precisely the classes the paranoid leg and INTEGRATION lesson #11 exist for:
+
+1. **`-Werror=overlength-strings`.** F41's `--cm-profile` help text pushed the fifth `usage()` printf from 3344 to **4201** concatenated chars — past the ISO C99 4095 ceiling that the native paranoid leg enforces via `-Wpedantic`. **`cross_check.sh` did NOT catch it** (that script carries no `-Wpedantic`); only `build_native_tests.sh` did. That asymmetry is the reason the gate is BOTH scripts and never one. Fixed by **splitting, not shortening** (lesson #11): the r46 block moved into a sixth `printf` — the two are now 1518 and 2683 chars — with byte-identical stdout.
+2. **F43 — `%u` against an `int`.** `session_timer` prints `msgs[i].timer_active`, declared `int` at `kn_bw.h:208`. Latent since before slice 4p and invisible to the canonical legs (`-Wformat=1` tolerates `int` for `%u`); 4r's stricter `-Wformat-signedness` sweep of the file it was already editing surfaced it. Fixed with a cast that is a no-op for the field's only two values (0/1) — not a behaviour change, not a canonical-gate regression, a correctness tidy shipped because the line was already open.
+
+Rig: **REBUILD** — T10 expected **ALL PASS 89** on the F41 stamp, then the §62.6 interleaved A/B.

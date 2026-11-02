@@ -571,6 +571,16 @@ class MainWindow(QMainWindow):
         self.logfolder.setFixedWidth(150)
         self.logfolder.textChanged.connect(self._update_draw_hint)
         lrow.addWidget(self.logfolder)
+        # F42: the ONLY way to advance the run number. Without it every
+        # launcher restart silently started a new run (run 104 became four
+        # folders the operator had to merge by hand).
+        self.newrun_btn = QPushButton("new run")
+        self.newrun_btn.setToolTip(
+            "Start the next run number. Normally you do NOT want this: the "
+            "launcher keeps adding draws to the run it last flew, even "
+            "across restarts.")
+        self.newrun_btn.clicked.connect(self._new_run)
+        lrow.addWidget(self.newrun_btn)
         right.addLayout(lrow)
         self.draw_hint = QLabel("")
         self.draw_hint.setObjectName("dim")
@@ -600,10 +610,23 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------ run folders
     def _suggest_run_name(self) -> str:
-        """runNNN_logs — the operator numbers from 100; suggest max+1.
-        Legacy runNNN.log files count too, so a hand-numbered 103 offers
-        run104_logs."""
-        return store.suggest_run_name(LOGS_DIR)
+        """runNNN_logs — CONTINUE the run the launcher last flew (F42,
+        slice 4r) instead of always offering max+1. Run 104 showed why:
+        four draws across four launcher restarts produced manifests
+        reading run104_logs, run105_logs, run106_logs and run107_logs,
+        and the operator had to consolidate the four folders into
+        run104_logs/1..4 BY HAND — the exact bookkeeping the log-folder
+        rewrite was meant to end. A "new run" button is now the only way
+        to advance the number. Falls back to max+1 (legacy runNNN.log
+        files count too, so a hand-numbered 103 offers run104_logs)."""
+        return store.continuing_run(LOGS_DIR)
+
+    def _new_run(self):
+        """Explicitly advance to the next run number."""
+        name = store.bump_run_name(LOGS_DIR, self._run_name())
+        self.logfolder.setText(name)
+        store.save_last_run(name)
+        self._update_draw_hint()
 
     def _run_name(self) -> str:
         return (self.logfolder.text() or "").strip()
@@ -1030,6 +1053,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "log folder",
                                  "cannot create the draw folder: %s" % exc)
             return
+        store.save_last_run(run_name)      # F42: continue this run next time
         argv = inject_draw_flags(argv, draw_dir)
         self.draw_dir, self.draw_index = draw_dir, draw_index
         console_path = os.path.join(draw_dir,

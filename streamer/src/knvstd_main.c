@@ -242,7 +242,7 @@ static void usage(void)
            "                            mode only; lottery draws append under\n"
            "                            per-draw headers. The file is\n"
            "                            operator-sensitive: never push raw.\n"
-           "       [--cm-profile=native|browser]\n"
+           "       [--cm-profile=native|browser|r46]\n"
            "                            the CloudMatch identity profile. native\n"
            "                            (DEFAULT, F37) is OpenNOW-strict and is\n"
            "                            the only profile that provisions a seat\n"
@@ -254,7 +254,25 @@ static void usage(void)
            "                            WEBRTC seat (usage 14 alp 5, :443 /nvst/)\n"
            "                            -> run 101 proved it queues and clears the\n"
            "                            ad gate but never becomes streamable here.\n"
-           "                            CloudMatch-level A/B only; RTSP §59.\n"
+           "                            CloudMatch-level A/B only; RTSP §59.\n");
+    /* F41 help lives in its OWN printf: adding the r46 profile text pushed
+     * the F34 printf to 4201 concatenated chars — past the C99 4095 ceiling
+     * that -Wpedantic enforces as -Werror=overlength-strings in the paranoid
+     * knvstd leg (INTEGRATION lesson #11: split into more printf() calls,
+     * never shorten the operator-facing help). Byte-identical stdout. */
+    printf("                            r46 (F41) restores the RUN-46 header\n"
+           "                            table byte-for-byte: NO user-agent, NO\n"
+           "                            x-nv-client-identity, and the device\n"
+           "                            quartet \"Windows 7\"/PC/Dell/\"Latitude\n"
+           "                            E5500\". That table flew every long\n"
+           "                            session in project history (run 46:\n"
+           "                            1020.0 s keeper + 1174.8 s + 1084.9 s;\n"
+           "                            runs 60/61: two 1200 s keepers). Since\n"
+           "                            F37 replaced it the ceiling collapsed:\n"
+           "                            run 102 max 317.6 s, run 103 max 21.0 s,\n"
+           "                            run 104 max 15.9 s (0/8 draws over 21 s).\n"
+           "                            Header-only A/B — the body stays F37's.\n"
+           "                            RTSP §62.\n"
            "       [--cm-user-age=N]    userAge in the session body (default 25;\n"
            "                            the reference sends the account value).\n"
            "       [--cm-timezone=NAME] clientTimezone metaData IANA name\n"
@@ -1505,6 +1523,13 @@ static int  g_sess_audio_play = 0; /* round N slice 3 (F21): --session-audio-pla
  * SubSessionId) is the one that provisions the RTSP seat every keeper
  * ever flew on (:322, runs 22-61). */
 static int         g_cm_profile  = 0;              /* 0 = native */
+/* F41 (slice 4r): the profile NAME for every log line that reports the
+ * identity in force, so a flight's cm_identity line states on its own
+ * which header table flew (0 native / 1 browser / 2 run-46). */
+static const char *cm_profile_name(int p)
+{
+    return p == 1 ? "browser" : (p == 2 ? "r46" : "native");
+}
 static int         g_cm_user_age = 25;             /* --cm-user-age=N */
 static const char *g_cm_tz_name  = "Europe/Warsaw";/* --cm-timezone=NAME */
 static char        g_cm_subsession[37];            /* fresh per draw (F35) */
@@ -5108,7 +5133,17 @@ static int sess_sctl_ingest(sess_pump *p, uint16_t sid, const uint8_t *data,
                    "\"type\":%u,\"seconds_left\":%u,\"active\":%u,"
                    "\"sid\":%u,\"t_ms\":%llu}\n",
                    (unsigned)msgs[i].timer_type, msgs[i].seconds_left,
-                   msgs[i].timer_active, (unsigned)sid,
+                   /* F43: kn_sctl_msg.timer_active is `int` (kn_bw.h:208) but
+                    * this event prints it as %u. The cast is a no-op for the
+                    * only two values the field ever holds (0/1) and closes a
+                    * signedness mismatch that has been latent since before
+                    * slice 4p. It is INVISIBLE to the canonical cross legs
+                    * (-Wall -Wextra -Werror: -Wformat=1 tolerates int for %u);
+                    * 4r's stricter -Wformat-signedness sweep of this file is
+                    * what surfaced it. Not a behaviour change, not a gate
+                    * regression fix — a correctness tidy on a line 4r already
+                    * had open. */
+                   (unsigned)msgs[i].timer_active, (unsigned)sid,
                    (unsigned long long)(kn_sock_now_ms() % 1000000000ull));
             fflush(stdout);
             break;
@@ -7176,7 +7211,7 @@ static int run_session(const char *token, const char *device_id,
                "\"subsession_id\":\"%.40s\",\"tz_name\":\"%.64s\","
                "\"tz_offset_ms\":%ld,\"user_age\":%d,"
                "\"client_version\":\"%s\"}\n",
-               st.profile == 1 ? "browser" : "native",
+               cm_profile_name(st.profile),
                device_id ? device_id : "", g_cm_subsession,
                g_cm_tz_name, st.timezone_offset_ms, g_cm_user_age,
                st.profile == 1 ? KN_CM_CLIENT_VERSION_BROWSER
@@ -10126,9 +10161,15 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--cm-profile=", 13) == 0) {
             if (strcmp(a + 13, "browser") == 0)      sess_cm_profile = 1;
             else if (strcmp(a + 13, "native") == 0)  sess_cm_profile = 0;
+            /* F41 (slice 4r): the run-46 identity — the header table that
+             * flew every 1020-1200 s keeper in project history. "legacy"
+             * is accepted as an alias so the flag reads either way. */
+            else if (strcmp(a + 13, "r46") == 0 ||
+                     strcmp(a + 13, "legacy") == 0)  sess_cm_profile = 2;
             else {
                 printf("{\"mode\":\"session\",\"event\":\"usage_error\","
-                       "\"reason\":\"--cm-profile= takes browser|native\"}\n");
+                       "\"reason\":\"--cm-profile= takes native|browser|r46"
+                       "\"}\n");
                 fflush(stdout);
                 usage();
                 return 2;

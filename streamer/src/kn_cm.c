@@ -298,6 +298,46 @@ int kn_cm_fixed_headers(const kn_cm_settings *s, kn_http_header *h, int max)
      * (= the UA again). Authorization is appended by cm_round, landing
      * last instead of second (order after the first line is not
      * semantic in HTTP; disclosed residual, same as F35's). */
+    if (s->profile == 2) {
+        /* F41 (round N slice 4r): the RUN-46 identity, restored
+         * byte-for-byte. This is the header table that flew EVERY long
+         * session in project history — run 46 draw b's 1020.0 s keeper
+         * (`stop_reason:"time"`, our own timer ended a healthy session),
+         * draw a's 1174.8 s, draw 46's 1084.9 s, and runs 60/61's two
+         * 1200 s keepers. F37 (slice 4o) replaced it with OpenNOW's
+         * compile-time device constants and the ceiling collapsed:
+         * run 102 maxed at 317.6 s, run 103 at 21.0 s, run 104 at
+         * 15.9 s — 0/8 draws over 21 s on the F37 identity versus
+         * 1020-1200 s on this one.
+         * The deltas F37 introduced, all reverted here: NO user-agent
+         * header at all, NO x-nv-client-identity, and the device quartet
+         * is "Windows 7"/PC/Dell/"Latitude E5500" instead of
+         * WINDOWS/DESKTOP/UNKNOWN/UNKNOWN. F37's own comment calls the
+         * legacy quartet "a chimera describing a machine no GFN client
+         * reports" — and the chimera is what the cloud kept alive for
+         * twenty minutes. Content-Type keeps the text/plain quirk, and
+         * nv-client-version stays 2.0.87.131 (identical in both), so
+         * this profile isolates the device/UA delta and nothing else.
+         * The BODY is unchanged (still F37's): a header-only A/B. If it
+         * does not bring the long flights back, the residual suspects
+         * are the body's F37 additions (srMode/srModel/srScale/rrModel/
+         * fgMode/fgModel, the dlssOverrides default object, appLaunchMode
+         * and the per-flight fresh SubSessionId) — RTSP §62. */
+        if (max < 10) return 0;
+        h[n].name = "Content-Type";       h[n].value = "text/plain"; n++;
+        h[n].name = "nv-client-id";       h[n].value = KN_CM_LCARS_CLIENT_ID; n++;
+        h[n].name = "nv-client-streamer"; h[n].value = "NVIDIA-CLASSIC"; n++;
+        h[n].name = "nv-client-type";     h[n].value = "NATIVE"; n++;
+        h[n].name = "nv-client-version";  h[n].value = KN_CM_CLIENT_VERSION; n++;
+        h[n].name = "nv-device-os";       h[n].value = "Windows 7"; n++;
+        h[n].name = "nv-device-type";     h[n].value = "PC"; n++;
+        h[n].name = "nv-device-make";     h[n].value = "Dell"; n++;
+        h[n].name = "nv-device-model";    h[n].value = "Latitude E5500"; n++;
+        h[n].name = "x-device-id";
+        h[n].value = s->device_id ? s->device_id : ""; n++;
+        return n;
+    }
+
     if (max < 12) return 0;
     h[n].name = "user-agent";         h[n].value = KN_CM_BIFROST_UA; n++;
     h[n].name = "Content-Type";       h[n].value = "text/plain"; n++;  /* quirk */

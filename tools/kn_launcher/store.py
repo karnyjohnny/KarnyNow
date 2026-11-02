@@ -357,8 +357,7 @@ def open_draw_dir(logs_root, run_name: str, index: int = 0):
     return path, index
 
 
-MANIFEST_ORDER = ("run", "draw", "started_at", "utc", "game_title",
-                  "game_uuid", "app_id", "app_store", "variant_short_name",
+MANIFEST_ORDER = ("run", "draw", "started_at", "utc", "game_title",                  "game_uuid", "app_id", "app_store", "variant_short_name",
                   "owned", "device_id", "knvstd", "argv_redacted", "params",
                   "log_dir", "wire_dump", "console_log")
 
@@ -384,3 +383,66 @@ def write_manifest(path: str, fields: dict) -> bool:
     except OSError as exc:
         print("manifest write failed: %s" % exc, file=sys.stderr)
         return False
+
+
+# ------------------------------------------------------- last run memory
+# Slice 4r (F42): run 104 exposed the gap the log-folder rewrite left.
+# The operator flew four draws across four launcher restarts and each
+# restart suggested the NEXT run number, so the manifests read run104,
+# run105, run106 and run107 — and the four folders had to be consolidated
+# into run104_logs/1..4 BY HAND, which is exactly the bookkeeping the
+# rewrite was supposed to kill. The launcher now remembers the run it
+# last flew and continues it across restarts; a "new run" button is the
+# only way to advance the number.
+LAST_RUN_NAME = "last_run.txt"
+
+
+def last_run_path() -> str:
+    return os.path.join(app_dir(), LAST_RUN_NAME)
+
+
+def save_last_run(name: str) -> bool:
+    """Remember the run the launcher last flew (best effort)."""
+    name = (name or "").strip()
+    if not valid_run_name(name):
+        return False
+    try:
+        with open(last_run_path(), "w", encoding="utf-8") as f:
+            f.write(name)
+        if not is_dpapi():
+            os.chmod(last_run_path(), stat.S_IRUSR | stat.S_IWUSR)
+        return True
+    except OSError:
+        return False
+
+
+def load_last_run() -> str:
+    """The remembered run name, or "" when absent/invalid."""
+    try:
+        with open(last_run_path(), "r", encoding="utf-8") as f:
+            name = f.read().strip()
+    except OSError:
+        return ""
+    return name if valid_run_name(name) else ""
+
+
+def continuing_run(logs_root, current: str = "") -> str:
+    """The run name a fresh launcher start should offer: the remembered
+    one when it is still a valid name, else the next free number."""
+    last = load_last_run()
+    if last and last != (current or "").strip():
+        return last
+    if last:
+        return last
+    return suggest_run_name(logs_root)
+
+
+def bump_run_name(logs_root, current: str) -> str:
+    """The next run number that is NOT the current one — what the "new
+    run" button does. suggest_run_name already skips past every existing
+    runNNN_logs folder and legacy runNNN.log file."""
+    nxt = suggest_run_name(logs_root)
+    if nxt == (current or "").strip():
+        n = run_number(nxt)
+        nxt = "run%d_logs" % (n + 1 if n > 0 else 100)
+    return nxt

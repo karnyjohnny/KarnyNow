@@ -82,7 +82,14 @@ typedef struct kn_cm_settings {
      * here by construction. */
     int         profile;       /* 0 = OpenNOW-strict native (DEFAULT),
                                   1 = browser parity (CM experiments;
-                                      provisions a WebRTC-only seat) */
+                                      provisions a WebRTC-only seat),
+                                  2 = the RUN-46 identity (F41): no
+                                      user-agent, no x-nv-client-identity,
+                                      device quartet "Windows 7"/PC/Dell/
+                                      "Latitude E5500". The table that
+                                      flew every 1020-1200 s keeper in
+                                      project history; the A/B against
+                                      F37's collapsed 12-21 s ceiling. */
     const char *subsession_id; /* metaData SubSessionId — a FRESH random
                                   UUID per session (OpenNOW random_uuid,
                                   cloudmatch.rs :1675). F37: BOTH

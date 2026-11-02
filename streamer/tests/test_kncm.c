@@ -576,6 +576,62 @@ static void test_cm_body(void)
         CHECK(kn_cm_fixed_headers(&st, hh, 10) == 0,
               "native table refuses a too-small max (<12)");
     }
+
+    /* F41 (round N slice 4r): the RUN-46 identity profile — the header
+     * table that flew every long session in project history (run 46:
+     * 1020.0 s keeper + 1174.8 s + 1084.9 s; runs 60/61: two 1200 s
+     * keepers) and that F37 replaced, after which the ceiling collapsed
+     * to 317.6 s (run 102), 21.0 s (run 103) and 15.9 s (run 104) —
+     * 0/8 draws over 21 s on the F37 identity. */
+    {
+        int i, nh;
+        int have_ua = 0, have_ident = 0, have_ct = 0, have_os = 0,
+            have_type = 0, have_make = 0, have_model = 0, have_ver = 0,
+            have_streamer = 0, have_ctype = 0, have_xdev = 0;
+        st.profile = 2;
+        nh = kn_cm_fixed_headers(&st, hh, 22);
+        CHECK(nh == 10, "r46: exactly the ten run-46 headers");
+        for (i = 0; i < nh; ++i) {
+            if (strcmp(hh[i].name, "user-agent") == 0) have_ua = 1;
+            if (strcmp(hh[i].name, "x-nv-client-identity") == 0)
+                have_ident = 1;
+            if (strcmp(hh[i].name, "Content-Type") == 0 &&
+                strcmp(hh[i].value, "text/plain") == 0) have_ct = 1;
+            if (strcmp(hh[i].name, "nv-device-os") == 0 &&
+                strcmp(hh[i].value, "Windows 7") == 0) have_os = 1;
+            if (strcmp(hh[i].name, "nv-device-type") == 0 &&
+                strcmp(hh[i].value, "PC") == 0) have_type = 1;
+            if (strcmp(hh[i].name, "nv-device-make") == 0 &&
+                strcmp(hh[i].value, "Dell") == 0) have_make = 1;
+            if (strcmp(hh[i].name, "nv-device-model") == 0 &&
+                strcmp(hh[i].value, "Latitude E5500") == 0) have_model = 1;
+            if (strcmp(hh[i].name, "nv-client-version") == 0 &&
+                strcmp(hh[i].value, KN_CM_CLIENT_VERSION) == 0) have_ver = 1;
+            if (strcmp(hh[i].name, "nv-client-streamer") == 0 &&
+                strcmp(hh[i].value, "NVIDIA-CLASSIC") == 0) have_streamer = 1;
+            if (strcmp(hh[i].name, "nv-client-type") == 0 &&
+                strcmp(hh[i].value, "NATIVE") == 0) have_ctype = 1;
+            if (strcmp(hh[i].name, "x-device-id") == 0 &&
+                strcmp(hh[i].value, "device-hash-abc") == 0) have_xdev = 1;
+        }
+        CHECK(!have_ua, "r46: NO user-agent header at all (F37 added it)");
+        CHECK(!have_ident, "r46: NO x-nv-client-identity (F37 added it)");
+        CHECK(have_ct, "r46: the text/plain quirk survives");
+        CHECK(have_os && have_type && have_make && have_model,
+              "r46: the device quartet is the run-46 chimera "
+              "\"Windows 7\"/PC/Dell/\"Latitude E5500\"");
+        CHECK(have_ver && have_streamer && have_ctype && have_xdev,
+              "r46: version/streamer/client-type/x-device-id identical to "
+              "native — the profile isolates the UA + device delta");
+        CHECK(strcmp(hh[0].name, "Content-Type") == 0,
+              "r46: Content-Type is FIRST (the run-46 order, no UA ahead)");
+        CHECK(kn_cm_fixed_headers(&st, hh, 9) == 0,
+              "r46: refuses a too-small max (<10)");
+        st.profile = 0;
+        nh = kn_cm_fixed_headers(&st, hh, 22);
+        CHECK(nh == 12 && strcmp(hh[0].name, "user-agent") == 0,
+              "profile 0 still yields the F37 native table (no regression)");
+    }
 }
 
 static void test_cm_network(void)
