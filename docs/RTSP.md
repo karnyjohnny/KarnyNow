@@ -5984,7 +5984,7 @@ Same game (Arknights: Endfield, app 107057914), same log folder, macro
 ### 62.7 Gates — run through the project's OWN canonical scripts, not a hand-rolled subset
 `tools/cross_check.sh` -> **CROSS-CHECK PASS (zero warnings under -Wall -Wextra -Werror)** on BOTH x86_64 and i686: every kncore object, every cross-linkable test `.exe`, the full static `knvstd_x86_64.exe` + `knvstd_i686.exe` links, and the paranoid knvstd leg (`-Wunused-but-set-variable -Wformat-truncation=2`). The mbedtls / usrsctp / ffmpeg legs self-SKIP (trees absent, exactly as the script intends).
 
-`tools/build_native_tests.sh` -> **NATIVE TESTS PASS**, zero warnings across 26 suites: `test_kncm` **267/0** (was 258; +9 for the r46 table), `test_kninput` **802/0**, `test_kndrawpath` 1051/0, `test_knfreeze` 865/0, `knbw` 387/0, `test_knrx` 218/0, `test_knogg` 163/0 (+143 KAT), `test_knrtsp` 150/0, `test_knfec` 125/0, `test_kngs` 125/0 (+31/31 scenarios), `test_knselftest` 118/0, `test_kndiag` 109/0, `test_knopus` 105/0, `test_knlog` 105/0, `test_knsock` 102/0, `test_knws` 88/0, `test_knsrtp` 77/0, `test_knaudio` 74/0, `test_knd3d` 65/0, `test_knarx` 62/0 (+45 KAT), `test_knwire` 52/0, `test_knring` 34/0, `test_knsctp` 13/0, `test_kndtls` 6/0, `test_kncert` 4/0 — plus the json-lines contract check over four knvstd stdout captures.
+`tools/build_native_tests.sh` -> **NATIVE TESTS PASS**, zero warnings across **25** suites (the CMake test list has 25 names; counted from the run output): `test_kncm` **267/0** (was 258; +9 for the r46 table), `test_kninput` **802/0**, `test_kndrawpath` 1051/0, `test_knfreeze` 865/0, `knbw` 387/0, `test_knrx` 218/0, `test_knogg` 163/0 (+143 KAT), `test_knrtsp` 150/0, `test_knfec` 125/0, `test_kngs` 125/0 (+31/31 scenarios), `test_knselftest` 118/0, `test_kndiag` 109/0, `test_knopus` 105/0, `test_knlog` 105/0, `test_knsock` 102/0, `test_knws` 88/0, `test_knsrtp` 77/0, `test_knaudio` 74/0, `test_knd3d` 65/0, `test_knarx` 62/0 (+45 KAT), `test_knwire` 52/0, `test_knring` 34/0, `test_knsctp` 13/0, `test_kndtls` 6/0, `test_kncert` 4/0 — plus the json-lines contract check over four knvstd stdout captures.
 
 `tools/check_summary_skeleton.py` -> **PASS x2**: skeleton **113** recursive keys == live **113**, `only in skeleton: (none)`, `only in live: (none)`, against run103's two LIVE stdouts (`run103_logs/1/run103.log`, `run103_logs/2/run104.log`). F41 adds an event FIELD, not a summary key.
 
@@ -5996,3 +5996,130 @@ Same game (Arknights: Endfield, app 107057914), same log folder, macro
 2. **F43 — `%u` against an `int`.** `session_timer` prints `msgs[i].timer_active`, declared `int` at `kn_bw.h:208`. Latent since before slice 4p and invisible to the canonical legs (`-Wformat=1` tolerates `int` for `%u`); 4r's stricter `-Wformat-signedness` sweep of the file it was already editing surfaced it. Fixed with a cast that is a no-op for the field's only two values (0/1) — not a behaviour change, not a canonical-gate regression, a correctness tidy shipped because the line was already open.
 
 Rig: **REBUILD** — T10 expected **ALL PASS 89** on the F41 stamp, then the §62.6 interleaved A/B.
+
+---
+
+## 63. Slice 4s: RUN 105 read — **the identity A/B came back cleanly NEGATIVE** (r46 14.4/12.1/12.1 s vs native 14.5/12.1/14.7 s, interleaved, same evening, same device) · RUN 200 read — the operator built `ee75d37` itself and it flew **87.3 s**, not 1020 s · and the discovery that pays for both: **the rig's 0x0101 heartbeat is a ten-second oracle for "will this session live"**
+
+### 63.1 Run 105 — F41 answered its own question, and the answer is NO
+Six draws, interleaved r46/native/r46/native/r46/native, one launcher session (F42's run
+continuity worked: all six landed in one `run105_logs`), same game (Endfield, app
+107057914), same stable device `557e89aa…`, macro/hands-off:
+
+| draw | profile | seat | queue | rig | relearns | stop_reason | wall_ms | hb `0101` | video to | ctrl to |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | **r46** | fresh (`preparing`) | 131 | 185-136-69-134 | 16 | ctrl_dead | 14 428 | **2** | 12 323 | 7 250 |
+| 2 | native | fresh | 123 | 80-84-173-144 | 12 | ctrl_dead | 14 511 | **2** | 12 431 | 8 898 |
+| 3 | **r46** | **resumed** (`resumed:1`) | — | 80-84-173-134 | 0 | rig_zombie | 12 078 | **0** | 10 392 | 9 293 |
+| 4 | native | fresh | 132 | 185-136-70-135 | 14 | rig_zombie | 12 100 | **0** | 10 693 | 8 928 |
+| 5 | **r46** | fresh | 138 | 185-136-70-135 | 15 | rig_zombie | 12 076 | **0** | 10 797 | 8 979 |
+| 6 | native | fresh | 131 | 80-84-174-147 | 18 | ctrl_dead | 14 651 | **2** | 12 574 | 8 629 |
+
+r46 max 14.4 s, native max 14.7 s; the distributions overlap completely. **The CloudMatch
+header table is not the variable** — F37's identity rewrite is exonerated, and with it the
+whole of §62.4's ledger correlation (the correlation was real; the causation was not).
+Five of the six draws took a FRESH seat out of the queue (positions 123-138), so F38's
+resume path is not the explanation either — only draw 3 resumed.
+
+### 63.2 Run 200 — the operator built the r46 commit and flew it the same evening
+`ee75d37` itself, built and run with the plain pre-F35 command line. Its `cm_created` is
+`status:1 phase:"preparing"` → queue **position 133** → `status:2 phase:"ready" seat_step:4`
+→ rig `185-136-70-136`, 23 relearns: **a fresh seat, adjacent queue position and adjacent
+rig IP to run 105 draw 1** (131 / `185-136-69-134`). As close to a controlled pair as this
+project will ever get — same evening, same identity, both fresh seats.
+
+| | run 200 (`ee75d37`, r46) | run 105 draw 1 (HEAD, `--cm-profile=r46`) |
+|---|---|---|
+| wall | **87 322 ms** | 14 428 ms |
+| hb `0101` | **73** (~1 Hz to 68.8 s) | **2** |
+| control inbound lived to | **68 791 ms** (136 records) | 7 250 ms (9 records) |
+| video RTP lived to | **85 192 ms** (`frames_observed 2553`) | 12 323 ms (366) |
+| `terminations` | 0 | 0 |
+| `ctrl_ping_stop` | pings 42, **pongs 0** | pings 7, **pongs 0** |
+| encoder ramp | `kbps:[1319,1406,1394,1339,1093,993,826,705,374,0]` | `kbps:[4610,2211,2418,1760,1236,1400,1002,908,771,321]` |
+| feedback we sent | `rr 87, ack 2557, pacing 1265, qos 1494, ka 30, nack 0, idr 0, pli 0, rfi 0` | `rr 12, ack 313, pacing 146, qos 231, ka 4, nack 0, idr 0, pli 0, rfi 0` |
+| `cm_release` | `rc:-2 attempts:2` | `rc:-2 attempts:2` |
+
+Per-second the two clients behave **identically** on the wire (rr ~1 Hz, ack ~26-30/s,
+pacing ~12-15/s, qos ~17-19/s, ka ~0.33/s, and zero nack/idr/pli/rfi in both). The only
+difference is **how long the rig keeps talking to us**: 68.8 s of control and 85.2 s of
+video versus 7.3 s and 12.3 s. Same disease, different speed — and the same shape as the
+golden era, only ~12× faster.
+
+**Confound, named in the same breath:** that build had **no FFmpeg** —
+`decoder:"pipeline-only"`, `video:"0x0"`, `frames_decoded:0`,
+`video_present_end reason:"never_opened"`, `audio_play_end pkts:0 written:0`. It received
+media and consumed none. Its T10 came back **ALL PASS 87** (HEAD: 89), which is also the
+cheap way to confirm *which* build actually flew. Run 200 must be repeated with a decoding
+build before the 87.3 s is treated as a fair r46 number.
+
+### 63.3 The oracle: the rig's 0x0101 heartbeat, readable ten seconds in
+Pulled from the run-46 **keeper** itself (`run46_logs/b/run46.log`, 1020.0 s,
+`stop_reason:"time"`):
+
+* `ctrl_summary codes: [["020e",1],["0111",2],["010a",68],["010f",6],["0106",6],["010e",1],["0101",**1001**],["0110",4]]`
+  — **1001 heartbeats, ~1 Hz for the whole flight**, and the first `ctrl_in` histogram at
+  `rel_ms:10000` already carries `["0101",8]`.
+* `decoder:"libavcodec 63.2.100"`, `video:"1280x720"`, `frames_decoded:30571`,
+  `frames_failed:0`, `video_present_end reason:"session_end" frames:30571 fails:0`,
+  `audio_play_end written:45029754`, `cm_release rc:0 http_status:200 gone:1 attempts:1`.
+
+So a rig that intends to keep us heartbeats from the first second. Today: run 200 got 73,
+HEAD's draws got 0-2. **A two-minute probe decides what a twenty-minute flight would** —
+which is why the bisect below flies `--session-seconds=120` and reads the heartbeat count.
+`tools/bisect_row.py` (new this slice) prints exactly that row out of any flight log, on
+Python 3.8, and also flags the no-FFmpeg trap that invalidated run 200.
+
+**Retracted as a symptom: `pongs:0`.** The 1020 s keeper logged `pings:504, pongs:0,
+expired:503` — rigs simply do not answer our control pings. Every earlier reading of
+"cpong_matched:0" as evidence of a dead rig was reading a normal.
+
+### 63.4 The frame that replaces §62.4's: two questions, two methods
+The operator reports the **official GFN client played Endfield for an hour today**, on the
+same account and network. That kills "the pool is the whole story" and splits the loss:
+
+| | question | method |
+|---|---|---|
+| **Q1** | why does the *same* r46 binary that flew 1020 s on 10-31 fly **87 s** today? | **not** a bisect — our code is constant. Capture what the official client sends *now*: browser DevTools → Network → the CloudMatch POST → *Copy as cURL* + the Response JSON. Since the official client is healthy, its create request is ground truth for the current contract (caveat: the browser path provisions a WebRTC seat, `:443 /nvst/` usage 14 alp 5, not our native `:322` usage 16 — same create API, different seat class) |
+| **Q2** | why does r46 fly 87 s and HEAD 14 s **on the same evening**? | **bisect by commit** — purely our code |
+
+Q2 suspects now that the headers are out: the create **body** (F37's
+`srMode/srModel/srScale/rrModel/fgMode/fgModel`, the `dlssOverrides` default object,
+`appLaunchMode`, the per-flight fresh `SubSessionId`), F39's cursor/input path, and
+`kn_d3d.c` (+805 lines between `ee75d37` and HEAD).
+
+### 63.5 The bisect protocol (live experiment; full text in `ORIENTATION.md` §6)
+Order is by information, not by date: **`a339b52`** (11-01 14:04, the last commit before
+F37 — the run 60/61 1200 s keepers live between `9409213` and here) → **`0c63a49`**
+(slice 4o = F36+F37) → **`9409213`** (r49) → **`ee75d37`** (r46, rebuilt *with* FFmpeg,
+n=3) → **`af826fb`** (HEAD, same command as the control). Pair 1+2 tests the F37 boundary
+directly: #1 healthy and #2 dead ends the evening with an answer.
+
+Rules: build every commit **exactly** like HEAD (same FFmpeg) — otherwise you are
+measuring the decoder, not the code; **no launcher** for old builds (it injects flags they
+do not have → exit 2); verify `"decoder"` is `libavcodec …` and `"video"` is `1280x720`
+before spending draws; **3 probes of `--session-seconds=120` per commit**, and one full
+`--session-seconds=1200` only on the commit that wins, to catch the keeper. One command for
+all five (verified present in every one of them):
+
+```
+build\knvstd.exe --session --session-token=TOK --session-app=107057914 --session-seconds=120 --input-script=build\login_1h.txt --input-anti-afk=60000 --session-present --session-audio-play --session-release > logs\bisect_<commit>_<n>.log 2>&1
+```
+
+Do **not** add `--cm-profile`, `--device-id-file`, `--session-zombie-ms`, `--wire-dump` or
+`--session-device` — they do not exist at every commit and the process exits 2 with usage.
+
+### 63.6 Gates (docs + one new tool; no C change)
+`tools/bisect_row.py` NEW — pure stdlib, parses under the Python 3.8 grammar
+(`ast.parse(feature_version=(3,8))` PASS), verified against two real captures in both JSON
+styles the tree has emitted: `run200_logs/run1.log` (spaced, `"decoder":"pipeline-only"` →
+correctly flagged as a build that does not count, hb 73) and `run105_logs/4/run105.log`
+(compact, hb 0 → `MARTWE SERCE`). No-arg invocation prints usage and returns 2.
+Corrected this slice: the slice-4r gate text said "26 suites" — `build_native_tests.sh`
+actually prints **25** (the CMake `foreach` test list has 25 names; counted from the run
+output). New docs: `SETUP.md` (environment, dependencies, the four canonical gates, the
+rig side, the sandbox hygiene rules) and `ORIENTATION.md` (why the stack is C+PyQt5, why
+tests are the spine, which log fields decide, the current state of knowledge, the bisect
+protocol, the dead ends) — `README.md`'s documentation map now lists both. C sources
+untouched: the 4r gate results stand (`CROSS-CHECK PASS` ×2, `NATIVE TESTS PASS` 25
+suites, skeleton 113 == 113 ×2, `test_launcher` 156/0).

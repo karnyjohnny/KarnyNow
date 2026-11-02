@@ -143,6 +143,11 @@ SHA-256 `65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1`).
 
 ## Documentation map
 
-`START-HERE.md` → `docs/BOOTSTRAP.md` → `docs/RTSP.md` §25–26 (the live-run
+`START-HERE.md` → `ORIENTATION.md` (why the stack is C + PyQt5, why the test
+spine exists, which log fields decide, the state of knowledge and the live
+experiment) → `SETUP.md` (environments, dependencies, the four canonical gates,
+the rig side) → `docs/BOOTSTRAP.md` → `docs/RTSP.md` §25–26 (the live-run
 record) → `docs/INTEGRATION.md` (latest rev) → the per-layer doc for whatever
 you touch. Frozen history: `docs/archive/` (see its README for a guide).
+Operator-facing test harnesses: `tests/README.md` (Polish) and
+`tools/bisect_row.py`.
