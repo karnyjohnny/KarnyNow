@@ -315,11 +315,45 @@ def suggest_run_name(logs_root) -> str:
     return "run%d_logs" % (best + 1)
 
 
+# Slice 5c: the run-folder name is FREE. runNNN_logs was the native
+# era's numbering convention; the B-track flies named probes (runB2a,
+# runB545, …) — the operator asked for exactly that ("dajemy prawo
+# nazwać dowolnie kolejny folder"). The string still becomes ONE
+# directory under logs\ on Windows, so it is validated as one and the
+# GUI shows the rejection reason verbatim. suggest_run_name keeps
+# OFFERING runNNN_logs — a suggestion, no longer a rule; run_number /
+# RUN_RE / bump_run_name keep serving the numeric suggestion engine.
+RUN_NAME_MAX = 100
+RUN_NAME_BAD_CHARS = '<>:"/\\|?*'
+RUN_NAME_RESERVED = frozenset(
+    ["con", "prn", "aux", "nul"] +
+    ["com%d" % i for i in range(1, 10)] +
+    ["lpt%d" % i for i in range(1, 10)])
+
+
+def run_name_problem(name: str) -> str:
+    """'' when `name` can be a draw-folder name under logs\\, else a
+    one-line reason (slice 5c — the GUI prints it as-is)."""
+    n = (name or "").strip()
+    if not n:
+        return "empty name"
+    if len(n) > RUN_NAME_MAX:
+        return "longer than %d characters" % RUN_NAME_MAX
+    if any(ord(c) < 32 or c in RUN_NAME_BAD_CHARS for c in n):
+        return "forbidden character (one of %s, or control)" % \
+            RUN_NAME_BAD_CHARS
+    if n.startswith(".") or n.endswith("."):
+        return "cannot start or end with a dot"
+    if n.split(".")[0].lower() in RUN_NAME_RESERVED:
+        return "reserved Windows device name"
+    return ""
+
+
 def valid_run_name(name: str) -> bool:
-    """runNNN or runNNN_logs, digits only — this string becomes a
-    directory name on Windows, so it is validated before use."""
-    import re as _re
-    return bool(_re.match(r"^run\d{1,4}(_logs)?$", (name or "").strip()))
+    """True for ANY name that can be a directory under logs\\ (slice 5c:
+    free names — runB2a is as valid as run104_logs; unsafe strings are
+    still rejected because this becomes a real Windows path)."""
+    return run_name_problem(name) == ""
 
 
 def draw_dirs(logs_root, run_name: str) -> list:

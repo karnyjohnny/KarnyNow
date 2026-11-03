@@ -6,7 +6,8 @@
 # token verified against v2/serverInfo (which doubles as the vpcId
 # discovery). Tab 2 "Games & launch": the game list, the smart search,
 # the store-variant picker, the knvstd parameter block, the LOG FOLDER
-# (auto-suggested, operator numbers from 100) and the launch button
+# (FREE name since slice 5c — runB2a, run104_logs…; auto-suggested and
+# remembered across restarts) and the launch button
 # (QProcess; stdout mirrored into the console pane AND the draw's own
 # console log).
 #
@@ -36,7 +37,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -51,8 +51,8 @@ from PyQt5.QtWidgets import (
 )
 
 from . import auth, catalog, search, store
-from .params import (DEFAULT_PARAMS, inject_draw_flags, redact_argv,
-                     split_params)
+from .params import (CONSOLE_LOG_NAME, DEFAULT_PARAMS, inject_draw_flags,
+                     redact_argv, split_params)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOGS_DIR = REPO_ROOT / "logs"
@@ -499,6 +499,11 @@ class MainWindow(QMainWindow):
         self.search_box.textChanged.connect(self._on_search_changed)
         top.addWidget(self.search_box, 1)
         self.owned_chk = QCheckBox("owned only")
+        # Slice 5c: ON by default — the operator launches from their own
+        # library; untick for the full-catalog browse. setChecked BEFORE
+        # the connect so construction never fires _render_games (the
+        # game list widget does not exist yet at that point).
+        self.owned_chk.setChecked(True)
         self.owned_chk.stateChanged.connect(self._render_games)
         top.addWidget(self.owned_chk)
         # The full-catalog walk is now OPT-IN: unticked, a refresh pulls
@@ -538,7 +543,8 @@ class MainWindow(QMainWindow):
         note = QLabel("--session, --session-token, --session-app, "
                       "--session-device, --log-dir and --wire-dump are "
                       "added automatically (the token never passes "
-                      "through this box or a log).")
+                      "through this box or a log). The draw folder also "
+                      "gets console.log, wire_r1.txt and manifest.txt.")
         note.setObjectName("dim")
         note.setWordWrap(True)
         right.addWidget(note)
@@ -633,13 +639,16 @@ class MainWindow(QMainWindow):
 
     def _update_draw_hint(self, *_a):
         """Slice 4q: show the operator EXACTLY where the next launch
-        writes, and refuse a name that could not be a directory."""
+        writes. Slice 5c: any safe folder name flies (runB2a,
+        run104_logs…); only Windows-hostile names are refused, with the
+        reason printed verbatim."""
         name = self._run_name()
         busy = self.proc is not None and \
             self.proc.state() != QProcess.NotRunning
-        if not store.valid_run_name(name):
-            self.draw_hint.setText("⚠ not a run name — use runNNN_logs "
-                                   "(e.g. run104_logs)")
+        problem = store.run_name_problem(name)
+        if problem:
+            self.draw_hint.setText("⚠ %s — any safe folder name works "
+                                   "(runB2a, run104_logs…)" % problem)
             self.launch_btn.setEnabled(False)
             return
         self.launch_btn.setEnabled(not busy)
@@ -972,11 +981,6 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
 
-    def _console_log_name(self, run_name):
-        """run104_logs -> run104.log (the console copy inside the draw
-        folder; the spelling the operator already archives by)."""
-        return re.sub(r"_logs$", "", run_name) + ".log"
-
     def _launch(self):
         if self.proc is not None and \
                 self.proc.state() != QProcess.NotRunning:
@@ -1042,10 +1046,12 @@ class MainWindow(QMainWindow):
         # leaves the provenance behind; run103/3 was a draw with no logs
         # at all, and that class is now impossible.
         run_name = self._run_name() or self._suggest_run_name()
-        if not store.valid_run_name(run_name):
+        problem = store.run_name_problem(run_name)
+        if problem:
             QMessageBox.critical(self, "log folder",
-                                 "bad run name: %s\nuse runNNN_logs "
-                                 "(e.g. run104_logs)" % run_name)
+                                 "bad run name: %s\n(%s)\nAny safe folder "
+                                 "name works, e.g. runB2a or "
+                                 "run104_logs." % (run_name, problem))
             return
         try:
             draw_dir, draw_index = store.open_draw_dir(LOGS_DIR, run_name)
@@ -1056,8 +1062,7 @@ class MainWindow(QMainWindow):
         store.save_last_run(run_name)      # F42: continue this run next time
         argv = inject_draw_flags(argv, draw_dir)
         self.draw_dir, self.draw_index = draw_dir, draw_index
-        console_path = os.path.join(draw_dir,
-                                    self._console_log_name(run_name))
+        console_path = os.path.join(draw_dir, CONSOLE_LOG_NAME)
         try:
             self.log_fh = open(console_path, "a", encoding="utf-8")
         except OSError as exc:

@@ -12,10 +12,11 @@
 #   search  — the smart title matcher ("endfield" -> "Arknights: Endfield")
 #   gui     — the PyQt5 interface (QThread workers, QProcess launch)
 #
-# Run:  python -m kn_launcher        (from tools/, or with PYTHONPATH)
+#   Run:  launcher.bat               (repo root, Windows — slice 5c)
+#     or: python -m tools.kn_launcher   (from the repo root)
 # All GFN client constants here are PUBLIC identifiers transcribed from
 # docs/AUTH.md (OpenNOW provenance) — no secrets live in this package.
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

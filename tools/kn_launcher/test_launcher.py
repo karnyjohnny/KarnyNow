@@ -381,8 +381,14 @@ lot_a = kn_params.split_params(
     "--input-script=build\\login_1h.txt")
 check(lot_a[-1] == "--input-script=build\\login_1h.txt" and len(lot_a) == 6,
       "params: the LOT A macro recipe splits intact (backslash kept)")
-check(kn_params.DEFAULT_PARAMS.startswith("--session-seconds=1200"),
-      "params: DEFAULT_PARAMS keeps the operator's recipe")
+check(kn_params.DEFAULT_PARAMS.startswith("--cm-profile=browser "
+                                          "--webrtc-answer=45"),
+      "params: DEFAULT_PARAMS opens with the B-track pair (slice 5c) — "
+      "browser profile + the answer probe, never retyped per flight")
+check("--session-queue-timeout=1500" in kn_params.DEFAULT_PARAMS and
+      "--session-seconds=1200" in kn_params.DEFAULT_PARAMS,
+      "params: DEFAULT_PARAMS keeps the operator's recipe (queue patience "
+      "1500 covers the browser queues; knvstd's own default is 600)")
 check("--wire-dump" not in kn_params.DEFAULT_PARAMS,
       "params: DEFAULT_PARAMS no longer carries --wire-dump — the launcher "
       "injects a PER-DRAW path, so two draws cannot overwrite one dump")
@@ -390,6 +396,8 @@ check("--session-interactive" in kn_params.DEFAULT_PARAMS,
       "params: the default is still the interactive (goal G1) recipe")
 check("--session-token" not in kn_params.DEFAULT_PARAMS,
       "params: the token is NEVER part of the typed parameters")
+check(kn_params.CONSOLE_LOG_NAME == "console.log",
+      "params: the per-draw console copy is console.log (slice 5c)")
 
 check(kn_params.flag_value(["--session-app=42"], "session-app") == "42" and
       kn_params.flag_value(["--x"], "session-app") is None,
@@ -464,10 +472,21 @@ check(store.run_number("run104_logs") == 104 and
       store.run_number("wire_r1.txt") == -1,
       "store: run_number is strict (suggest_run_name strips the legacy .log)")
 check(store.valid_run_name("run104_logs") and store.valid_run_name("run104")
-      and not store.valid_run_name("../evil") and
-      not store.valid_run_name("run104 logs") and
-      not store.valid_run_name(""),
-      "store: valid_run_name rejects anything that is not a safe directory")
+      and store.valid_run_name("runB2a") and store.valid_run_name("runB545")
+      and store.valid_run_name("probe-5b.2") and
+      store.valid_run_name("run104 logs"),
+      "store: valid_run_name takes ANY safe folder name (slice 5c) — "
+      "runB2a flies from the GUI, spaces included")
+check(not store.valid_run_name("../evil") and
+      not store.valid_run_name("a/b") and not store.valid_run_name("a\\b")
+      and not store.valid_run_name("x:y") and not store.valid_run_name("con")
+      and not store.valid_run_name("run.") and not store.valid_run_name("")
+      and not store.valid_run_name("x" * 101),
+      "store: valid_run_name still rejects everything unsafe on Windows")
+check(store.run_name_problem("runB2a") == "" and
+      "forbidden" in store.run_name_problem("../evil") and
+      "dot" in store.run_name_problem("run."),
+      "store: run_name_problem gives the GUI a one-line reason")
 check(store.draw_dirs(_LOGS, "run107_logs") == [1, 2] and
       store.next_draw_index(_LOGS, "run107_logs") == 3,
       "store: draw numbering continues where the operator left off")
@@ -537,10 +556,39 @@ check(store.bump_run_name(_LOGS, "run104_logs") == "run108_logs",
 check(store.bump_run_name(_LOGS, "run108_logs") == "run109_logs",
       "store: bump never returns the run you are already on")
 store.save_last_run("")
-open(store.last_run_path(), "w").write("not a run name")
+check(store.save_last_run("runB2a") and store.load_last_run() == "runB2a" and
+      store.continuing_run(_LOGS) == "runB2a",
+      "store: a free-form run name is remembered across restarts (5c) — "
+      "runB2a draws keep accumulating in ONE folder")
+open(store.last_run_path(), "w").write("../escape")
 check(store.load_last_run() == "" and
       store.continuing_run(_LOGS) == "run108_logs",
       "store: a corrupt last-run file degrades to the max+1 suggestion")
+
+# ---------------------------------------------------- launcher.bat (5c)
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
+_BAT = os.path.join(_ROOT, "launcher.bat")
+check(os.path.isfile(_BAT),
+      "launcher.bat sits at the repo root (slice 5c: double-click instead "
+      "of 'python -m tools.kn_launcher')")
+with open(_BAT, "rb") as _f:
+    _bat_bytes = _f.read()
+check(b"tools.kn_launcher" in _bat_bytes
+      and not _bat_bytes.startswith(b"\xef\xbb\xbf")
+      and all(c < 128 for c in _bat_bytes)
+      and b"\r" not in _bat_bytes.replace(b"\r\n", b""),
+      "launcher.bat: runs the package, pure ASCII, no BOM, no bare CR "
+      "(cmd.exe on Win7)")
+check(_bat_bytes.count(b"\r\n") in (0, _bat_bytes.count(b"\n")),
+      "launcher.bat: line endings uniform — all-CRLF (fresh checkout: "
+      ".gitattributes pins eol=crlf) or all-LF (git am writes this form; "
+      "the bat tolerates it: no custom labels, goto :eof only). CRLF now:"
+      " del launcher.bat & git checkout -- launcher.bat")
+with open(os.path.join(_ROOT, ".gitattributes"), "rb") as _f:
+    _attrs = _f.read().decode("utf-8", "replace")
+check("launcher.bat" in _attrs and "eol=crlf" in _attrs,
+      ".gitattributes pins launcher.bat to CRLF checkouts (slice 5c)")
 
 # ----------------------------------------------------------------- GUI
 try:
@@ -563,9 +611,17 @@ try:
     check(win.full_chk.isChecked() is False,
           "gui: 'full catalog' is OFF by default — a refresh pulls only the "
           "owned library")
+    check(win.owned_chk.isChecked() is True,
+          "gui: 'owned only' is ON by default (slice 5c)")
     win.games = GAMES
     win.games_kind = ""
     win.tabs.setTabEnabled(1, True)
+    win._render_games()
+    _n_owned = sum(1 for g in GAMES if g.get("owned"))
+    check(_n_owned < len(GAMES) and win.game_list.count() == _n_owned,
+          "gui: the default 'owned only' filter shows just the owned "
+          "titles (slice 5c)")
+    win.owned_chk.setChecked(False)
     win._render_games()
     check(win.game_list.count() == len(GAMES), "gui: game list renders")
     win.search_box.setText("endfield")
@@ -581,15 +637,23 @@ try:
     check("run900_logs" in win.draw_hint.text() and
           win.launch_btn.isEnabled(),
           "gui: the draw hint shows where the next launch writes")
-    win.logfolder.setText("not a run")
+    win.logfolder.setText("runB2a")
     win._update_draw_hint()
-    check(not win.launch_btn.isEnabled() and "⚠" in win.draw_hint.text(),
-          "gui: an invalid run name disables Launch instead of making a "
-          "directory out of it")
+    check("logs/runB2a/" in win.draw_hint.text() and
+          win.launch_btn.isEnabled(),
+          "gui: a free-form name (runB2a) arms Launch and shows the draw "
+          "path (slice 5c)")
+    win.logfolder.setText("bad/name")
+    win._update_draw_hint()
+    check(not win.launch_btn.isEnabled() and "⚠" in win.draw_hint.text()
+          and "forbidden" in win.draw_hint.text(),
+          "gui: an unsafe name disables Launch and says why, instead of "
+          "making a directory out of it")
     win.logfolder.setText("run900_logs")
     win._update_draw_hint()
-    check(gui.DEFAULT_PARAMS.startswith("--session-seconds=1200"),
-          "gui: the operator's default parameter block")
+    check(gui.DEFAULT_PARAMS.startswith("--cm-profile=browser"),
+          "gui: the operator's default parameter block opens with the "
+          "B-track pair (slice 5c)")
     check("--session-token" not in gui.DEFAULT_PARAMS,
           "gui: the token is NEVER part of the typed parameters")
 
@@ -643,9 +707,10 @@ try:
     _d, _n = store.open_draw_dir(_LOGS, "run900_logs")
     check(_n == 1 and os.path.isdir(_d),
           "gui: launch-time draw allocation starts at 1 for a fresh run")
-    check(win._console_log_name("run104_logs") == "run104.log" and
-          win._console_log_name("run104") == "run104.log",
-          "gui: the console copy inside the draw folder is runNNN.log")
+    check(gui.CONSOLE_LOG_NAME == "console.log" and
+          not hasattr(win, "_console_log_name"),
+          "gui: the console copy inside the draw folder is console.log "
+          "(slice 5c — was runNNN.log per run)")
 
     # F42: a launcher RESTART must continue the run it last flew
     store.save_last_run("run321_logs")

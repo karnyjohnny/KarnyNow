@@ -110,7 +110,7 @@ Nie wymyślaj własnych zestawów flag. Bramką są **te cztery komendy**:
 sh tools/cross_check.sh
 #    oczekiwane ostatnie zdanie: CROSS-CHECK PASS (zero warnings under -Wall -Wextra -Werror)
 
-# 2) bateria natywna: 25 suite'ów + paranoid leg knvstd + kontrakt json-lines
+# 2) bateria natywna: 26 suite'ów + paranoid leg knvstd + kontrakt json-lines
 #    -std=c11 -O1 -g -Wall -Wextra -Wpedantic
 sh tools/build_native_tests.sh
 #    oczekiwane ostatnie zdanie: NATIVE TESTS PASS
@@ -121,7 +121,7 @@ python3 tools/check_summary_skeleton.py . /tmp/live_d1.log
 
 # 4) launcher (PyQt5 + httpx), zawiera w sobie guard py3.8
 python3 tools/kn_launcher/test_launcher.py
-#    oczekiwane: kn_launcher tests: 156 checks, 0 failures -> PASS
+#    oczekiwane: kn_launcher tests: 168 checks, 0 failures -> PASS
 ```
 
 Liczby referencyjne na stan slice 4r (commit `af826fb`): `test_kncm` **267/0**,
@@ -253,6 +253,36 @@ run 200: `video_present_end reason:"never_opened"`, `frames_decoded:0`).
 | `tests\T13_udp_e2e.py` | cała ścieżka stage-2 lokalnie, bez konta GFN (nadajnik UDP → `--capture` → `--replay-capture` → `--decode`) | ~3 min |
 | `tests\T1…T8` | bramki historyczne (dekoder, toolchain, konsola, D3D9, zależności Pythona) — **wykonane, wyników nie powtarzaj** bez potrzeby | patrz `tests/README.md` |
 
+### 3.3 Launcher GUI (slice 5c)
+
+Na rigu: **dwuklik w `launcher.bat`** w katalogu głównym repo (albo
+`python -m tools.kn_launcher`) — nie trzeba już ręcznie pisać ścieżki modułu.
+`.bat` znajduje Pythona przez `where python` (fallback `py -3`) i startuje GUI
+z korzenia repo. Końce linii: blob w git jest LF, a `.gitattributes`
+(`/launcher.bat text eol=crlf`) daje **CRLF przy każdym świeżym checkoucie**.
+Uwaga: `git am` zostawia w drzewie wersję LF (apply nie robi konwersji eol) —
+dla tego skryptu jest ona bezpieczna (brak własnych etykiet, tylko `goto :eof`);
+CRLF od razu materializuje `del launcher.bat & git checkout -- launcher.bat`
+(same `checkout-index -f` istniejącego pliku NIE nadpisuje — zmierzone na git 2.39;
+świeży klon/repozytorium po `git am` od tego commitu ma już atrybuty, więc każdy
+kolejny świeży checkout da CRLF).
+Bateria sprawdza i bajty `.bat`, i przypięcie w `.gitattributes`.
+
+Zmiany slice 5c (wszystkie kryte `test_launcher.py`, **168/0**):
+- **Folder logów może mieć DOWOLNĄ nazwę** — `runB2a`, `runB545`, co chcesz
+  (reguła `runNNN_logs` została jako sama *sugestia*). Nazwy, które nie mogą
+  być katalogiem na Windows (`<>:"/\|?*`, kropka na początku/końcu, `con`,
+  `nul` itd.), są odrzucane **z podanym powodem** w podpowiedzi nad polem.
+- **Drawy zostają**: `logs\runB2a\1`, `logs\runB2a\2`, … — pamięć ostatniego
+  runa (F42) działa też dla wolnych nazw, więc restarty doklejają drawy
+  do tego samego folderu.
+- **„owned only" zaznaczone domyślnie.**
+- Pole parametrów ma **domyślnie wpisaną kartę B2**: `--cm-profile=browser
+  --webrtc-answer=45 --session-queue-timeout=1500` (reszta starej receptury
+  za nimi — edytujesz pod lot).
+- Każdy draw zapisuje u siebie `console.log` (było `runNNN.log`),
+  `wire_r1.txt` (`--wire-dump` dodawany automatycznie) i `manifest.txt`.
+
 Zasady z `tests/README.md`, których trzeba przestrzegać:
 - **ConEmu, nie czysty `cmd.exe`** (decyzja D1): bez `ConEmuHk64.dll` sekwencje ANSI
   niszczą layout.
@@ -307,8 +337,8 @@ r=[]; print('staged ok:', t.ensure_vendor_files(r))
 
 # 3) bramki
 sh tools/cross_check.sh          # -> CROSS-CHECK PASS ... x2
-sh tools/build_native_tests.sh   # -> NATIVE TESTS PASS (25 suite'ow)
-python3 tools/kn_launcher/test_launcher.py   # -> 156 checks, 0 failures
+sh tools/build_native_tests.sh   # -> NATIVE TESTS PASS (26 suite'ow)
+python3 tools/kn_launcher/test_launcher.py   # -> 168 checks, 0 failures
 
 # 4) skeleton (potrzebuje zywego stdout z karnynow-logs, patrz SETUP §2.5)
 python3 tools/check_summary_skeleton.py . /tmp/live_d1.log   # -> 113 == 113 PASS

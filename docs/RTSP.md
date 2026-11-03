@@ -6750,3 +6750,18 @@ candidate understood, and the server is trying to reach us — everything
 B3 (DTLS-SRTP + media) needs to exist on the other end of a real
 socket. B3 then answers the STUN, completes DTLS with the kn_cert/kn_dtls
 machinery, and the depacketizer starts eating RTP.
+
+**Launcher shortcut (slice 5c).** The GUI launcher now opens with this
+card pre-typed: the params box defaults to `--cm-profile=browser
+--webrtc-answer=45 --session-queue-timeout=1500` (the native-era recipe
+follows; edit per flight), the log-folder field takes ANY safe name
+(`runB2a` — the `runNNN_logs` digit rule is gone, unsafe names are
+refused with a reason), `owned only` is ticked by default, and
+`launcher.bat` in the repo root replaces `python -m tools.kn_launcher`.
+The launcher adds `--session/--session-token/--session-app/
+--session-device` itself and gives every draw its own folder — so the
+flight's whole evidence set is `logs\runB2a\<draw>\` (`console.log`,
+`wire_r1.txt`, `manifest.txt`, knvstd's channel logs); push that folder
+to `karnyjohnny/karnynow-logs`. `--session-seconds` is just a ceiling —
+the probe ends itself at `stop_reason:"webrtc_answer_done"` after the
+45 s window. The oracle above is unchanged.
