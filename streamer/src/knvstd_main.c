@@ -56,6 +56,7 @@
 #include "kn/kn_sha1.h"
 #include "kn/kn_sock.h"
 #include "kn/kn_twcc.h"   /* B-track slice 5l: transport-wide-cc feedback */
+#include "kn/kn_h264rtp.h" /* B-track slice 5n: RFC 6184 depacketizer */
 #include "kn/kn_ws.h"
 #include "kn/knlog.h"
 #include "kn/knring.h"
@@ -7314,6 +7315,27 @@ typedef struct {
     unsigned long long rr_lsr_ok;          /* RR sends patched with a
                                              * non-zero LSR/DLSR (proves the
                                              * SR cache -> RR path fires) */
+    /* Slice 5n (B5a): RFC 6184 depacketizer -> kn_decode stream chain.
+     * h264 assembles into the static g_au_buf (armed in the probe after
+     * answer_send succeeded — answer_send memsets this whole struct).
+     * h264_active goes sticky-off on a decode abort (-4). dec is
+     * lazy-opened at the first AU (Y-plane mode, to_nv12=0 — the frame
+     * callback wants the Y plane for the sha1 + PGM evidence; 5p's
+     * display path revisits NV12). */
+    kn_h264rtp   h264;
+    int          h264_active;
+    int          h264_bad_logged;          /* webrtc_h264_bad printed */
+    unsigned long long h264_pay_err;       /* post-decrypt padding errors */
+    unsigned long long aus_in;             /* AUs handed to the decoder */
+    unsigned long long dec_push_err;       /* decode push rc < 0 (not -4) */
+    kn_decode_stream *dec;
+    int          dec_open_tried;
+    unsigned long long frames_ok;          /* frames the decoder delivered */
+    unsigned long long first_frame_ms;
+    unsigned     first_frame_w, first_frame_h;
+    long long    first_frame_fi;
+    int          pgm_ok;                   /* frame_first.pgm written */
+    const char  *log_dir;                  /* borrowed (probe scope) */
 } webrtc_answer_state;
 
 /* Resolve the seat host to a numeric IPv4 for the UDP route: the CM
@@ -8534,6 +8556,111 @@ static void sess_webrtc_rtcp_tick(webrtc_answer_state *as)
     }
 }
 
+/* Slice 5n (B5a): the video decode chain. sess_h264_frame_cb sees every
+ * decoded frame (Y-plane, to_nv12=0): the FIRST frame is the evidence —
+ * w/h/fi/t_ms plus the Y-plane's sha1 (incremental, row by row, so the
+ * stride padding is excluded) and a PGM dump <log_dir>/frame_first.pgm
+ * (P5 — visible in any image tool, the "is it really a picture" face).
+ * sess_h264_au_cb sees every assembled AU: lazy-opens the decode session
+ * (webrtc_decode_arm carries available/backend — the pipeline-only stub
+ * build must be recognizable BEFORE the flight, per the launcher rule),
+ * logs the first AU with its sha1 (the native dec path's au-event face),
+ * and pushes every AU into the stream session. Return policy mirrors
+ * dec_drain_queue: -4 (frame callback aborted) propagates and flips
+ * h264_active sticky-off; other negatives count and the run continues.
+ * Stub build (no FFmpeg): dec stays NULL, AU counters still flow — the
+ * flight is pipeline-only and doesn't count as a decode draw. */
+static uint8_t g_au_buf[512 * 1024];       /* RFC 6184 AU assembly */
+
+static int sess_h264_frame_cb(const uint8_t *data, int width, int height,
+                              int stride_y, int stride_uv, int is_nv12,
+                              long long frame_index, void *ud)
+{
+    webrtc_answer_state *as = (webrtc_answer_state *)ud;
+    (void)stride_uv; (void)is_nv12;
+    ++as->frames_ok;
+    if (as->frames_ok == 1 && data && width > 0 && height > 0) {
+        kn_sha1_ctx sc;
+        uint8_t dig[KN_SHA1_DIGEST_LEN];
+        char hx[2 * KN_SHA1_DIGEST_LEN + 1];
+        int y, i;
+        as->first_frame_ms = as->t0
+            ? (unsigned long long)(kn_sock_now_ms() - (uint64_t)as->t0)
+            : 0ull;
+        as->first_frame_w = (unsigned)width;
+        as->first_frame_h = (unsigned)height;
+        as->first_frame_fi = frame_index;
+        kn_sha1_init(&sc);
+        for (y = 0; y < height; ++y)
+            kn_sha1_update(&sc, data + (size_t)y * (size_t)stride_y,
+                           (size_t)width);
+        kn_sha1_final(&sc, dig);
+        for (i = 0; i < KN_SHA1_DIGEST_LEN; ++i)
+            sprintf(hx + 2 * i, "%02x", (unsigned)dig[i]);
+        if (as->log_dir && as->log_dir[0]) {
+            char path[1024];
+            FILE *f;
+            snprintf(path, sizeof path, "%s/frame_first.pgm", as->log_dir);
+            f = fopen(path, "wb");
+            if (f) {
+                fprintf(f, "P5\n%d %d\n255\n", width, height);
+                for (y = 0; y < height; ++y)
+                    fwrite(data + (size_t)y * (size_t)stride_y, 1,
+                           (size_t)width, f);
+                fclose(f);
+                as->pgm_ok = 1;
+            }
+        }
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_frame_first\","
+               "\"w\":%d,\"h\":%d,\"fi\":%lld,\"t_ms\":%llu,"
+               "\"y_sha1\":\"%s\",\"pgm\":%d}\n",
+               width, height, frame_index, as->first_frame_ms, hx,
+               as->pgm_ok);
+        fflush(stdout);
+    }
+    return 0;
+}
+
+static int sess_h264_au_cb(const uint8_t *annexb, size_t len,
+                           uint32_t rtp_ts, void *ud)
+{
+    webrtc_answer_state *as = (webrtc_answer_state *)ud;
+    int n;
+    if (!as->dec && !as->dec_open_tried) {
+        char err[200];
+        err[0] = '\0';
+        as->dec_open_tried = 1;
+        as->dec = kn_decode_stream_open(0 /* Y-plane */, err, sizeof err);
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_decode_arm\","
+               "\"available\":%d,\"backend\":\"%.63s\",\"open\":%d,"
+               "\"err\":\"%.63s\"}\n",
+               kn_decode_available(), kn_decode_backend(),
+               as->dec ? 1 : 0, err);
+        fflush(stdout);
+    }
+    if (as->aus_in == 0) {
+        uint8_t dig[KN_SHA1_DIGEST_LEN];
+        char hx[2 * KN_SHA1_DIGEST_LEN + 1];
+        int i;
+        kn_sha1(annexb, len, dig);
+        for (i = 0; i < KN_SHA1_DIGEST_LEN; ++i)
+            sprintf(hx + 2 * i, "%02x", (unsigned)dig[i]);
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_au_first\","
+               "\"len\":%lu,\"ts\":%u,\"sha1\":\"%s\",\"t_ms\":%llu}\n",
+               (unsigned long)(len % 100000000ul), (unsigned)rtp_ts, hx,
+               as->t0 ? (unsigned long long)(kn_sock_now_ms() -
+                        (uint64_t)as->t0) : 0ull);
+        fflush(stdout);
+    }
+    ++as->aus_in;
+    if (!as->dec) return 0;               /* stub build: pipeline-only */
+    n = kn_decode_stream_push(as->dec, annexb, len, rtp_ts,
+                              sess_h264_frame_cb, as);
+    if (n == -4) return -4;               /* sticky abort: h264_active off */
+    if (n < 0) ++as->dec_push_err;
+    return 0;
+}
+
 /* One UDP datagram classification step for the B2 linger loop: STUN
  * binding requests (the server's ICE checks at us), STUN responses to
  * our own checks, DTLS records (would mean the server already trusts
@@ -8768,6 +8895,48 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
                         fflush(stdout);
                     }
                 }
+                /* Slice 5n (B5a): the offer's exact video PT feeds the
+                 * RFC 6184 depacketizer. rtx/fec streams do not exist
+                 * (runB5c measured rtp_ssrcs:2 only — audio + video),
+                 * so the exact match IS the full video feed. Payload
+                 * bounds come from kn_gs_rtp_payload (post-decrypt
+                 * padding validation, the native kn_rx idiom); the
+                 * marker bit is peeked from the plaintext header byte
+                 * (the first 12 octets are never encrypted — kn_gs_rtp
+                 * has no marker field by design). */
+                if (as->h264_active && as->pt_video &&
+                    rtp.pt == as->pt_video) {
+                    size_t poff = 0, plen = 0;
+                    if (kn_gs_rtp_payload(&rtp, upkt, plain, &poff,
+                                          &plen) == KN_GS_OK) {
+                        int drc = kn_h264rtp_push(
+                            &as->h264, (uint16_t)rtp.seq, rtp.timestamp,
+                            (upkt[0] & 0x80u) ? 1 : 0,
+                            upkt + poff, plen, sess_h264_au_cb, as);
+                        if (drc != 0)
+                            as->h264_active = 0;   /* -4 sticky decode abort */
+                    } else {
+                        ++as->h264_pay_err;
+                    }
+                    if (!as->h264_bad_logged && as->h264.bad_logged) {
+                        /* the first malformed packet wears a face (5k
+                         * lesson: observability before the round-trip) */
+                        char bhx[33];
+                        unsigned bi;
+                        as->h264_bad_logged = 1;
+                        bhx[0] = '\0';
+                        for (bi = 0; bi < as->h264.bad_head_len &&
+                                          bi < 16u; ++bi)
+                            snprintf(bhx + bi * 2, 3, "%02x",
+                                     as->h264.bad_head[bi]);
+                        printf("{\"mode\":\"session\","
+                               "\"event\":\"webrtc_h264_bad\","
+                               "\"type\":%u,\"seq\":%u,\"head\":\"%s\"}\n",
+                               as->h264.bad_type,
+                               (unsigned)as->h264.bad_seq, bhx);
+                        fflush(stdout);
+                    }
+                }
                 {
                     uint64_t now_us = kn_sock_now_us();
                     sess_rr_observe(as, rtp.ssrc, rtp.pt, rtp.seq, now_us);
@@ -8848,7 +9017,7 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
  * its own event; the summary line is always emitted). */
 static int sess_webrtc_probe(const kn_cm_settings *st,
                              const kn_cm_session *sess, long wait_s,
-                             long answer_s)
+                             long answer_s, const char *log_dir)
 {
     static kn_ws_client wsc;
     static uint8_t wsmsg[300 * 1024];       /* >= MAX_SDP_BYTES + slack */
@@ -9115,6 +9284,15 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
                                 st, sess->conn0_ip, sdpbuf, &as);
                             if (arc == 0 && as.sent) {
                                 as.active = 1;
+                                /* Slice 5n: arm the depacketizer AFTER
+                                 * answer_send's memset of as — the AU
+                                 * buffer is the file-scope static, the
+                                 * PGM target borrows log_dir (valid for
+                                 * the whole probe). */
+                                kn_h264rtp_init(&as.h264, g_au_buf,
+                                                sizeof g_au_buf);
+                                as.h264_active = 1;
+                                as.log_dir = log_dir;
                                 deadline = kn_sock_now_ms() +
                                            (uint64_t)answer_s * 1000u;
                                 printf("{\"mode\":\"session\","
@@ -9292,6 +9470,53 @@ hb_duty:
                as.video_in, as.first_video_ms);
         fflush(stdout);
     }
+    if (as.dec_open_tried || as.h264.st.pkts_in) {
+        /* Slice 5n verdict: drain the decoder (flush releases frames
+         * held for reorder), then the full depacketizer+decode face on
+         * its own SHORT line — runB5c taught that the launcher's pipe
+         * can split stdout lines near ~700 chars, and the
+         * answer_summary tail is already at that limit. aus_pushed vs
+         * aus separates depacketizer output from decoder intake; the
+         * class counters (single/stap/fu/malformed/other_type) say
+         * WHICH RFC 6184 shapes the seat actually sends. */
+        kn_decode_stats dst;
+        int flushed = 0;
+        memset(&dst, 0, sizeof dst);
+        if (as.dec) {
+            flushed = kn_decode_stream_flush(as.dec, sess_h264_frame_cb,
+                                             &as);
+            if (flushed < 0) flushed = -1;
+            kn_decode_stream_stats(as.dec, &dst);
+        }
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_decode_final\","
+               "\"frames\":%llu,\"dec_frames\":%d,\"dec_failed\":%d,"
+               "\"w\":%d,\"h\":%d,\"flushed\":%d,\"push_err\":%llu,"
+               "\"pay_err\":%llu,\"aus\":%llu,\"aus_pushed\":%llu,"
+               "\"au_max\":%llu,\"ts_split\":%llu,\"dups\":%llu,"
+               "\"gaps\":%llu,\"drop_gap\":%llu,\"drop_broken\":%llu,"
+               "\"drop_over\":%llu,\"fu_incomplete\":%llu,"
+               "\"malformed\":%llu,\"other_type\":%llu,\"single\":%llu,"
+               "\"stap\":%llu,\"stap_nals\":%llu,\"fu\":%llu,"
+               "\"h264_pkts\":%llu,\"first_frame_ms\":%llu,"
+               "\"decoder\":\"%.63s\"}\n",
+               as.frames_ok, dst.frames_decoded, dst.frames_failed,
+               dst.width, dst.height, flushed, as.dec_push_err,
+               as.h264_pay_err, as.h264.st.aus, as.aus_in,
+               as.h264.st.au_max, as.h264.st.ts_split,
+               as.h264.st.pkt_dups, as.h264.st.pkt_gaps,
+               as.h264.st.drop_gap, as.h264.st.drop_broken,
+               as.h264.st.drop_over, as.h264.st.fu_incomplete,
+               as.h264.st.malformed, as.h264.st.other_type,
+               as.h264.st.single_nal, as.h264.st.stap_a_pkts,
+               as.h264.st.stap_a_nals, as.h264.st.fu_a_pkts,
+               as.h264.st.pkts_in, as.first_frame_ms,
+               kn_decode_backend());
+        fflush(stdout);
+        if (as.dec) {
+            kn_decode_stream_close(as.dec);
+            as.dec = NULL;
+        }
+    }
     if (as.dtls) {                          /* slice 5g: the DTLS object
                                              * borrows sock+cert, so it
                                              * dies FIRST — slice 5i: the
@@ -9385,7 +9610,10 @@ hb_duty:
                "\"rtcp_send_err\":%llu,\"first_rtcp_in_ms\":%llu,"
                "\"first_rtcp_out_ms\":%llu,\"video_in\":%llu,"
                "\"first_video_ms\":%llu,\"first_video_pt\":%u,"
-               "\"srtcp_ctxs\":%u,\"rr_lsr_ok\":%llu}\n",
+               "\"srtcp_ctxs\":%u,\"rr_lsr_ok\":%llu,"
+               "\"frames\":%llu,\"first_frame_ms\":%llu,\"aus\":%llu,"
+               "\"au_drops\":%llu,\"h264_gaps\":%llu,"
+               "\"decoder\":\"%.31s\"}\n",
                as.sent, as.cand_sent, as.cert_src ? as.cert_src : "?",
                as.local_ip, as.local_port,
                as.acks_in, cands, as.stun_in, as.dtls_in, as.other_in,
@@ -9412,7 +9640,13 @@ hb_duty:
                as.twcc_out, as.rr_out, as.pli_out, as.rtcp_send_err,
                as.first_rtcp_ok_ms, as.first_rtcp_out_ms,
                as.video_in, as.first_video_ms, as.first_video_pt,
-               as.srtcp_ctxs, as.rr_lsr_ok);
+               as.srtcp_ctxs, as.rr_lsr_ok,
+               as.frames_ok, as.first_frame_ms, as.h264.st.aus,
+               as.h264.st.drop_gap + as.h264.st.drop_broken +
+                   as.h264.st.drop_over,
+               as.h264.st.pkt_gaps,
+               (as.dec_open_tried || as.h264.st.pkts_in)
+                   ? kn_decode_backend() : "-");
         fflush(stdout);
     }
     fflush(stdout);
@@ -10066,7 +10300,7 @@ static int run_session(const char *token, const char *device_id,
                 prc = sess_webrtc_probe(
                     &st, &sess,
                     g_sess_webrtc_probe > 0 ? g_sess_webrtc_probe : 60,
-                    g_sess_webrtc_answer);
+                    g_sess_webrtc_answer, log_dir);
                 if (g_sess_webrtc_answer > 0)
                     stop_reason = prc == 0 ? "webrtc_answer_done"
                                            : "webrtc_answer_failed";

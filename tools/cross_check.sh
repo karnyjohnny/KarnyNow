@@ -194,6 +194,9 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     # slice 5l: TWCC register + builder — pure logic, no ws2_32
     $CC $CFLAGS streamer/src/kn_twcc.c streamer/tests/test_kntwcc.c \
         $LDFLAGS -o build/cross/test_kntwcc_$arch.exe
+    # slice 5n: RFC 6184 depacketizer / AU assembler — pure logic
+    $CC $CFLAGS streamer/src/kn_h264rtp.c streamer/tests/test_knh264rtp.c \
+        $LDFLAGS -o build/cross/test_knh264rtp_$arch.exe
     # kndiag/knselftest/knvstd pull the full core; winmm for timeBeginPeriod,
     # d3d9 for kn_d3d (both are import archives — F1 -static accepts them)
     KCORE="streamer/src/knlog.c streamer/src/knring.c streamer/src/knfec.c \
@@ -213,6 +216,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_ogg.c streamer/src/kn_arx.c \
         streamer/src/kn_opus.c \
         streamer/src/kn_twcc.c \
+        streamer/src/kn_h264rtp.c \
         third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
     $CC $CFLAGS $KCORE streamer/tests/test_kndiag.c \
         $LDFLAGS -o build/cross/test_kndiag_$arch.exe -lwinmm -ld3d9 -lole32 \
