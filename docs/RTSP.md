@@ -6988,3 +6988,106 @@ ALL PASS with the grown knsock/knsdp counts).
 at 45 s.** That is a hole punched through the NAT with the seat's own
 blessing — everything B3 (DTLS-SRTP + media) needs on the other end of
 a live, mutually-validated socket pair.
+
+## 67. Slice 5e (B-TRACK): runB2b is READ — the 5d machinery works end to end (arm on the trickle, 7 checks at the exact doubling cadence, the seat's candidate parsed to the last field) and one bug ate the flight: `kn_sdp_candidate_parse` assembled `ip_be` MSB-first while every kn_sock caller uses `in_addr.s_addr` semantics — so BOTH draws punched at a byte-reversed address (`41.98.250.80` instead of `80.250.98.41`) into a black hole, and the suite stayed green because it asserted the parser against ITSELF. The fix is one function; the lesson is a test-design rule: **pin the contract BETWEEN modules, not each module's internal consistency.** Also measured: the draw-2 extra flags (`--input-anti-afk/--session-present/--session-audio-play/--session-release`) are PROVABLY inert in probe mode — `sess_webrtc_probe` returns and the queue loop breaks with `webrtc_answer_done` before the native pipeline is ever consulted
+
+### 67.1 The runB2b flights, measured (2026-11-03, two draws, Endfield, T10 after the rebuild: 0 FAIL)
+
+Draw 1 (10:21:36–10:24:09 UTC, seat `80.250.98.41`; the manifest still
+says `runB2a\2` — the operator reused the folder name, harmless) and
+draw 2 (10:26:07–10:28:40 UTC, seat `80.250.98.37`, the four extra
+flags). The summaries are the same class, and every 5d mechanism is
+visible working in production except the destination bytes:
+
+- `webrtc_stun_arm` fires on the trickle in both draws:
+  `typ:"srflx"`, `priority:1677721855`, foundation echoed
+  (`1467274095` / `1467232955`) — the candidate parser read the seat's
+  line correctly, including `raddr invalid rport 0`.
+- **Pacing exact:** `stun_out:7` inside a ~17.4 s linger = sends at
+  t ≈ 0 / 0.5 / 1.5 / 3.5 / 7.5 / 11.5 / 15.5 s — the 500 ms doubling
+  with the 4 s cap, to the tick.
+- `cert:"real"`, `acks_in:3`, `server_cands:1`, answer accepted — the
+  §66.1 contract behavior reproduced on two fresh seats.
+- `stun_resp_in:0`, `stun_answered:0`, `stun_bad:0`, `ice_ok:0`,
+  `mapped_ip:"-"`, and the WS died at `linger_ms` 17444 / 17308 — the
+  same `video.timeoutLengthMs:15000` kill as runB2a, because from the
+  seat's point of view NOTHING changed: it still received zero UDP.
+
+### 67.2 The bug — one convention, two modules, zero cross-tests
+
+The arm event prints `dest:"41.98.250.80:5004"` (draw 1) and
+`"37.98.250.80:5004"` (draw 2): the seat octets **reversed**. The 5d
+`sdp_ipv4_be` built the value MSB-first (`v = v<<8 | oct` →
+`0x50FA6229` for `80.250.98.41`), while `kn_sock_ipv4_parse` — the
+convention every kn_sock caller speaks — produces `in_addr.s_addr`
+semantics (`a | b<<8 | c<<16 | d<<24`, i.e. the octets sit in wire
+order in memory). Consequences, both fatal for the flight:
+
+1. `kn_sock_udp_connect`/`sendto` got the reversed u32 → the checks
+   flew to `41.98.250.80` / `37.98.250.80` — unallocated addresses,
+   black-holed.
+2. The reconnect pinned the socket's kernel filter to that wrong peer,
+   so even traffic from the real seat would have been dropped.
+
+**Why the suite was green:** `test_knsdp` asserted
+`c.ip_be == ((80u<<24)|(250u<<16)|(98u<<8)|36u)` — the parser checked
+against a constant written in the parser's OWN (wrong) convention.
+Self-consistent, useless. The invariant that matters — *the two
+modules agree on the wire format* — was untested, and the flight
+measured it instead. Test-design rule for the ledger: **when two
+modules share a representation, the test must link both and compare
+them directly.**
+
+### 67.3 Slice 5e — the fix and the guard that keeps it fixed
+
+- `kn_sdp.c`: `sdp_ipv4_be` now parses the four octets into a byte
+  array and `memcpy`s it into the u32 — endian-neutral, s_addr
+  semantics by construction, no kn_sock dependency added.
+- `test_knsdp.c` links `kn_sock` now and pins the invariant twice:
+  the real runB2a line (`ip_be == kn_sock_ipv4_parse("80.250.98.36")`)
+  and a six-address vector (`80.250.98.41` and `192.168.100.11` — the
+  exact two addresses runB2b reversed — plus `1.2.3.4`,
+  `255.255.255.255`, `0.0.0.0`, `8.8.8.8`). Either module drifting
+  from the other turns the suite red.
+- Build lines: `build_native_tests.sh` and `cross_check.sh` grow
+  `kn_sock.c + kn_sha1.c + sha1.c` (+ `-lws2_32` on the cross leg) for
+  `test_knsdp`; CMake links everything through `kncore` already —
+  untouched.
+- Gates: `test_knsdp` **102/0** (+2), `test_knsock` 124/0 (unchanged),
+  **NATIVE TESTS PASS** (26), **CROSS-CHECK PASS** (both arches,
+  `-Werror`), paranoid leg clean.
+
+### 67.4 The draw-2 flags question, answered with code
+
+`--input-anti-afk=60000 --session-present --session-audio-play
+--session-release` change NOTHING in answer-probe mode: on a WebRTC
+seat the queue loop calls `sess_webrtc_probe` and `break`s with
+`stop_reason:"webrtc_answer_done"` — the native pipeline those flags
+feed (present pump, audio play, anti-afk input, release path) is never
+consulted. Both draws' summaries confirm it empirically (same event
+class, same counters modulo the seat). Flying the minimal card
+(draw-1 params) keeps one variable per flight; the extra flags are
+harmless but noise.
+
+### 67.5 runB2c flight card (the §66.6 card, unchanged — now with the destination regression guard)
+
+Params: `--cm-profile=browser --webrtc-answer=45
+--session-queue-timeout=1500` (the minimal draw-1 set). Folder
+`runB2c`, draw 1, push `logs\runB2c\1\` to
+`karnyjohnny/karnynow-logs`. Rig rebuild REQUIRED (T10: expect
+`test_knsdp` 102).
+
+**PASS oracle = §66.6 verbatim, plus one new line-0 check:** the
+`webrtc_stun_arm` `dest` IP must string-match the IP inside the
+`webrtc_candidate` line of the same flight (e.g. candidate
+`… 80.250.98.x 5004 …` → `dest:"80.250.98.x:5004"`). A reversed
+dest is now caught by the operator in ten seconds, by the suite in
+zero.
+
+Everything else stands: `stun_out` ≥ 1; `webrtc_stun_resp`
+`inspect:1 mi:1` with `first_ms < 2000`; `webrtc_stun_ice_ok`;
+summary `mapped_ip` == the flight's CM `clientIp` (public);
+**WS alive at 45 s** (`linger_ms` ≈ 45000). FAIL branches: §66.6 —
+with the destination bug closed, `stun_resp_in:0` now genuinely means
+"our UDP does not reach the seat or the seat ignores it", and the next
+single variable would be the `clientBundlePort:49006` bind.

@@ -163,8 +163,11 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         $LDFLAGS -o build/cross/test_knws_$arch.exe
     $CC $CFLAGS streamer/src/kn_rtsp.c streamer/tests/test_knrtsp.c \
         $LDFLAGS -o build/cross/test_knrtsp_$arch.exe
-    $CC $CFLAGS streamer/src/kn_sdp.c streamer/tests/test_knsdp.c \
-        $LDFLAGS -o build/cross/test_knsdp_$arch.exe
+    $CC $CFLAGS streamer/src/kn_sdp.c streamer/src/kn_sock.c \
+        streamer/src/kn_sha1.c \
+        third_party/crypto-algorithms-sha1/sha1.c \
+        streamer/tests/test_knsdp.c \
+        $LDFLAGS -o build/cross/test_knsdp_$arch.exe -lws2_32
     $CC $CFLAGS streamer/src/kn_json.c streamer/src/kn_http.c \
         streamer/src/kn_cm.c streamer/tests/test_kncm.c \
         $LDFLAGS -o build/cross/test_kncm_$arch.exe

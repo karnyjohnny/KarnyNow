@@ -66,8 +66,13 @@ $CC $CFLAGS streamer/src/kn_sock.c streamer/src/kn_sha1.c \
 $CC $CFLAGS streamer/src/kn_ws.c streamer/src/kn_sha1.c \
     third_party/crypto-algorithms-sha1/sha1.c \
     streamer/tests/test_knws.c -o build/test_knws
-# B-track slice 5b: the SDP offer/answer/nvstSdp transformer suite
-$CC $CFLAGS streamer/src/kn_sdp.c \
+# B-track slice 5b: the SDP offer/answer/nvstSdp transformer suite.
+# Slice 5e: + kn_sock — the suite now pins candidate.ip_be against
+# kn_sock_ipv4_parse directly (the cross-module wire-convention
+# invariant that runB2b proved was missing).
+$CC $CFLAGS streamer/src/kn_sdp.c streamer/src/kn_sock.c \
+    streamer/src/kn_sha1.c \
+    third_party/crypto-algorithms-sha1/sha1.c \
     streamer/tests/test_knsdp.c -o build/test_knsdp
 $CC $CFLAGS streamer/src/kn_rtsp.c streamer/tests/test_knrtsp.c -o build/test_knrtsp
 $CC $CFLAGS streamer/src/kn_wire.c streamer/src/kn_sock.c \

@@ -561,28 +561,40 @@ int kn_sdp_candidate_host(const char *ip, unsigned port,
 
 /* ------------------------------------------------- candidate parse (5d) */
 
-/* Dotted-quad to a network-order u32 without pulling in kn_sock (this
- * module stays dependency-free): 1 on success. */
+/* Dotted-quad to the SAME network-order u32 kn_sock_ipv4_parse
+ * produces (in_addr.s_addr semantics: the octets sit in wire order in
+ * memory — on a little-endian host the FIRST octet is the LEAST
+ * significant byte of the value). No kn_sock dependency here (memcpy
+ * is endian-neutral by construction); test_knsdp links kn_sock and
+ * pins the cross-module agreement directly.
+ * Slice 5e: the 5d version assembled the value MSB-first — the exact
+ * opposite — and handed the ICE probe a byte-reversed destination:
+ * runB2b's checks flew to 41.98.250.80 / 37.98.250.80 instead of
+ * 80.250.98.41 / 80.250.98.37 (both draws: stun_out 7, stun_resp_in 0,
+ * killed at ~17.3 s exactly like runB2a). The suite was green because
+ * it asserted the parser against ITSELF; the untested invariant was
+ * the AGREEMENT between the two modules, and that is what the flight
+ * measured. */
 static int sdp_ipv4_be(const char *s, uint32_t *out)
 {
-    uint32_t v = 0;
-    int i, oct = 0, dig = 0;
+    uint8_t b[4];
+    int i;
     if (!s || !out) return 0;
     for (i = 0; i < 4; ++i) {
-        oct = 0; dig = 0;
+        int oct = 0, dig = 0;
         while (*s >= '0' && *s <= '9' && dig < 3) {
             oct = oct * 10 + (*s - '0');
             ++s; ++dig;
         }
         if (!dig || oct > 255) return 0;
-        v = (v << 8) | (uint32_t)oct;
+        b[i] = (uint8_t)oct;
         if (i < 3) {
             if (*s != '.') return 0;
             ++s;
         }
     }
     if (*s) return 0;                      /* trailing garbage */
-    *out = v;
+    memcpy(out, b, 4);                     /* s_addr semantics */
     return 1;
 }
 

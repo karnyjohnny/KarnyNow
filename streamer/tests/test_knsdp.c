@@ -8,6 +8,10 @@
  * video table, the bitrate ladder, the ri.* defaults). Section-isolated,
  * never aborts (round-XVI suite rule). */
 #include "kn/kn_sdp.h"
+#include "kn/kn_sock.h"   /* slice 5e: the cross-module invariant —
+                             candidate.ip_be MUST equal what
+                             kn_sock_ipv4_parse produces (runB2b's
+                             black-holed checks are the lesson) */
 #include "test_port.h"
 
 #include <string.h>
@@ -411,11 +415,42 @@ static void test_candidate_parse(void)
     CHECK(strcmp(c.foundation, "1467310487") == 0 && c.component == 1 &&
           strcmp(c.transport, "udp") == 0 && c.priority == 1677721855ull &&
           strcmp(c.ip, "80.250.98.36") == 0 &&
-          c.ip_be == ((80u << 24) | (250u << 16) | (98u << 8) | 36u) &&
           c.port == 5004u && strcmp(c.typ, "srflx") == 0,
-          "runB2a candidate fields exact (ip_be network-order)");
+          "runB2a candidate fields exact");
+    {   /* the invariant runB2b measured in production: the parser and
+         * kn_sock MUST produce the identical u32, or every datagram
+         * goes to a byte-reversed address */
+        uint32_t want = 0;
+        CHECK(kn_sock_ipv4_parse("80.250.98.36", &want) == 0 &&
+              c.ip_be == want,
+              "ip_be == kn_sock_ipv4_parse (s_addr semantics, the "
+              "cross-module invariant runB2b proved missing)");
+    }
     CHECK(strcmp(c.raddr, "invalid") == 0 && c.rport == 0,
           "the seat's literal \"raddr invalid rport 0\" is tolerated");
+
+    {   /* the agreement, as a vector: host LAN, the runB2b seat,
+         * edges */
+        static const char *ips[] = { "80.250.98.41", "192.168.100.11",
+                                     "1.2.3.4", "255.255.255.255",
+                                     "0.0.0.0", "8.8.8.8" };
+        size_t i;
+        int agree = 1;
+        for (i = 0; i < sizeof ips / sizeof ips[0]; ++i) {
+            char line[128];
+            uint32_t b = 0;
+            snprintf(line, sizeof line,
+                     "candidate:1 1 udp 100 %s 5004 typ host", ips[i]);
+            if (kn_sdp_candidate_parse(line, &c) != KN_SDP_OK ||
+                kn_sock_ipv4_parse(ips[i], &b) != 0 ||
+                c.ip_be != b) {
+                agree = 0;
+                break;
+            }
+        }
+        CHECK(agree, "ip_be == kn_sock_ipv4_parse over the address "
+              "vector (both modules, one wire convention)");
+    }
 
     /* our own candidate_host output round-trips */
     CHECK(kn_sdp_candidate_host("192.168.100.11", 50400, buf, sizeof buf)
