@@ -7091,3 +7091,95 @@ summary `mapped_ip` == the flight's CM `clientIp` (public);
 with the destination bug closed, `stun_resp_in:0` now genuinely means
 "our UDP does not reach the seat or the seat ignores it", and the next
 single variable would be the `clientBundlePort:49006` bind.
+
+## 68. Slice 5f (B-TRACK, docs-only): runB2c is a CLEAN PASS — **the 17-second ceiling is broken**: ICE hole-punched in BOTH directions (our check answered `inspect:1 mi:1` at 1556 ms; the seat sent 261 of its own checks, all answered, `mi_key:"ours"` confirming the recipient's-password rule in production), the WS lived the FULL 45 s window (`linger_ms:45019`, zero error frames), `stun_bad:0` — and `dtls_in:0` says the seat is now waiting for OUR ClientHello, which is exactly the B3 slice: `kn_dtls` (already a full DTLS 1.2 active client with the fingerprint pin, use_srtp negotiation and the EXTRACTOR-dtls_srtp export) gets wired into the probe's single-reader drain
+
+### 68.1 The runB2c readout (draw 1, 2026-11-03 12:04:55–12:08:01 local, Endfield, seat `80.250.98.41`, T10 before the flight: ALL PASS 89/0)
+
+The oracle of §66.6 + the §67.5 guard, line by line:
+
+| # | Oracle item | Measured | Verdict |
+|---|---|---|---|
+| 0 | arm dest == candidate IP (string) | candidate `80.250.98.41 5004 srflx` → `dest:"80.250.98.41:5004"` | **PASS** |
+| 1 | `webrtc_stun_arm` srflx, fast | arm on the trickle (~70 ms after the answer) | **PASS** |
+| 2 | `stun_out` ≥ 1 | 12 (3 punch + 9 consent at 5.05 s spacing — `n:11 t_ms:39462`, `n:12 t_ms:44508`) | **PASS** |
+| 3 | resp `inspect:1 mi:1`, `first_ms < 2000` | resp #1: `len:64 inspect:1 mi:1 first_ms:1556 src:80.250.98.41:5004` | **PASS** |
+| 4 | `ice_ok`, `mapped_ip` not-ours | `ice_ok:1`, `mapped:"10.222.254.7:62091"` (≠ LAN `192.168.100.11:52576` — IP **and** port translated) | **PASS** (see 68.2) |
+| 5 | WS alive at 45 s | `linger_ms:45019`, `frames_in:28`, no `rc:-2`, no error/bye, clean `webrtc_answer_done` + `cm_cancel 200` | **PASS** |
+| 6 | bonus: seat checks at us | `stun_in:261`, `stun_answered:261`, `mi_key:"ours"` | **PASS** |
+
+Counters: `acks_in:3`, `server_cands:1`, `stun_resp_in:43`,
+`stun_bad:0`, `dtls_in:0`, `other_in:0`, `cert:"real"`, wire dump 206
+records / 37 redactions. `exit_code:1` + `E_SESSION_NOT_READY` remain
+the by-design probe artifact.
+
+### 68.2 Two measured facts that rewrite oracle wording
+
+**`mapped_ip` is `10.222.254.7`, not the CM `clientIp`
+(`151.248.x.x`).** §66.6 expected the public address; the seat instead
+reports a source from RFC1918 10/8 with a translated port (62091 vs our
+52576). Read: between our router and the seat process there is at least
+one MORE NAT layer on NVIDIA's side (their media edge receives our
+public flow and re-NATs it into the seat's private netns). The oracle's
+INTENT — "the seat sees a translated address, not our LAN candidate" —
+is satisfied exactly: `10.222.254.7:62091` is neither `192.168.100.11`
+nor `52576`, and the pair validated in both directions. Corrected
+oracle for future cards: **mapped ≠ local (ip AND port), pair validated
+both ways** — the "public IP" expectation was my shorthand, falsified
+by their topology, not by our stack.
+
+**The seat over-answers: 43 SUCCESS responses to 12 of our checks**
+(every one `inspect:1 mi:1`, `stun_bad:0`). Its own request cadence at
+us is ~6/s (261 in ~44 s) — the pre-connection `pingInterval…Ms:500`
+duty from the offer's nvstSdp, now measured from the receiving end.
+None of this needs handling beyond what the drain already does; it is
+recorded because B3's liveness math should use the seat's real ~170 ms
+keepalive, not the 5 s consent figure.
+
+### 68.3 B2.5 CLOSED
+
+RunB2a died at 17.02 s with zero UDP exchanged; runB2c lived 45.0 s
+with mutually validated ICE — the ONLY variable changed was the
+destination bytes (5e's fix). The seat's `video.timeoutLengthMs:15000`
+is satisfied by a validated pair: the timer that killed three flight
+generations is disarmed. First time in project history a GFN connection
+survived past the server's ICE timeout. runB2c is the new baseline
+artifact (`karnyjohnny/karnynow-logs @ 606c15e`).
+
+### 68.4 Decision: B3 = DTLS-SRTP, and the stack already exists
+
+`dtls_in:0` + our answer's `setup:active` + the offer's `actpass`
+ice-lite ⇒ WE are the DTLS client and the seat waits for our
+ClientHello (the same gating nvst.rs uses: real inbound STUN first —
+we have 261 of them). The modules, all built and proven on the native
+track, cover the whole handshake:
+
+- **`kn_dtls`** (701 lines): DTLS 1.2 active client, mbedTLS backend,
+  INJECT-QUEUE BIO (the pump owns the socket and feeds
+  `kn_dtls_inject`; the module never recvs — exactly the probe drain's
+  single-reader discipline), fingerprint-PIN policy (verify callback,
+  `KN_DTLS_ERR_PIN` on mismatch), retransmission timers on
+  `kn_sock_now_ms`, **use_srtp negotiation** (`kn_dtls_srtp_profile`,
+  D-t9) and **`kn_dtls_srtp_export`** (F11: EXTRACTOR-dtls_srtp over
+  the captured master secret + randoms, out[60] with the server-write
+  key/salt halves for the receive direction).
+- **`kn_cert`**: real identity — the flight's `cert:"real"` proves the
+  mbedTLS backend is live in the rig build; the fingerprint that flew
+  in our answer is the one B3's handshake will present.
+- **`knsrtp` + `kn_rx`**: `kn_srtp_kdf128` over the exported server
+  half (RFC 3711 labels) feeds the existing video depacketizer
+  (H264 PTs 96/97 from the offer, already parsed by `kn_sdp`).
+
+B3's integration scope (next round's code): the pin from
+`kn_sdp_offer.fingerprint` (parsed, unused so far), ClientHello gated
+on `ice_ok`, DTLS-first-byte (20..63) demux in the drain → inject →
+poll → sendto, ready → `srtp_export` → kdf → first SRTP video packets
+counted/decoded. B4 then takes the SCTP datachannel (`kn_sctp`),
+input and the media heartbeat. The runB3a flight card ships with the
+B3 code — one variable: DTLS up, first media bytes seen.
+
+### 68.5 This round's shape
+
+Docs-only: no C changed (the gates stand at slice 5e's canon), the
+deliverable is the readout + the B3 decision. Patch
+`0004-slice-5f-runB2c-pass-b3-decision.patch`, base `327bb87`.
