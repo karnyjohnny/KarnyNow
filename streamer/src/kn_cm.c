@@ -527,6 +527,10 @@ int kn_cm_extract_session(const char *json_text, kn_cm_session *out)
             (void)jint(kn_json_get(&d, conn, "port"), &out->conn0_port);
             (void)jstr(&d, kn_json_get(&d, conn, "resourcePath"),
                        out->conn0_path, sizeof out->conn0_path);
+            /* B-track: the seat's signaling host (dashed-IP FQDN once
+             * the cloud assigns the rig; bare ".domain" while queued). */
+            (void)jstr(&d, kn_json_get(&d, conn, "ip"),
+                       out->conn0_ip, sizeof out->conn0_ip);
         }
         if (!out->have_rtsps &&
             conn_signaling(&d, conn, ep, sizeof ep,
@@ -799,7 +803,23 @@ static int cm_round(kn_http_io io, const char *method, const char *host,
     memset(auth, 0, sizeof auth);
     if (rc != KN_HTTP_OK) return rc;
     if (http_status) *http_status = resp.status;
-    if (resp.status != 200) return KN_HTTP_OK;    /* caller inspects */
+    if (resp.status != 200) {
+        /* Slice 5k (runB4b draws 1-3): a non-200 body still carries the
+         * cloud-side reason — the stale-token 500s embedded
+         * requestStatus.statusDescription "INTERNAL_ERROR_STATUS
+         * 8A910003" + statusCode 4 + unifiedErrorCode 0x8A910003 +
+         * serverId, yet cm_round returned before extraction and the
+         * caller's error line printed desc:"" cloud_status:0 (the
+         * diagnosis needed wire-dump forensics instead of one console
+         * read). kn_cm_extract_session fills requestStatus/status/
+         * errorCode BEFORE its hard sessionId gate, so a rejected
+         * payload still carries diagnostics; its -1 (no sessionId in a
+         * skeleton body) is expected here and deliberately ignored.
+         * Error path only — the 200 flow below is untouched. */
+        if (out && jsonbuf && jsonbuf[0] && !resp.truncated)
+            (void)kn_cm_extract_session(jsonbuf, out);
+        return KN_HTTP_OK;    /* caller inspects */
+    }
     if (!out) return KN_HTTP_OK;   /* DELETE: the body is not inspected */
     if (resp.truncated) return KN_HTTP_ERR_BIG;
     return kn_cm_extract_session(jsonbuf, out) == 0 ? KN_HTTP_OK
@@ -863,25 +883,40 @@ int kn_cm_cancel(kn_http_io io, const char *host, const char *base_path,
 }
 
 /* F36: the ad-report body — key order transcribed from the browser's own
- * IMA PUT in the R2 capture (gfn_ref_h2.json, stream 15):
- * adId, adAction, clientTimestamp, [cancelReason], watchedTimeInMs,
- * pausedTimeInMs, adDurationInMs. The outer envelope is the
- * reference's {"action":6,"adUpdates":[{...}]} (cloudmatch.rs
- * report_ad). clientTimestamp is UNIX SECONDS (capture: 1793523113). */
+ * IMA PUT in the R2 capture (gfn_ref_h2.json, stream 15) and re-verified
+ * against the 2026-11-02 web capture (h2_extracted.txt, bodies 1-9):
+ * adId, adAction, clientTimestamp, [eventName | cancelReason],
+ * watchedTimeInMs, pausedTimeInMs, adDurationInMs. The outer envelope is
+ * the reference's {"action":6,"adUpdates":[{...}]} (cloudmatch.rs
+ * report_ad). clientTimestamp is UNIX SECONDS (capture: 1793648745).
+ * B-track: adAction 6 (KN_CM_AD_EVENT) carries the IMA lifecycle
+ * eventName — LOADED, IMPRESSION, STARTED, FIRST_QUARTILE, MIDPOINT,
+ * THIRD_QUARTILE, COMPLETE — and is REJECTED without one; every other
+ * action ignores event_name. */
 int kn_cm_build_ad_body(const char *ad_id, int ad_action,
                         long long client_ts, long long watched_ms,
                         long long paused_ms, long long duration_ms,
-                        const char *cancel_reason,
+                        const char *cancel_reason, const char *event_name,
                         char *out, size_t outsz, size_t *out_len)
 {
     int n;
     if (!ad_id || !ad_id[0] || !out || !out_len) return KN_HTTP_ERR_ARGS;
-    if (ad_action < KN_CM_AD_START || ad_action > KN_CM_AD_CANCEL)
+    if (ad_action == KN_CM_AD_EVENT) {
+        if (!event_name || !event_name[0]) return KN_HTTP_ERR_ARGS;
+    } else if (ad_action < KN_CM_AD_START || ad_action > KN_CM_AD_CANCEL)
         return KN_HTTP_ERR_ARGS;
     if (watched_ms < 0) watched_ms = 0;
     if (paused_ms < 0) paused_ms = 0;
     if (duration_ms < 0) duration_ms = 0;
-    if (cancel_reason && cancel_reason[0])
+    if (ad_action == KN_CM_AD_EVENT)
+        n = snprintf(out, outsz,
+            "{\"action\":6,\"adUpdates\":[{"
+            "\"adId\":\"%.64s\",\"adAction\":%d,\"clientTimestamp\":%lld,"
+            "\"eventName\":\"%.32s\",\"watchedTimeInMs\":%lld,"
+            "\"pausedTimeInMs\":%lld,\"adDurationInMs\":%lld}]}",
+            ad_id, ad_action, client_ts, event_name,
+            watched_ms, paused_ms, duration_ms);
+    else if (cancel_reason && cancel_reason[0])
         n = snprintf(out, outsz,
             "{\"action\":6,\"adUpdates\":[{"
             "\"adId\":\"%.64s\",\"adAction\":%d,\"clientTimestamp\":%lld,"
@@ -907,6 +942,7 @@ int kn_cm_report_ad(kn_http_io io, const char *host, const char *base_path,
                     const char *ad_id,
                     int ad_action, long long watched_ms, long long paused_ms,
                     long long duration_ms, const char *cancel_reason,
+                    const char *event_name,
                     uint32_t timeout_ms,
                     uint64_t (*now_ms)(void *), void *now_ctx,
                     uint8_t *rxb, size_t rxbsz, char *jsonbuf,
@@ -919,7 +955,7 @@ int kn_cm_report_ad(kn_http_io io, const char *host, const char *base_path,
         return KN_HTTP_ERR_ARGS;
     if (kn_cm_build_ad_body(ad_id, ad_action, (long long)time(NULL),
                             watched_ms, paused_ms, duration_ms,
-                            cancel_reason, body, sizeof body,
+                            cancel_reason, event_name, body, sizeof body,
                             &blen) != KN_HTTP_OK)
         return KN_HTTP_ERR_ARGS;
     n = snprintf(path, sizeof path, "%sv2/session/%.64s",

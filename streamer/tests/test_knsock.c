@@ -430,6 +430,57 @@ static size_t hex2bin(const char *h, uint8_t *out, size_t outsz)
     return n;
 }
 
+/* Slice 5d: recvfrom must report the datagram's SOURCE (the ICE
+ * responder answers the address it actually saw — behind a NAT that is
+ * the mapped source, not the trickle candidate). */
+static void test_recvfrom_src(void)
+{
+    kn_sock_udp a, b;
+    char err[128];
+    uint8_t msg[8] = { 1, 2, 3, 4, 5, 6, 7, 8 }, rx[64];
+    size_t rl = 0;
+    int tr = 0;
+    uint32_t sip = 0;
+    uint16_t sport = 0;
+
+    printf("-- recvfrom source (slice 5d) --\n");
+    CHECK(kn_sock_udp_open(&a, "127.0.0.1", 0, 0, err, sizeof err)
+              == KN_SOCK_OK, "open A (ephemeral)");
+    CHECK(kn_sock_udp_open(&b, "127.0.0.1", 0, 0, err, sizeof err)
+              == KN_SOCK_OK, "open B (ephemeral)");
+    CHECK(kn_sock_udp_sendto(&a, LOOPBACK_IP, kn_sock_udp_port(&b),
+                             msg, sizeof msg) == KN_SOCK_OK,
+          "A -> B unconnected sendto");
+    CHECK(kn_sock_udp_recvfrom(&b, rx, sizeof rx, 500, &rl, &tr,
+                               &sip, &sport) == 1 && rl == 8 &&
+          memcmp(rx, msg, 8) == 0,
+          "B receives the datagram via recvfrom");
+    CHECK(sip == LOOPBACK_IP, "source ip = 127.0.0.1 (network order)");
+    CHECK(sport == kn_sock_udp_port(&a),
+          "source port = A's ephemeral port");
+    sip = 0xAA; sport = 1;
+    CHECK(kn_sock_udp_recvfrom(&b, rx, sizeof rx, 20, &rl, &tr,
+                               &sip, &sport) == 0 && sip == 0 && sport == 0,
+          "timeout: rc 0 and the source outputs zeroed");
+    CHECK(kn_sock_udp_sendto(&a, LOOPBACK_IP, kn_sock_udp_port(&b),
+                             msg, 4) == KN_SOCK_OK &&
+          kn_sock_udp_recv(&b, rx, sizeof rx, 500, &rl, &tr) == 1 &&
+          rl == 4 && memcmp(rx, msg, 4) == 0,
+          "the recv wrapper (NULL sources) still delivers");
+    {   /* a CONNECTED socket reports its pinned peer as the source */
+        uint32_t dip = 0;
+        CHECK(kn_sock_udp_connect(&a, LOOPBACK_IP, kn_sock_udp_port(&b))
+                  == KN_SOCK_OK, "connect A -> B");
+        CHECK(kn_sock_udp_sendto(&a, dip, 0, msg, 5) == KN_SOCK_OK &&
+              kn_sock_udp_recvfrom(&b, rx, sizeof rx, 500, &rl, &tr,
+                                   &sip, &sport) == 1 && rl == 5 &&
+              sip == LOOPBACK_IP && sport == kn_sock_udp_port(&a),
+              "connected send + recvfrom: source = the connected peer");
+    }
+    kn_sock_udp_close(&a);
+    kn_sock_udp_close(&b);
+}
+
 static void test_stun(void)
 {
     static const char k_req[] =
@@ -540,6 +591,128 @@ static void test_stun(void)
               "inspect rejects the broken FINGERPRINT");
     }
 
+    {   /* Slice 5d: the N-attribute builder — a FULL RFC 8445 ICE
+         * connectivity check (USERNAME + PRIORITY + USE-CANDIDATE +
+         * ICE-CONTROLLING), the shape the /nvst/ seat validates. The
+         * golden came from the independent Python reference AFTER it
+         * reproduced k_req/k_nom/k_succ byte-exact (self-proven first
+         * rule). Key = the server password in production; tid 00..0b;
+         * USERNAME "9adb3d56:m0DD" = runB2a's server ufrag : a 5b-shape
+         * client ufrag; PRIORITY 2122260223 = the candidate_host value;
+         * tie-breaker 0011223344556677. */
+        static const char k_ice[] =
+            "0001004c2112a442000102030405060708090a0b0006000d396164623364"
+            "35363a6d304444000000002400047e7f1eff0025000080290008001122"
+            "334455667700080014fa8ceeab64123d593e4007e9725f11f9b5edc01a"
+            "8028000497fb3c1a";
+        static const uint8_t k_pri[] = { 0x7E, 0x7F, 0x1E, 0xFF };
+        static const uint8_t k_tb[]  = { 0x00, 0x11, 0x22, 0x33,
+                                         0x44, 0x55, 0x66, 0x77 };
+        static const uint8_t k_ufrag[] = "9adb3d56:m0DD";
+        kn_sock_stun_attr at[4];
+        elen = hex2bin(k_ice, expect, sizeof expect);
+        CHECK(elen == 96, "ICE-check golden decodes to 96 bytes");
+        at[0].type = KN_SOCK_STUN_ATTR_USERNAME;
+        at[0].val = k_ufrag; at[0].len = sizeof k_ufrag - 1;
+        at[1].type = KN_SOCK_STUN_ATTR_PRIORITY;
+        at[1].val = k_pri; at[1].len = 4u;
+        at[2].type = KN_SOCK_STUN_ATTR_USE_CANDIDATE;
+        at[2].val = NULL; at[2].len = 0u;
+        at[3].type = KN_SOCK_STUN_ATTR_ICE_CONTROLLING;
+        at[3].val = k_tb; at[3].len = 8u;
+        rc = kn_sock_stun_buildn(pkt, sizeof pkt, &plen,
+                                 KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                 k_key, sizeof k_key - 1, at, 4u);
+        CHECK(rc == KN_SOCK_OK && plen == elen &&
+              memcmp(pkt, expect, plen) == 0,
+              "buildn's 4-attribute ICE check is byte-exact vs the "
+              "independent golden (order, padding, MI, FP)");
+        CHECK(kn_sock_stun_inspect(pkt, plen, &mtype, tid2, user,
+                                   sizeof user, &ulen, NULL, NULL) == 1 &&
+              mtype == KN_SOCK_STUN_BINDING_REQUEST &&
+              memcmp(tid2, tid, 12) == 0 &&
+              ulen == sizeof k_ufrag - 1 &&
+              strcmp(user, "9adb3d56:m0DD") == 0,
+              "inspect round-trips the 4-attribute check");
+        CHECK(kn_sock_stun_check_integrity(pkt, plen, k_key,
+                                           sizeof k_key - 1) == 1 &&
+              kn_sock_stun_check_integrity(pkt, plen,
+                                           (const uint8_t *)"nope",
+                                           4) == 0,
+              "ICE-check integrity: right key passes, wrong key fails");
+        {   /* build2 (now a buildn delegator) must stay byte-identical
+             * to the equivalent explicit attr list */
+            uint8_t p2[KN_SOCK_STUN_MAX_PKT];
+            size_t l2 = 0;
+            kn_sock_stun_attr two[2];
+            two[0].type = KN_SOCK_STUN_ATTR_USERNAME;
+            two[0].val = k_user; two[0].len = sizeof k_user - 1;
+            two[1].type = KN_SOCK_STUN_ATTR_USE_CANDIDATE;
+            two[1].val = NULL; two[1].len = 0u;
+            CHECK(kn_sock_stun_build2(pkt, sizeof pkt, &plen,
+                                      KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                      k_key, sizeof k_key - 1,
+                                      KN_SOCK_STUN_ATTR_USERNAME, k_user,
+                                      sizeof k_user - 1,
+                                      KN_SOCK_STUN_ATTR_USE_CANDIDATE,
+                                      NULL, 0) == KN_SOCK_OK &&
+                  kn_sock_stun_buildn(p2, sizeof p2, &l2,
+                                      KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                      k_key, sizeof k_key - 1,
+                                      two, 2u) == KN_SOCK_OK &&
+                  plen == l2 && memcmp(pkt, p2, plen) == 0,
+                  "build2 == buildn for the same attribute list");
+        }
+        CHECK(kn_sock_stun_buildn(pkt, sizeof pkt, &plen,
+                                  KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                  k_key, sizeof k_key - 1, at,
+                                  KN_SOCK_STUN_MAX_ATTRS + 1u)
+                  == KN_SOCK_ERR_ARGS,
+              "buildn rejects nattrs > KN_SOCK_STUN_MAX_ATTRS");
+        CHECK(kn_sock_stun_buildn(pkt, sizeof pkt, &plen,
+                                  KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                  k_key, sizeof k_key - 1, NULL, 4u)
+                  == KN_SOCK_ERR_ARGS,
+              "buildn rejects NULL attrs with nattrs > 0");
+        at[0].type = 0;
+        CHECK(kn_sock_stun_buildn(pkt, sizeof pkt, &plen,
+                                  KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                  k_key, sizeof k_key - 1, at, 4u)
+                  == KN_SOCK_ERR_ARGS,
+              "buildn rejects attribute type 0");
+        at[0].type = KN_SOCK_STUN_ATTR_USERNAME;
+        at[1].val = NULL;
+        CHECK(kn_sock_stun_buildn(pkt, sizeof pkt, &plen,
+                                  KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                  k_key, sizeof k_key - 1, at, 4u)
+                  == KN_SOCK_ERR_ARGS,
+              "buildn rejects a NULL val with len > 0");
+        at[1].val = k_pri;
+        CHECK(kn_sock_stun_buildn(pkt, 40, &plen,
+                                  KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                  k_key, sizeof k_key - 1, at, 4u)
+                  == KN_SOCK_ERR_ARGS,
+              "buildn refuses an undersized buffer");
+        CHECK(kn_sock_stun_buildn(pkt, sizeof pkt, &plen,
+                                  KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                  k_key, sizeof k_key - 1, NULL,
+                                  0u) == KN_SOCK_OK && plen == 52u &&
+              kn_sock_stun_check_integrity(pkt, plen, k_key,
+                                           sizeof k_key - 1) == 1,
+              "buildn with zero attributes: header+MI+FP = 52 bytes");
+        /* restore pkt/plen to the nominated request for the rest of
+         * the section (the xor/success goldens below rebuild anyway,
+         * but the tamper case above must stay reproducible) */
+        CHECK(kn_sock_stun_build2(pkt, sizeof pkt, &plen,
+                                  KN_SOCK_STUN_BINDING_REQUEST, tid,
+                                  k_key, sizeof k_key - 1,
+                                  KN_SOCK_STUN_ATTR_USERNAME, k_user,
+                                  sizeof k_user - 1,
+                                  KN_SOCK_STUN_ATTR_USE_CANDIDATE, NULL,
+                                  0) == KN_SOCK_OK,
+              "rebuild the nominated packet (section state restored)");
+    }
+
     CHECK(kn_sock_ipv4_parse("8.8.8.8", &ip) == 0 &&
           kn_sock_stun_xor_addr_v4(ip, 5004, xa) == KN_SOCK_OK &&
           hex2bin("0001329e291aac4a", expect, 8) == 8 &&
@@ -601,6 +774,7 @@ int main(void)
     test_truncation();
     test_bad_args();
     test_connect();
+    test_recvfrom_src();
     test_stun();
     return kn_test_summary("test_knsock");
 }

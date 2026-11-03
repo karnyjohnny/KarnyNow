@@ -80,3 +80,8 @@ dist/
 .DS_Store
 *.sqlite3
 *.patch
+/patch/
+login.md
+*.zip
+tools/wiretap/token.txt
+tools/wiretap/wiretap.lnk

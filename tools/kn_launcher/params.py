@@ -22,7 +22,16 @@
 
 from __future__ import annotations
 
-DEFAULT_PARAMS = ("--session-seconds=1200 --input-anti-afk=60000 "
+# Slice 5c: the B-track pair is pre-typed so the operator never retypes
+# it per flight — --cm-profile=browser (the web-client identity, the
+# pivot the user chose) and --webrtc-answer=45 (the B2 probe: answer +
+# nvstSdp + host candidate for real, then 45 s of server observation,
+# RTSP §65.6). --session-queue-timeout=1500 matches the flight card
+# (runB1–B3 queued 100–140 s; knvstd's own default is 600). The
+# native-era recipe stays behind it — edit the box per flight.
+DEFAULT_PARAMS = ("--cm-profile=browser --webrtc-answer=45 "
+                  "--session-queue-timeout=1500 "
+                  "--session-seconds=1200 --input-anti-afk=60000 "
                   "--session-present --session-audio-play "
                   "--session-release --session-interactive")
 

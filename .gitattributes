@@ -1,0 +1,5 @@
+# launcher.bat must reach cmd.exe with CRLF line endings (Win7).
+# Without this, git am strips the trailing CR as "trailing whitespace"
+# and cross-platform checkouts are luck-based. Scoped to THIS file so
+# the pre-existing tools/wiretap/*.bat blobs stay untouched.
+/launcher.bat text eol=crlf

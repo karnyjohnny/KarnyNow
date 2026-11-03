@@ -153,6 +153,20 @@ int  kn_sock_udp_recv(kn_sock_udp *s, uint8_t *buf, size_t cap,
                       uint32_t timeout_ms, size_t *out_len,
                       int *out_truncated);
 
+/* recv + the datagram's SOURCE address (slice 5d: an ICE responder must
+ * answer the server's checks at the address they actually came from —
+ * with a NAT in between that is the mapped address, not the trickle
+ * candidate). src_ip_be gets the network-order u32 (the form the parse
+ * helpers use), src_port the host-order port; both may be NULL and are
+ * 0-initialized when given. Same return contract as kn_sock_udp_recv
+ * (which is exactly this call with NULL source outputs). On a CONNECTED
+ * socket the kernel filter already pins the source; the outputs then
+ * simply report the connected peer. */
+int  kn_sock_udp_recvfrom(kn_sock_udp *s, uint8_t *buf, size_t cap,
+                          uint32_t timeout_ms, size_t *out_len,
+                          int *out_truncated,
+                          uint32_t *src_ip_be, uint16_t *src_port);
+
 /* Send one datagram to ipv4:port (addr in the network-order u32 form the
  * parse helper produces). Returns KN_SOCK_OK / KN_SOCK_ERR_*. Used by the
  * loopback tests today and by the stage-2 RTCP/ping senders later. */
@@ -193,6 +207,12 @@ enum {
     KN_SOCK_STUN_ATTR_USERNAME        = 0x0006,
     KN_SOCK_STUN_ATTR_MESSAGE_INTEGRITY = 0x0008,
     KN_SOCK_STUN_ATTR_XOR_MAPPED_ADDRESS = 0x0020,
+    /* Slice 5d (B2.5): the RFC 8445 connectivity-check attributes the
+     * /nvst/ seat needs — PRIORITY (4-byte big-endian preference) and
+     * ICE-CONTROLLING (8-byte random tie-breaker). The native rig never
+     * asked for them (its burst is a bare USERNAME check); an ice-lite
+     * WebRTC seat validates a proper ICE Binding Request. */
+    KN_SOCK_STUN_ATTR_PRIORITY        = 0x0024,
     /* RFC 8445 §5.2: the controlling agent's nomination flag — zero
      * length. Round XXXIV (run 15's verdict): the reference runs
      * str0m's ICE agent alongside the hand-built bursts (nvst.rs:8652
@@ -201,7 +221,8 @@ enum {
      * valid pair — the rig may gate its data plane on the nomination
      * (deviation D-t8 retires D-t1). */
     KN_SOCK_STUN_ATTR_USE_CANDIDATE   = 0x0025,
-    KN_SOCK_STUN_ATTR_FINGERPRINT     = 0x8028
+    KN_SOCK_STUN_ATTR_FINGERPRINT     = 0x8028,
+    KN_SOCK_STUN_ATTR_ICE_CONTROLLING = 0x8029
 };
 
 /* CRC-32 (IEEE 802.3 reflected — the crc32fast the reference uses) for
@@ -231,6 +252,31 @@ int kn_sock_stun_build2(uint8_t *out, size_t outsz, size_t *outlen,
                         size_t attr1len,
                         uint16_t attr2_type, const uint8_t *attr2,
                         size_t attr2len);
+
+/* Slice 5d: the general N-attribute builder build2 delegates to (build
+ * and build2 keep their exact wire behavior — the round-XXV/XXXIV
+ * goldens pin it). One RFC 8445 connectivity check needs THREE
+ * attributes (USERNAME + PRIORITY + ICE-CONTROLLING, plus the zero-
+ * length USE-CANDIDATE), which build2's two slots cannot carry.
+ * Attributes are written in array order, each padded to a 4-byte
+ * boundary; MESSAGE-INTEGRITY (HMAC-SHA1, length pre-adjusted to the
+ * MI end) and FINGERPRINT (CRC-32 ^ 0x5354554E) are appended exactly
+ * as in build2. Every attr.type must be nonzero; a zero-length value
+ * (USE-CANDIDATE) passes val=NULL, len=0. Returns KN_SOCK_OK /
+ * KN_SOCK_ERR_ARGS (bad pointers, nattrs > KN_SOCK_STUN_MAX_ATTRS,
+ * oversize result). */
+#define KN_SOCK_STUN_MAX_ATTRS 8
+
+typedef struct kn_sock_stun_attr {
+    uint16_t       type;
+    const uint8_t *val;         /* NULL allowed only when len == 0 */
+    size_t         len;
+} kn_sock_stun_attr;
+
+int kn_sock_stun_buildn(uint8_t *out, size_t outsz, size_t *outlen,
+                        uint16_t msg_type, const uint8_t tid[12],
+                        const uint8_t *key, size_t keylen,
+                        const kn_sock_stun_attr *attrs, unsigned nattrs);
 
 /* The XOR-MAPPED-ADDRESS value for an IPv4 source (family 1): 8 bytes,
  * port XOR (cookie>>16), octets XOR the cookie. */

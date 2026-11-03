@@ -129,12 +129,14 @@ typedef struct kn_ws_client {
 
 /* Run the opening handshake over io. host/port are used ONLY for the
  * Host: header text (the transport is already connected — the seam owns
- * DNS/TCP/TLS). path e.g. "/rtsp". extra_headers: pre-formatted lines
- * EACH ending in \r\n (may be NULL). msgbuf/msgcap: the reassembly
- * buffer (>= the largest expected message; kn_rtsp uses 4 MiB + slack).
- * timeout_ms bounds every transport wait during the handshake.
- * Returns KN_WS_OK or a negative code (last_error set; err/errsz get a
- * one-line human reason). */
+ * DNS/TCP/TLS); port 0 OMITS the port from Host (the browser rule for a
+ * scheme-default port — the B-track /nvst/ probe on :443 sends a bare
+ * "Host: <dashed-seat-fqdn>"). path e.g. "/rtsp". extra_headers:
+ * pre-formatted lines EACH ending in \r\n (may be NULL). msgbuf/msgcap:
+ * the reassembly buffer (>= the largest expected message; kn_rtsp uses
+ * 4 MiB + slack). timeout_ms bounds every transport wait during the
+ * handshake. Returns KN_WS_OK or a negative code (last_error set;
+ * err/errsz get a one-line human reason). */
 int kn_ws_client_open(kn_ws_client *c, kn_ws_io io, const char *host,
                       uint16_t port, const char *path,
                       const char *extra_headers, uint32_t timeout_ms,

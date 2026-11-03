@@ -48,6 +48,7 @@ add_library(kncore STATIC
   streamer/src/kn_sock.c
   streamer/src/kn_ws.c
   streamer/src/kn_rtsp.c
+  streamer/src/kn_sdp.c
   streamer/src/kn_json.c
   streamer/src/kn_http.c
   streamer/src/kn_cm.c

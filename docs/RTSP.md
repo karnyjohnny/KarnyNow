@@ -6123,3 +6123,1853 @@ tests are the spine, which log fields decide, the current state of knowledge, th
 protocol, the dead ends) — `README.md`'s documentation map now lists both. C sources
 untouched: the 4r gate results stand (`CROSS-CHECK PASS` ×2, `NATIVE TESTS PASS` 25
 suites, skeleton 113 == 113 ×2, `test_launcher` 156/0).
+
+## 64. Slice 5a (B-TRACK): THE BROWSER PIVOT — the native bisect is closed inconclusive-because-universal, the 2026-11-02 web-client capture + OpenNOW's WebRTC module together spec the /nvst/ path END TO END, and B1 ships the ad-eventName sequence + the WebRTC-seat signaling probe
+
+### 64.1 The verdict that closes the native track
+
+Every bisect build died the same death: `a339b52`, `0c63a49`, `9409213`,
+`ee75d37` and HEAD all reached the full native contract — RTSP
+OPTIONS/DESCRIBE/SETUP/ANNOUNCE 200 (SDP 4137 B), ctrl burst at
+828–853 ms (`020e` input-version + `0111` + 6× `010a` Serenity),
+`sctp_channels opened:8 acked:8`, PLAY 200, `dtls_ready` in 739 ms —
+and then the rig's `0x0101` heartbeat logged **0–5 beats** and the
+client died `ctrl_dead`/`recovery_exhausted` at 13–20 s. The r46
+keeper rebuild (run 200) flew 87.3 s vs its own 1020 s history with a
+per-second-identical wire (confound named in §63: that build had no
+FFmpeg). The heartbeat oracle (§63) reads: keeper 1001 beats, run 200
+73, bisect builds 0–2. **A bisect in which every candidate is dead
+measures nothing** — the variable is the server's native-seat contract,
+not our history. Operator decision (2026-11-02): thick line, fly the
+browser path — the official web client played a FULL HOUR on the same
+account, laptop and network the same evening the native builds died in
+under 20 s.
+
+### 64.2 The web-client capture (`priv-logs/gfn_ref_out/`) — what it proves
+
+Session `62c3f40e-664d-410d-9c2f-82b576cb34ca`, Chrome 109 (F35
+identity), client 2.0.89.154, origin play.geforcenow.com, 19:45 UTC.
+Extraction: `gfn_ref_out/h2_extracted.txt` (all 55 H2 connections,
+time-ordered headers+bodies, built from `gfn_ref_h2.json`).
+
+1. **CREATE** `POST eu-poland.cloudmatchbeta…/v2/session?keyboardLayout=en-US&languageCode=pl_PL`
+   with `nv-client-streamer: WEBRTC`, `nv-client-type: BROWSER`,
+   `nv-browser-type: CHROME`; body `appId 107057914, clientPlatformName
+   "browser", sdkVersion "1.0", streamerVersion 1, secureRTSPSupported
+   false, enhancedStreamMode 1, appLaunchMode 1, profile 1, userAge 34,
+   monitor 1280×800@60, metaData 8 incl. GSStreamerType WebRTC`.
+   **Field-identical to `kn_cm.c`'s F35 profile-1 builder — the create
+   leg needs zero work** (measured, not assumed: field-by-field diff
+   against the captured body).
+2. **CREATE RESP**: `status 1, sessionAdsRequired true,
+   queuePosition 0/eta 30000, connectionInfo [{protocol 1, usage 14,
+   appLevelProtocol 5, port 443, resourcePath "/nvst/"}]` — the exact
+   seat F37's `conn_unusable` fail-fast rejects. While queued the
+   entry's `ip` is `".cloudmatchbeta.nvidiagrid.net"` (empty label);
+   at seat time it becomes the **dashed-IP signaling host**
+   `"80-250-97-39.cloudmatchbeta.nvidiagrid.net"`.
+3. **THE AD GATE, complete protocol** (nine `PUT /v2/session/<sid>` on
+   the control host, bodies verbatim in `h2_extracted.txt`):
+   `sessionAds {adId a4dca4e4-…, adState 1, adLengthInSeconds 120,
+   adUrl pubads.g.doubleclick.net/gampad/ads (xml_vast4,
+   iu=/23368951970/gfn_video_preroll, cust_params mtier=FREE)}`;
+   queuePosition 173→0 during the ad; adState 1→2. The nine bodies —
+   every one `{"action":6,"adUpdates":[{…}]}` with key order `adId,
+   adAction, clientTimestamp (UNIX s), [eventName], watchedTimeInMs,
+   pausedTimeInMs, adDurationInMs`:
+
+   | # | adAction | eventName | clientTimestamp | watchedTimeInMs |
+   |---|----------|-----------|-----------------|-----------------|
+   | 1 | 6 | LOADED | 1793648745 | 0 |
+   | 2 | 1 | — | 1793648745 | 0 |
+   | 3 | 6 | IMPRESSION | 1793648747 | 0 |
+   | 4 | 6 | STARTED | 1793648747 | 0 |
+   | 5 | 6 | FIRST_QUARTILE | 1793648773 | 26017 |
+   | 6 | 6 | MIDPOINT | 1793648796 | 48696 |
+   | 7 | 6 | THIRD_QUARTILE | 1793648818 | 71136 |
+   | 8 | 6 | COMPLETE | 1793648841 | 93667 |
+   | 9 | 4 | — | 1793648841 | 93715 |
+
+   **`adDurationInMs` is 90000 in ALL nine while the seat's
+   `adLengthInSeconds` said 120** — the browser reports the VAST
+   creative's own `<Duration>`, not the session field. Wall time
+   LOADED→finish ≈ 96 s; the seat was assigned right after body 9.
+   The VAST URL itself was fetched 9× by the browser (IMA tracker
+   pattern). Our a339b52 cancel-only path was also ACCEPTED (3× HTTP
+   200, queue advanced) — cancel remains the proven no-fill escape.
+4. **WS wire form** (`gfn_ref_urls.txt`):
+   `wss://80-250-97-39.cloudmatchbeta.nvidiagrid.net/nvst/sign_in?peer_id=peer-7905084000&version=3.0&peer_role=1&pairing_id=<sid>`
+   and a `&reconnect=1` variant later in the session. Media UDP flowed
+   from `80.250.97.39:5004` (netlog: ~910 pps inbound, prflx/srflx —
+   no TURN).
+5. **Netlog limits (measured)**: WS frames are HEADER-ONLY (65 recv
+   text 8–13 B every ~2 s = the hb/ack cadence; 25 sent binary
+   15–18 KB every ~5 s = a telemetry stream), UDP events carry byte
+   counts only, window 81 s. **No dump contains the SDP exchange** —
+   that gap is what §64.3 closes from the reference.
+6. **Media map** (`event_log_20261102_2057_5_4.log`, 169 783 events /
+   181.4 s + `webrtc_internals_dump.txt`): video H264 **PT 96 SSRC 2**
+   (42001f, pkt-mode 1, max-br 15360k, ~500 pps ≈ 4.1 Mbps, loss
+   ~1.1%), RTX PT 98 SSRC 4 + PT 97 SSRC 3; audio SSRC 1 ~98 pps
+   ~744 kbps 5.1 (wire PT 63 vs stats "opus 111" — likely RED
+   wrapping; no SDP to settle it, B3 must sniff the first packets);
+   mic Opus 111; RTCP TWCC both directions; RTT 31–302 ms;
+   `rtcConfiguration {iceServers: [], bundlePolicy balanced,
+   rtcpMuxPolicy require}`.
+
+### 64.3 OpenNOW @ `1cb3479` — the WebRTC reference, module by module
+
+OpenNOW (github.com/OpenCloudGaming/OpenNOW, the same commit §59.2
+already cites for cloudmatch) ships a working GFN WebRTC client:
+`native/opennow-streamer/crates/opennow-streamer-core/src/webrtc/`
+(`mod.rs` 818 ln, `signaling.rs` 470 ln, `sdp.rs` 210 ln, `input.rs`,
+`video_attributes.sdp`) + `opennow-streamer-transport/src/webrtc/`
+(`mod.rs`, `input.rs`, `stats.rs`). Reference copies:
+**`priv-logs/gfn_ref_out/opennow_webrtc_ref/`** (nine files). Read
+like nvst.rs was read: port the SEMANTICS to C with KATs, never run it
+(Win7 can't).
+
+**Signaling (signaling.rs) — the complete /nvst/ WS protocol:**
+
+1. URL: `wss://{conn.ip}{resourcePath}sign_in?peer_id=peer-{…}&version={v}&peer_role=1&pairing_id={sessionId}`;
+   OpenNOW: fresh `v=2` with a 24-hex peer id, reconnect `v=3.0` +
+   `&reconnect=1`. Today's browser capture used `v=3.0` fresh with a
+   10-digit peer id — **both forms work against today's fleet; B1 flies
+   the capture's** (`peer-%010llu` from CSPRNG, version=3.0).
+   `signalingUrl` must be explicit, wss, credential-free; path gets
+   `/sign_in` appended if absent.
+2. Handshake headers: `Origin: https://play.geforcenow.com`,
+   `User-Agent: Mozilla/5.0 … Chrome/…`, **`Sec-WebSocket-Protocol:
+   x-nv-sessionid.{sessionId}`** (the subprotocol IS the session
+   binding — not a plain header like the rtsps leg).
+3. First client frame: `{"ackid":1,"peer_info":{"browser":"Chrome",
+   "browserVersion":"131","connected":true,"id":0,"name":"peer-…",
+   "peerRole":0,"resolution":"WxH","version":2}}`. The server echoes a
+   peer_info with OUR name and the assigned numeric id — learn it by
+   name match.
+4. Ack duty: every inbound packet with an `ackid` that is not our own
+   peer_info echo gets `{"ack":N}`.
+5. Heartbeat: client sends `{"hb":1}` every **5 s**; an inbound
+   non-zero `{"hb":N}` is answered `{"hb":1}` and otherwise ignored.
+6. Payload envelope: `{"ackid":N,"peer_msg":{"from":F,"to":T,
+   "msg":"<JSON-encoded string>"}}` — the inner message is a STRING.
+   Inner types: server `{"type":"offer","sdp":"…"}` (≤256 KiB),
+   trickle `{"candidate":"…","sdpMid":…,"sdpMLineIndex":…}` (≤64,
+   both directions), literal `"BYE"` closes; client answers
+   `{"type":"answer","sdp":<webrtc answer>,"nvstSdp":<NVIDIA blob>}`
+   then its own local candidate JSON.
+7. `{"error":"peerRemoved"}` → session over; any other non-null
+   `error` → rejection.
+
+**The flow is SERVER-offers / CLIENT-answers** (`negotiate(offer_sdp,…)`
+in core `mod.rs`): connect WS → peer_info → wait ≤20 s for the offer
+(collecting pre-offer candidates) → build the answer → send
+answer+nvstSdp → send local candidate → add remote candidates →
+media. Candidates may ALSO ride inside the offer SDP as `a=candidate:`
+lines (`normalize_offer` rewrites them, cap 64, relay-only refused —
+there is no TURN on this path, matching the capture's prflx/srflx).
+
+**nvstSdp (sdp.rs) — the NVIDIA-proprietary answer blob** sent
+alongside the standard WebRTC answer: `v=0` / `o=SdpTest test_id_13 14
+IN IPv4 127.0.0.1` / `s=-` / `t=0 0`, then
+`a=general.icePassword`, `a=general.iceUserNameFragment`,
+`a=general.dtlsFingerprint` (sha-256, colon-hex) **taken from our WebRTC
+answer**, then the fixed `video_attributes.sdp` block (~70 lines:
+`m=video 0 RTP/AVP`, `a=msid:fbc-video-0`, vqos/fec/qpg/aq/
+framePacing/packetPacing/nack-queue/bitrate-estimation attributes),
+then `a=video.framePacing.pid.minTargetFrameTimeUs:{950000/fps}`,
+fps>60 and fps≥240 add-ons, `a=packetPacing.numGroups:{120fps?3:5}`,
+viewport/bitrate block (`clientViewportWd/Ht`, `maxFPS`, `bitDepth`,
+`initialBitrateKbps`=clamp-derived, `vqos.bw.{maximum,minimum,peak,
+serverPeak}BitrateKbps` + `vqos.grc.maximumBitrateKbps` from the
+configured kbps: `max=clamp(kbps,1000,200000)`, `min=max.min(5000)`,
+`initial=min.max(max/4)`), then `m=audio 0 RTP/AVP` + `a=msid:audio`,
+then `m=application 0 RTP/AVP` + `a=msid:input_1` +
+`a=ri.partialReliableThresholdMs:{from offer, default 30}`,
+`a=ri.hidDeviceMask:{from offer, default 0xffffffff}`,
+`a=ri.enablePartiallyReliableTransferGamepad:{offer, default 15}`,
+`a=ri.enablePartiallyReliableTransferHid:{offer, default hidMask}`.
+**This is the same attribute language as our native ANNOUNCE SDP** —
+`kn_rtsp.c`'s table is the porting source for the video block.
+
+**Transport (transport/webrtc/) — the session plane:**
+
+- Codecs: opus always; H264 offered as PT 96 (42002a) / 98 (42e02a) /
+  100 (4d002a) / 102 (64002a), or H265 Main/Main10 — codec chosen from
+  the negotiated stream profile, SDR only. (The capture's rig sent
+  42001f on PT 96 — the answer must reflect the OFFER's payload types
+  and profile-level-as, not a fixed table.)
+- **Client-created data channels** (DCEP): `stats_channel`
+  (unordered, maxRetransmits 0), `input_channel_v1` (ordered,
+  reliable), `input_channel_partially_reliable` (unordered,
+  maxPacketLifetime = the offer's `ri.partialReliableThresholdMs`,
+  default 30 ms). The server's `control_channel`/`remote_trace_channel`
+  (§50–51) arrive as inbound DCEP.
+- **Input handshake**: the server sends on `input_channel_v1`
+  `0e 02 03 00` (LE u16 526 = our old friend **0x020e**, then version
+  u16 LE = 3; legacy `0e 02` = v2, `0e 03` = 0x030e). Ready = both
+  input channels open + handshake seen. (The 5-byte `0e 02 03 00 00`
+  of §50–51 is the same packet with a trailing byte — accept ≥4.)
+- **Input encoding**: body = kind u32 LE + fixed payload (2→4 B,
+  3|4|8|9→18 B, 5→26 B, 7|10→22 B, 12→38 B, 13→6 B, 19→5 B; anything
+  else refused). Handshake version ≥3 wraps every body EXCEPT kind 2:
+  `0x23` + µs-since-handshake u64 **BE** + `0x21` (batched kinds
+  5|7|12: + length u16 BE + body) or `0x22` (single: + body).
+- **LIVENESS = `[2,0,0,0]` on `input_channel_v1` every 2 s** (kind-2
+  heartbeat, never wrapped) — the WebRTC-path analogue of the native
+  `0x0101` oracle. Plus RTP/RTCP flowing.
+- Keyframes: PLI/FIR at ≤500 ms cadence until the first keyframe is
+  assembled; frames are gated on `reference_ready` (IDR-first).
+- **`stats_channel` is created but NEVER written** — OpenNOW holds
+  hour-long sessions without the §50–51 type-01/02 telemetry (the
+  browser sends it; it is evidently optional). B-track treats the
+  stats protocol as optional hardening, not liveness.
+- Timers/bounds: connect 15 s, offer wait 20 s, video start 8 s, input
+  flush budget 150 ms, SDP ≤256 KiB, signaling msg ≤512 KiB,
+  candidates ≤64, channel write buffer ≤64 KiB.
+
+### 64.4 Gap analysis — what the pivot still has to build
+
+**Already in the repo and flight-proven** (native era, all reusable):
+F35 create body (byte-identical — measured §64.2), `kn_ws` RFC 6455
+client (+ B1's port-0 Host rule), `kn_cm` create/poll/queue/sessionAds/
+cancel/resume, TLS stream seam, `kn_dtls` (real ECDSA P-256 cert,
+sha-256 fingerprint, **DTLS-SRTP via EXTRACTOR-dtls_srtp already
+extracted and feeding the audio path**), `kn_sctp` (SCTP-over-DTLS on
+the bundle + DCEP, str0m-ported — 8 channels flew live), bundle
+STUN/NATT cadence + DTLS-ACTIVE client, `knsrtp`, Opus decode +
+WASAPI, FFmpeg H264 decode + D3D9 present, VAST fetch/wrapper-hops/
+trackers, the input event encoder.
+**To build, in flight order:**
+- **B2 — signaling completion**: parse the captured offer (m-lines,
+  PT/RTX/TWCC ids, ice-ufrag/pwd, DTLS setup/fingerprint, sctp map),
+  build our standard answer (str0m-equivalent: reflect offered PTs,
+  one video + one audio m-line, rtcp-mux, bundle, DTLS passive/active
+  per offer's setup attr, ice credentials from our bundle stack) +
+  the nvstSdp blob (video_attributes ported from `kn_rtsp.c`'s
+  ANNOUNCE table + our cert's fingerprint). This is the biggest C
+  chunk; the captured B1 offer is its input fixture.
+- **B3 — media plane**: RFC 6184 H264 depacketizer (FU-A/STAP-A,
+  aggregate → AU → existing decoder), RTCP senders (TWCC feedback
+  from received transport-wide seqs, NACK, PLI), SRTP unprotect with
+  DTLS-SRTP keys (video included — the web path has no ANNOUNCE-derived
+  keys), the audio PT-63/RED question settled by sniffing B-flight
+  captures.
+- **B4 — channel plane**: DCEP open of the three client channels with
+  the exact labels/reliability, input handshake accept, v3 wrapper
+  encode (cross-check `kn_input`'s native kinds against the table —
+  the wire kinds are the same family), the 2 s kind-2 heartbeat,
+  cursor handling; server `control_channel` JSON (§50–51) monitored
+  but NOT required for liveness.
+- **B5 — ads for real** (optional): the reporting sequence is complete
+  in B1; actual media playback (FFmpeg demux + AAC/MP3 decode) only
+  matters if the server ever validates watched-time against something
+  — the capture's wall-vs-watched slack (96 s vs 93.7 s) says it does
+  not police tightly.
+- **B6 — resume/reconnect**: the `&reconnect=1` variant + F38's
+  session resume, for the G3 QoL goal.
+
+### 64.5 B1 — this slice's code (one patch, base `1fa7820`)
+
+- `kn_cm.h/.c`: **`KN_CM_AD_EVENT 6`** + `event_name` parameter on
+  `kn_cm_build_ad_body`/`kn_cm_report_ad` (eventName emitted for
+  action 6 ONLY, key position per capture: after clientTimestamp);
+  **`conn0_ip[128]`** witness field (the dashed signaling host).
+- `knvstd_main.c`: `sess_ad_play` now flies the **full nine-report
+  sequence** (§64.2 table) with `adDurationInMs` from the VAST
+  `<Duration>` (`sess_vast_duration_ms`; fallback `adLengthInSeconds`,
+  evidence line `ad_dur {ms, source}`), quartile PUTs carrying elapsed
+  `watchedTimeInMs`; no-fill keeps the proven cancel and gains a
+  `vast_excerpt` evidence field (a339b52's 200-but-media:0 mystery);
+  every PUT logs `ad_report {action, event_name, rc, http_status,
+  watched_ms, duration_ms}`.
+- `knvstd_main.c`: **`--webrtc-probe[=S]`** (default 30, clamp 5..600).
+  On a WebRTC seat (`status>=2 && !have_rtsps && conn0_usage==14 &&
+  conn0_ip`) the queue loop logs `webrtc_seat` and runs
+  `sess_webrtc_probe`: TLS → WSS handshake (bare Host on :443,
+  Origin/F35-UA/`Sec-WebSocket-Protocol: x-nv-sessionid.<sid>`) →
+  `peer_info` → hb/ack duty → capture **the server's offer SDP in
+  full** (`webrtc_offer` + `webrtc_offer_sdp` events, JSON-escaped on
+  stdout) + up to 8 `webrtc_candidate` lines + 5 s trickle linger →
+  `webrtc_probe_summary` counters → seat released via the existing
+  `cm_cancel` path (`stop_reason: webrtc_offer_captured |
+  webrtc_probe_failed`). F37's `conn_unusable` fail-fast is untouched
+  for non-probe runs.
+- `kn_ws.c/.h`: `port 0` → Host header without the port (browser rule
+  for scheme-default ports; the rtsps leg's `:322` form unchanged).
+- Tests: `test_kncm` **272** checks (golden vectors = capture bodies
+  1/5/9 byte-for-byte, EVENT-without-eventName refused, non-6 actions
+  ignore eventName, `conn0_ip` on the run-101 fixture), `test_knws`
+  **92** (port-0 bare Host, query-string path verbatim). Native suite
+  PASS, zero warnings, paranoid leg clean.
+
+### 64.6 B1 flight card (probe, not a keeper attempt)
+
+Build on the rig as usual (T10 gate first: expect **ALL PASS 89** +
+the new checks). One flight, off-peak preferred:
+
+```
+knvstd --session --session-token=<TOK> --session-app=<APPID> ^
+  --cm-profile=browser --webrtc-probe=45 --session-seconds=180 ^
+  --session-queue-timeout=1500 --log-dir=logs\runB1 --wire-dump=logs\runB1\wire.txt
+```
+
+(the launcher's typed-params field takes the same flags; the free tier
+WILL queue and WILL offer the ~90 s ad — budget ~5–8 min total).
+
+**Oracle — what to check and how much:**
+
+| line | healthy value | meaning |
+|------|---------------|---------|
+| `ad_report` ×9 | all `rc:0 http_status:200` | the eventName sequence is accepted |
+| `ad_dur` | `source:"vast"`, `ms:90000`-ish | the creative's duration drives the hold |
+| `webrtc_seat` | `conn0_usage:14 conn0_alp:5 conn0_port:443 conn0_ip:"…-…-…-….cloudmatchbeta…"` | the browser identity bought the WebRTC seat |
+| `webrtc_ws_open` | `rc:0 http_status:101` | the /nvst/ handshake passed (Host/Origin/subprotocol accepted) |
+| `webrtc_offer` | `sdp_bytes` in the thousands, `m_lines>=2` | the server sent its SDP offer |
+| `webrtc_offer_sdp` | full escaped SDP in the log | **B2's input fixture — archive it** |
+| `webrtc_candidate` ≥1 | `candidate:"…:5004 …"` typical | the media port + trickle shape |
+| `webrtc_probe_summary` | `got_offer:1 peer_info_seen>=1 frames_in>=3` | the protocol duty cycle ran |
+| final | `stop_reason:"webrtc_offer_captured"` + `cm_cancel http_status:200` | seat released cleanly |
+
+Failure branches and their first moves: `webrtc_ws_open rc!=0` →
+try `version=2` + 24-hex peer id (OpenNOW's fresh form) by editing the
+probe constants — the handshake headers are the only unverified byte;
+`ws_open 101` but no offer in 45 s → the `peer_info` shape is suspect
+(browserVersion 131 / peerRole / resolution) — the summary's
+`peer_info_seen` says whether the server echoed us at all;
+`error:"peerRemoved"` → identity mismatch against the create (device
+id / token) — relogin; `ad_report rc!=0` → capture the failing body +
+response, compare with §64.2's table.
+
+**Every B1 artifact (log dir + wire dump) goes to
+`karnyjohnny/karnynow-logs`** — the captured offer SDP is the single
+most valuable byte sequence in the project right now: it is the last
+piece of ground truth between us and a streaming browser-parity
+client.
+
+## 65. Slice 5b (B-TRACK): the B1 probe is VERIFIED THREE TIMES (runB1/runB2/runB3, 2026-11-02), the runB3 wire dump is decoded END TO END — and it rewrites the offer's anatomy: the server's `{"type":"offer"}` carries THREE fields (`sdp` = the 3122 B classic WebRTC SDP the probe captured, `nvstSdp` = a ~40 KB server configuration document, `nvstServerOverrides` = 25 `key: value` lines) — and B2 ships: `kn_sdp` (offer parse + answer SDP + nvstSdp builders, 84 golden checks against the runB3 offer) and `--webrtc-answer`, which answers the offer FOR REAL (answer + nvstSdp + the host candidate on a live UDP bundle socket) and watches what the server does
+
+### 65.1 The three probe flights — identical healthy shapes, the ad question CLOSED
+
+Three B1 flights on the slice-5a build (`5a304c5`), all with
+`--cm-profile=browser --webrtc-probe=45`, full consoles + logs in
+`karnyjohnny/karnynow-logs` (runB1/runB2 pasted by the operator,
+runB3 pushed with `console.log` + `wire.txt` + diag zip):
+
+| stage | runB1 | runB2 | runB3 |
+|---|---|---|---|
+| T10 rebuild | ALL PASS 89 | — | — |
+| `ad_offered` | `len_s:120 required:1` | same | same |
+| `ad_vast` | `http 200 media:0 trackers:0` | same | same |
+| `ad_cancel` | `VAST_NO_ADS_AFTER_WRAPPER` | same | same (`vast_excerpt` = empty `<VAST version="4.0"/>`) |
+| queue | ~100–140 s (pos 39→0, `have_queue:0 seat_step:3` blips at 0, then `status:2`) | same | same |
+| `webrtc_seat` | `usage 14 alp 5 :443 /nvst/`, dashed FQDN ip | same | `80-250-98-40.…` |
+| `webrtc_ws_open` | `rc:0 http_status:101 peer_id:peer-<10 digits>` | same | same |
+| offer | `got_offer:1`, ~1 s after 101 | same | same — `sdp_bytes:3122 lines:105 m_lines:4` |
+| linger 5 s | `frames_in:6 frames_out:7 hb_sent:3 acks_sent:2 peer_info_seen:2 candidates:0 my_id:2` | same (±1 frame) | same, `elapsed_ms:5282` |
+| exit | `stop_reason:"webrtc_offer_captured"` + `cm_cancel rc:0 http_status:200` | same | same |
+
+**The a339b52 mystery is CLOSED with evidence:** the ad slot returned a
+NO-FILL VAST (empty `<VAST version="4.0"/>`), our nine-sequence cancel
+path handled it exactly as designed, and the queue proceeded to a real
+seat on all three flights. Ads are not a blocker for the B-track.
+
+**The critical B2 design fact from the lingers: `candidates:0`.** The
+server — despite `a=ice-options:trickle` in its offer — sent ZERO
+candidates BEFORE our answer. ICE trickle starts only after the client
+answers. B1's "no candidates" was the protocol working as designed,
+not a defect.
+
+### 65.2 The runB3 wire dump, decoded — and the redactor seam that hid it
+
+`runB3/wire.txt` = 112 records (`W|R t_ms len red` + hex payload;
+bytes_out 80 636 / bytes_in 154 097 / redactions 37). Records 0–74 +
+110–111 are the CM HTTPS plane (create, 34 polls, the gampad VAST GET,
+the ad PUT, the DELETE) in full plaintext. **Records 75–109 are the
+whole /nvst/ WebSocket dialog** — the seam hooks in
+`kn_net_tls_stream_send/recv` captured the probe stream exactly as
+designed:
+
+```
+ 75 W  GET /nvst/sign_in?peer_id=peer-3780135254&version=3.0&peer_role=1&pairing_id=a40…
+ 76 R  HTTP/1.1 101 Switching Protocols … sec-websocket-accept …
+ 77+78 W  our peer_info frame (header+payload = 2 records — kn_ws writes them separately)
+ 79 R  frame 1 (752 B): {"headers":{…echo of our HTTP headers…},
+                        "peer_info":{"browser":"Chrome","browserVersion":"109.0.0.0",
+                                     "connected":true,"id":2,"name":"peer-3780135254",…}}
+ 80 R  frame 2 (328 B): {"ackid":1,"headers":{…},"peer_info":{"browser":"","id":1,
+                        "name":"OneSdkServer-16565219568958313662","peer_role":0,…}}
+ 81+82 W  {"ack":1}
+ 83–96 R  frame 3 (49 746 B, split over 14 TLS reads): the OFFER
+ 97+98 W  {"ack":2}
+ 99 R  {"ack":1}                       (server acks OUR ackid 1)
+100 R  {"hb":1}  t=141 742             (2.1 s after the offer!)
+101+102 W {"hb":1} … 103 R {"hb":1} t=143 669 … 104+105 W {"hb":1}
+106+107 W {"hb":1} t=144 420 (our own 5-s duty beat)
+108+109 W close frame, code 1000       → 110 DELETE /v2/session → 200
+```
+
+**Why ASCII grep found nothing for two rounds:** the payloads are hex,
+AND the one record that mattered was mangled by our own redactor. F34's
+`kn_wire_redact` rule 1 X-fills `a=ice-pwd:` **up to the first real
+CR/LF byte** — but inside a WS frame the SDP is JSON-escaped, so its
+line breaks are the two-character `\r\n` sequences and NO real CR/LF
+exists until the record ends. Record 83 (4096 B) therefore lost
+everything from `a=ice-pwd:` to its tail: the ice-pwd value, the
+fingerprint, `setup:actpass`, ALL FOUR classic media sections — AND the
+five characters `","nv` … i.e. the JSON boundary between the offer's
+`sdp` field and its `nvstSdp` field. The hex record then parses (in
+Python, faithfully) as ONE fused 44 508-char `sdp` string with no
+`rtpmap` anywhere. **`kn_json` is innocent; the probe's `sdp_bytes:3122`
+is the TRUE `sdp` field.** Console and wire are complementary: the
+console carries the unredacted classic SDP, the wire carries the nvst
+configuration. Decoded artifacts (priv-logs/runB3/):
+`ws_frames_decoded.txt` (all 6 server + 7 client frames),
+`offer_field_sdp.txt` (the fused/redacted field, 44 508 chars),
+`server_nvstSdp_reconstructed.txt` (the true server nvstSdp, 40 520
+chars / 960 lines), `offer_field_nvstServerOverrides.txt`.
+
+**The TRUE offer** (inner `peer_msg.msg`, three keys):
+
+```json
+{"type":"offer",
+ "sdp":"<3122 B classic WebRTC SDP — the console's webrtc_offer_sdp, §64>",
+ "nvstSdp":"v=0 \r\na=general.enetControlChannel.channelCount:1 \r\n…40 KB…",
+ "nvstServerOverrides":"audio.enableTimestampAudioBuffer: 1\n…25 lines…"}
+```
+
+The server `nvstSdp` is a configuration document in the SAME dialect
+our client nvstSdp must speak (LF/CRLF aside): session-level
+`a=general.*` (155), `a=runtime.*` (19), then `m=video 0 RTP/AVP` with
+`a=video.*` (206) + `a=vqos.*` (438) + `a=qscore/bwe/clientPerfBr/
+packetPacing`, then `m=audio 0` (audio/aqos/audioBitrate), `m=mic 0`
+(mic.*), `m=application 0 udp` (ri.*). Every line ends `" \r\n"`.
+Parameters that matter downstream (all measured from runB3):
+
+| parameter | value | why it matters |
+|---|---|---|
+| `general.clientBundlePort` | 49006 | the port the server EXPECTS our bundle on (we send an ephemeral host candidate instead — OpenNOW does the same and streams; if B2's STUN never arrives, binding 49006 is the first experiment) |
+| `general.serverBundlePort` | 47999 | server media port (+47998 in the m-lines) |
+| `general.enetControlChannel.mtuSize` | 1191 | B4 SCTP sizing |
+| `general.enetControlChannel.heartbeatIntervalMs` | 500 | B4 control-channel duty |
+| `general.pingVersion` / `pingIntervalBefore/AfterConnectionMs` | 6 / 500 / 500 | WS-level keepalive expectations |
+| `ri.partialReliableThresholdMs` | 0 (override: **300**) | B4 input channel lifetime |
+| `ri.hidDeviceMask` / `…TransferGamepad` / `…TransferHid` | 4 / 255 / 2^64−1 | server's values; the CLIENT nvstSdp sends OpenNOW's defaults (§65.4) |
+| `aqos.bitRate` / `audioBitrate.remote2chMin/Max` | 96000 / 96 / 128 kbps | B3 audio decode budget |
+| `general.featureFlags` | 183 | server feature word |
+
+`nvstServerOverrides` (25 lines, verbatim in priv-logs): the server's
+late corrections to its own config — `ri.partialReliableThresholdMs: 300`,
+`general.pingIntervalBeforeConnectionMs: 20`, `…AfterConnectionMs: 100`,
+`video[0].adaptiveQuantization.*`, `vqos[0].*`, `video[0].framePacing.pid.minTargetFrameTimeUs: 7936` (=120 fps pacing — the rig encodes up to 120).
+
+### 65.3 Signaling facts, now all measured (not inferred)
+
+* **Ids.** Frame 1's `peer_info` is OUR echo: `id:2` (the numeric id the
+  server assigns us), `name:"peer-3780135254"` (our WS query peer_id).
+  Frame 2 is the remote: `id:1`, `name:"OneSdkServer-…"`. Envelopes:
+  offer came `{"from":1,"to":2}` → our answer goes `{"from":2,"to":1}`.
+  (The probe's name-match logic for `my_id` was right; slice 5b adds
+  `remote_id` from `peer_msg.from`, default 1 = OpenNOW's.)
+* **Ack duty works both ways:** every foreign `ackid:N` gets `{"ack":N}`;
+  the server acked our peer_info (`{"ack":1}` at +58 ms after the offer).
+* **Heartbeats:** the server beats every ~2.1 s (t=141 742, 143 669 —
+  NOT the 5 s of OpenNOW's client-side duty); answering its `{"hb":1}`
+  with `{"hb":1}` plus our own 5-s beat was accepted without comment.
+* **Close:** a client close frame with code 1000 after the linger was
+  accepted; the CM DELETE released the seat (200).
+* The server echoes our HTTP request headers in frames 1–2 (including
+  `x-country:PL`, `x-forwarded-for`) — informational, no action needed.
+
+### 65.4 The answer contract (what B2 sends, and why each line)
+
+The client answers with ONE peer_msg
+`{"type":"answer","sdp":"…","nvstSdp":"…"}` followed by ONE peer_msg
+carrying the local candidate (OpenNOW `core_mod.rs:442-448`). `kn_sdp`
+builds both from the classic offer:
+
+**Answer SDP** (CRLF; golden-pinned against the runB3 offer in
+`test_knsdp.c`): session `v=0/o=- <rand> 2 IN IP4 127.0.0.1/s=-/t=0 0`,
+`a=group:BUNDLE` mirroring ALL offer mids in order (rejected sections
+stay in the bundle), our `a=ice-ufrag/ice-pwd/fingerprint:sha-256`, and
+**`a=setup:active`** (offer says `actpass` + `ice-lite` → we are the
+DTLS client and the ICE controlling agent — OpenNOW sets exactly
+`set_ice_controlling(ice_lite)` + `start_dtls(true)`). Per section:
+* video (offer `sendonly`): `m=video <ourPort> UDP/TLS/RTP/SAVPF 96 97`
+  — **the OFFER's payload types** (H264 `profile-level-id=42001f` + its
+  RTX `apt=96;rtx-time=125`), rtpmap/fmtp/rtcp-fb lines copied verbatim,
+  all three extmaps (3 TWCC / 7 video-timing / 12 playout-delay)
+  mirrored, `a=recvonly`, rtcp-mux, rtcp-rsize, `c=IN IP4 0.0.0.0`.
+* audio (offer `sendonly`): opus 111 only — **RED 63 dropped** (str0m
+  has no RED; OpenNOW's answer negotiates opus alone and streams),
+  `a=ptime:10` mirrored, recvonly.
+* application: `m=application <ourPort> UDP/DTLS/SCTP webrtc-datachannel`
+  + `a=sctp-port:5000` + `a=max-message-size:262144` mirrored.
+* mic (offer `recvonly`): REJECTED — `m=audio 0 UDP/TLS/RTP/SAVPF 111`
+  + `a=mid:3` + `a=inactive` (port-0 with the offered formats kept =
+  str0m's disabled-section shape, which OpenNOW explicitly patches to
+  carry the offered pts).
+* Anything unanswerable (no H264 in the offer, etc.) degrades to the
+  same rejection, never to a failed answer.
+
+**nvstSdp** (LF-joined; OpenNOW `nvst_answer()` recipe, byte-faithful):
+`v=0` + the verbatim `o=SdpTest test_id_13 14 IN IPv4 127.0.0.1` +
+`s=-`/`t=0 0`; the identity triplet `a=general.icePassword /
+iceUserNameFragment / dtlsFingerprint` from OUR answer material; the
+74-line `video_attributes.sdp` table (embedded verbatim in `kn_sdp.c`);
+`a=video.framePacing.pid.minTargetFrameTimeUs:950000/fps` (31666 @30);
+the fps>60/≥240 blocks (implemented, dormant at 30);
+`a=packetPacing.numGroups:5` (3 only @120); `clientViewportWd/Ht`,
+`maxFPS`, `bitDepth:8`; the bitrate ladder
+`max=clamp(kbps,1000,200000)`, `min=min(max,5000)`,
+`initial=max(min,max/4)` → at our 20 000 kbps default: 20000/5000/5000
+on `initialBitrateKbps`, `vqos.bw.maximum/minimum/peak/serverPeak`,
+`vqos.grc.maximumBitrateKbps`; then `m=audio 0 RTP/AVP`+`a=msid:audio`,
+`m=application 0 RTP/AVP`+`a=msid:input_1`, and the **ri.\* defaults
+30 / 4294967295 / 15 / 4294967295**. Deliberate decision: the server's
+own nvstSdp ri-block (`thresholdMs:0`, `hidDeviceMask:4`, gamepad 255,
+hid 2^64−1) is NOT echoed — OpenNOW reads ri.\* from the CLASSIC offer
+(which has none), so its production answers carry exactly these
+defaults, and `partialReliableThresholdMs:0` would even fail its own
+`>0` validation. We mirror the reference client, not the server config.
+
+**Local candidate:** `candidate:1 1 udp 2122260223 <routedIP> <port>
+typ host` (the F37 ANNOUNCE form — flight-proven in the nvst family;
+Chrome host priority), sent as
+`{"candidate":"…","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":null}`
+— the first BUNDLE mid (audio, per OpenNOW's `candidate_target()`), and
+`usernameFragment:null` because that is what serde emits for their
+`Option::None` (flight-proven by their production traffic).
+
+### 65.5 Slice 5b — the code (one patch, base `5a304c5`)
+
+* NEW `streamer/include/kn/kn_sdp.h` + `streamer/src/kn_sdp.c` — pure
+  string transformers, no allocation/IO/globals: `kn_sdp_offer_parse`
+  (CRLF+LF, ≤8 sections, keeps rtpmap/fmtp/rtcp-fb/extmap lines
+  verbatim per section, picks H264+RTX and opus PTs),
+  `kn_sdp_answer_build`, `kn_sdp_nvst_build`, `kn_sdp_candidate_host`
+  (§65.4 rules; every output caller-buffered, honest ERR_BIG).
+* NEW `streamer/tests/test_knsdp.c` — **84 checks**: the REAL runB3
+  offer embedded as the parse golden (ufrag/pwd/fingerprint/setup/
+  ice-lite/trickle, all four sections' kinds/mids/dirs/PTs/sctp), the
+  full answer golden (48 lines, byte-exact, derived from §65.4 against
+  the offer — not from the builder), synthetic-rule battery (offer
+  `setup:active`→answer `passive`; AV1-only video→rejected with formats
+  kept; `sendrecv` audio→recvonly; datachannel mirrored), the nvst
+  battery (LF-only, trailing-newline join, identity triplet, table
+  present, pacing 31666/7916, numGroups 5/3, the ladder incl. both
+  clamps, the exact ri tail golden), candidate golden, error paths.
+* EDITED `streamer/src/knvstd_main.c` — `--webrtc-answer[=S]` (bare=45,
+  clamp 10..300; supersedes `--webrtc-probe` when both are given).
+  `sess_webrtc_probe` grows an `answer_s` parameter; **with the flag
+  absent every B1 byte path is unchanged**. After the offer capture:
+  `sess_webrtc_answer_send` resolves the media IP (dotted parse → the
+  dashed first label `80-250-98-40.` → `kn_net_dns_lookup`), opens +
+  `connect()`s the UDP bundle socket to the offer's first media port
+  (47998; connect picks the routed SOURCE address — the F37 pattern),
+  generates the identity (`sess_local_identity`; fingerprint upgraded
+  to a REAL `kn_cert` ECDSA P-256 cert when the mbedtls backend is in
+  the build — `cert:"real"` in the event, B3's handshake will
+  regenerate its own), builds+sends the answer/nvstSdp/candidate
+  envelopes (`from`=our assigned id, `to`=`peer_msg.from`), prints the
+  full `webrtc_answer_sdp` + `webrtc_nvst_sdp` documents once, then the
+  linger loop (deadline = answer_s) drains the socket each beat:
+  STUN Binding requests counted with the USERNAME attribute extracted
+  (`"serverUfrag:ourUfrag"` = the server ACCEPTED our credentials —
+  the pass signal), DTLS records (0x14–0x17 + 0xFE) and anything else
+  hex-dumped (first 2–3 of each class), `{"ack":N}` frames counted,
+  server trickle candidates flowing through the existing
+  `webrtc_candidate` events. Teardown closes the socket; the summary
+  pair (`webrtc_probe_summary` + the new `webrtc_answer_summary`)
+  always prints. `stop_reason: webrtc_answer_done | webrtc_answer_failed`.
+* EDITED `CMakeLists.txt`, `tools/build_native_tests.sh` (KNCORE +
+  build + run + rc29 in the aggregation), `tools/cross_check.sh`
+  (per-file leg, test exe, KCORE for the knvstd link).
+* Gates (sandbox): `tools/build_native_tests.sh` **NATIVE TESTS PASS**,
+  ZERO warnings, now **26 suites** — `test_knsdp` **84/0**, `test_knws`
+  92/0, `test_kncm` 272/0, everything else unchanged; the paranoid
+  knvstd leg (`-Werror -Wunused-but-set-variable -Wformat-truncation=2`)
+  clean; knvstd smoke + jsonl contract clean. NOT run here: cross_check
+  (no mingw in this sandbox — the rig's T10 is the cross gate),
+  skeleton check (no summary-key change: B2 adds EVENT LINES only,
+  F41/B1 precedent).
+
+### 65.6 B2 flight card (answer probe — still not a keeper attempt)
+
+Rebuild on the rig (T10 gate first: expect **ALL PASS 89** plus the new
+`test_knsdp` checks in the count). ONE flight, off-peak:
+
+```
+knvstd --session --session-token=<TOK> --session-app=<APPID> ^
+  --cm-profile=browser --webrtc-answer=45 --session-seconds=300 ^
+  --session-queue-timeout=1500 --log-dir=logs\runB2a --wire-dump=logs\runB2a\wire.txt
+```
+
+Budget ~6–9 min (queue 100–140 s + ad no-fill + 45 s linger). Push the
+whole log dir + wire.txt + console to `karnyjohnny/karnynow-logs`.
+
+**Oracle — what to check and how much:**
+
+| line | healthy value | meaning |
+|------|---------------|---------|
+| `webrtc_offer_sdp` | present, `sdp_bytes:3122`-ish | B1 shape intact |
+| `webrtc_answer_sdp` | full ~1.4 KB answer in the log | the answer document, diffable |
+| `webrtc_nvst_sdp` | `bytes:3710`-ish | the nvstSdp document |
+| `webrtc_answer_sent` | `cert:"real"`, `local_ip:"192.168.…"` (the rig's LAN addr), `video_pt:96 video_rtx:97 audio_pt:111`, `from:2 to:1`-ish | identity + envelope addressed correctly |
+| `webrtc_local_candidate` | `candidate:"candidate:1 1 udp 2122260223 <ip> <port> typ host"` | the host candidate went out |
+| `webrtc_answer_summary.acks_in` | **≥2** within ~2 s | the server accepted BOTH frames syntactically |
+| `webrtc_answer_summary.server_cands` | **≥1**, strings logged | trickle started (the B1 unknown) |
+| `webrtc_stun_in` | **n≥1**, `username:"<8hex>:<our4char>"`, `first_stun_ms` < ~3000 | **THE pass signal: the server believes our answer and ICE-checks us** |
+| `webrtc_dtls_in` | 0 expected (we never reply to STUN, so ICE can't complete) | DTLS>0 would mean the server skipped checks |
+| errors | no `webrtc_probe error:"server"`, no `bye`, WS open the whole linger | the answer wasn't rejected |
+| final | `stop_reason:"webrtc_answer_done"` + `cm_cancel 200` | seat released cleanly |
+
+**Failure branches, in order of likelihood:**
+`acks_in:0` and silence → the envelope/escaping is wrong: diff our
+`msg` bytes in wire.txt against §65.2's frame list (double-escaping of
+the inner JSON is the classic trap — `sess_json_esc` runs twice, verify
+the wire shows `\\r\\n` inside `msg`). An `error` frame → the
+`webrtc_peer_msg` snippet carries the reason verbatim; log it, that IS
+the measurement. `server_cands` arrive but no STUN within 10 s → our
+candidate string is suspect: compare against the SERVER's candidate
+shape (now logged in full) and adapt foundation/priority/`generation`
+in `kn_sdp_candidate_host`. STUN arrives with a username whose second
+half is NOT our ufrag → identity mismatch between the answer SDP and
+the nvstSdp triplet (they are built from one cfg — would be a builder
+bug; the goldens say otherwise). `BYE`/`peerRemoved` right after the
+answer → permission/identity problem (token-device mismatch) — relogin.
+No STUN AND no candidates AND acks present → the server waits for
+something else in the answer (a missing attribute): wire.txt frame 3
+vs our answer frame is the diff to run, and `general.clientBundlePort
+49006` (§65.2) is the first experiment — bind the socket to 49006
+instead of ephemeral.
+
+**B2 pass = `webrtc_stun_in` with the right username.** That single
+line proves: offer parsed, answer accepted, nvstSdp accepted,
+candidate understood, and the server is trying to reach us — everything
+B3 (DTLS-SRTP + media) needs to exist on the other end of a real
+socket. B3 then answers the STUN, completes DTLS with the kn_cert/kn_dtls
+machinery, and the depacketizer starts eating RTP.
+
+**Launcher shortcut (slice 5c).** The GUI launcher now opens with this
+card pre-typed: the params box defaults to `--cm-profile=browser
+--webrtc-answer=45 --session-queue-timeout=1500` (the native-era recipe
+follows; edit per flight), the log-folder field takes ANY safe name
+(`runB2a` — the `runNNN_logs` digit rule is gone, unsafe names are
+refused with a reason), `owned only` is ticked by default, and
+`launcher.bat` in the repo root replaces `python -m tools.kn_launcher`.
+The launcher adds `--session/--session-token/--session-app/
+--session-device` itself and gives every draw its own folder — so the
+flight's whole evidence set is `logs\runB2a\<draw>\` (`console.log`,
+`wire_r1.txt`, `manifest.txt`, knvstd's channel logs); push that folder
+to `karnyjohnny/karnynow-logs`. `--session-seconds` is just a ceiling —
+the probe ends itself at `stop_reason:"webrtc_answer_done"` after the
+45 s window. The oracle above is unchanged.
+
+## 66. Slice 5d (B-TRACK): runB2a is READ END TO END — the answer contract is VALIDATED IN PRODUCTION (3 acks, the server's trickle candidate 67 ms after our answer, 17 s of healthy heartbeats) and the 17-second kill is explained to the millisecond: the seat is ICE-LITE, we sent ZERO UDP, so no NAT mapping ever existed and `video.timeoutLengthMs:15000` fired — B2.5 ships the outbound half of ICE (`kn_sock_stun_buildn` + `kn_sock_udp_recvfrom` + `kn_sdp_candidate_parse` + the probe's check/answer tick) and the runB2b card: punch the hole, watch the seat answer, and see our own public mapping in XOR-MAPPED-ADDRESS
+
+### 66.1 The runB2a flight, measured (draw 1, 2026-11-03 01:22 UTC, Endfield, `--cm-profile=browser --webrtc-answer=45`)
+
+The first B2 flight with the slice-5c launcher (folder `runB2a`, pushed to
+`karnyjohnny/karnynow-logs` @ `81e3dc2`). Every number below is from
+`console.log` / `wire_r1.txt` (146 records, decoded record-by-record with
+`tools/wiretap/parse_wire_dump.py`), not inference:
+
+- **Queue + seat:** position 14 → 0 in ~75 s; seat
+  `80-250-98-36.cloudmatchbeta.nvidiagrid.net:443`, resourcePath `/nvst/`;
+  our peer id `peer-3246755197`; **CM `clientIp` = `151.248.35.173`** (our
+  public address as CloudMatch sees it — the value B2.5's XOR-MAPPED must
+  reproduce).
+- **Offer:** 3122 B classic SDP, 4 m-lines, server ICE ufrag `9adb3d56`,
+  pwd `7b783141-…-b7610ba7cf13`, `setup:actpass`, `a=ice-lite`,
+  `a=ice-options:trickle`, m-line ports are the **47998 dummy** with
+  `c=IN IP4 0.0.0.0` (same shape as the runB3 fixture). The offer's
+  `nvstSdp` carries the timers that decide the flight:
+  `video.timeoutLengthMs:15000`, `video.pingBackTimeoutMs:10000`,
+  `recoveryModeTriggerThresholdMs:6000`,
+  `rtcTransportShutdownOnPeerDisconnect:1`, `candidateAttemptTimeoutMs:0`,
+  `pingIntervalBefore/AfterConnectionMs:500`, `filterLocalIp:1`,
+  `serverBundlePort:47999`, `clientBundlePort:49006`, `rtcpOnSctp:1`,
+  `nativeRtcOnBundlePort:1`.
+- **Our answer:** 1422 B, oracle-exact against §65.4 (BUNDLE 0 1 2 3,
+  ufrag `m0DD`, H264 96+97 recvonly, opus 111, datachannel sctp-port
+  5000, mic rejected) + 3710 B nvstSdp with the matching identity
+  triplet; envelope `from:2 to:1 ackid:2`; then our host candidate
+  `candidate:1 1 udp 2122260223 192.168.100.11 50400 typ host` (mid "0",
+  ackid 3).
+- **The server's verdict on the contract: ACCEPTED.** `acks_in:3` (every
+  frame acked), and **67 ms after the answer** the server trickled its
+  candidate: `candidate:1467310487 1 udp 1677721855 80.250.98.36 5004
+  typ srflx raddr invalid rport 0` — a seat that rejected our answer or
+  our ICE credentials does not send its media address. This one line is
+  the whole B2 question answered YES.
+- **The silence:** `stun_in:0`, `dtls_in:0`, `other_in:0` — the server
+  sent **no UDP at all**, and we (by B2's design) sent none either.
+  Signaling stayed healthy: server `{"hb":…}` every ~2.05 s, our hb
+  every 5 s (`hb_sent:11`), one server WS PING answered with a PONG,
+  no error frame, no BYE.
+- **The kill:** at **answer + 17.02 s** the WS read returned `rc:-2`
+  (`KN_WS_ERR_IO` — TCP/TLS closed by the server); we sent the masked
+  CLOSE, `DELETE /v2/session` → 200, `stop_reason:"webrtc_answer_done"`.
+  The `exit_code:1` with `E_SESSION_NOT_READY` in app.log is BY DESIGN
+  for probe flights (the session never reaches ready) — not a bug.
+
+### 66.2 Root cause — ice-lite waits for US, and its patience is exactly 15 s
+
+RFC 8445 §8: a **lite** agent never initiates connectivity checks on a
+fresh pair — it only answers, and it only starts consent checks once a
+pair is valid. The seat is ice-lite (offer flag, measured). Two facts
+complete the circuit:
+
+1. Our only advertised candidate was the **LAN** address
+   `192.168.100.11:50400`, and we sent **zero UDP**. Behind a NAT that
+   means no mapping exists on the router — even a server willing to
+   check us would have nowhere to send.
+2. The nvstSdp's `video.timeoutLengthMs:15000` with
+   `rtcTransportShutdownOnPeerDisconnect:1`: media-plane connect timer
+   15 s + ~2 s of teardown/handshake slack = the **17.02 s** EOF, to the
+   decisecond class. The wire transcript shows no error frame before
+   the EOF — the server simply dropped the transport.
+
+Honest correction to §65.6: that card's oracle ("B2 pass =
+`webrtc_stun_in` with our ufrag") assumed a full-ICE peer that checks
+first. runB2a falsified the oracle, **not** the answer — with ice-lite
+the client must punch first, exactly like Chrome/str0m does (OpenNOW's
+agent sends checks immediately after the answer). B2's real pass signal
+was the acks + the 67 ms trickle, and both arrived.
+
+### 66.3 The B2.5 contract (what slice 5d puts on the wire)
+
+**Destination.** The trickle candidate is authoritative (the m-line
+ports are dummies): on the first parseable `udp`/IPv4/component-1
+candidate the probe **reconnects** the bundle socket to it (runB2a:
+`80.250.98.36:5004`). The reconnect matters twice: `send()` follows the
+connected peer, and the connected-socket kernel filter would otherwise
+**drop** the server's replies from :5004 while the socket sat connected
+to the 47998 dummy. Until a candidate arms, checks go to the m-line
+route (armed at answer time as `dest_typ:"mline"`).
+
+**The check** (a full RFC 8445 Binding Request, built by the new
+`kn_sock_stun_buildn`): USERNAME `"<serverUfrag>:<ourUfrag>"` (runB2a:
+`9adb3d56:m0DD`), PRIORITY `2122260223` (`0x7E7F1EFF` — the exact value
+`kn_sdp_candidate_host` advertises, so check and candidate agree),
+USE-CANDIDATE from the first check (the controlling agent nominates
+aggressively; a lite peer never nominates on its own), ICE-CONTROLLING
+with a per-flight random 64-bit tie-breaker, MESSAGE-INTEGRITY keyed
+with the **server's** password (ICE short-term credentials: the key is
+the recipient's), FINGERPRINT with GFN's `0x5354554E` XOR (the constant
+nvst.rs uses and the live rig validated, runs 9–15).
+
+**Pacing.** First check on the first linger tick (~250 ms after the
+answer), then Ta doubling 500 ms → 4 s cap while unanswered; after the
+first authenticated success, a 5 s consent-refresh cadence.
+
+**Answering the seat.** Every Binding REQUEST that arrives gets a real
+Binding SUCCESS: echoed transaction id, XOR-MAPPED-ADDRESS built from
+the source address we **actually saw** (`kn_sock_udp_recvfrom` — behind
+the NAT that is the mapped source, not the candidate line), MI keyed
+with the server password. The request's own MI is verified with our
+password first and the server's second (probe tolerance: `mi_key` in the
+event says which fit — a mismatch is diagnostic gold, and we answer
+either way).
+
+**Validating the response.** SUCCESS responses must pass
+`kn_sock_stun_inspect` (cookie, exact length, GFN FINGERPRINT) **and**
+`check_integrity` with the server password; then `ice_ok` flips, and the
+response's XOR-MAPPED-ADDRESS is our public mapping (`mapped_ip` must
+equal the CM `clientIp`, `151.248.35.173` for this NAT). Anything that
+looks like STUN but fails validation is counted (`stun_bad`) and its
+head hex-dumped — an RFC-constant FINGERPRINT from the seat would show
+up there, decodable offline.
+
+**Deliberately NOT in 5d** (one variable per flight): no prflx/srflx
+candidate trickled back to the server (ice-lite learns our public
+mapping from the checks themselves — that is the point of the
+XOR-MAPPED exchange), no `clientBundlePort:49006` bind (the seat acked
+our ephemeral 50400 candidate fine — the port number was never the
+problem), no DTLS (slice B3, and the seat only starts it after ICE).
+
+### 66.4 The code (one patch, base `01f8f79` on `poprawki-agenta`)
+
+- `kn_sock.h/.c`: **`kn_sock_stun_buildn`** — the general N-attribute
+  builder (attribute array `{type,val,len}`, same MI/FP mechanics;
+  `build`/`build2` are now thin delegators, every existing golden still
+  byte-exact). New attribute enums `PRIORITY 0x0024`,
+  `ICE_CONTROLLING 0x8029`. **`kn_sock_udp_recvfrom`** — recv + the
+  datagram's source ip/port (nullable outputs, zeroed on timeout;
+  `kn_sock_udp_recv` is the NULL-source wrapper).
+- `kn_sdp.h/.c`: **`kn_sdp_candidate_parse`** — foundation / component
+  (1..256, Chrome's tcp candidates ride 9) / transport / priority / ip
+  (+`ip_be`, 0 for IPv6) / port / typ / tolerated raddr-rport (the
+  seat's literal `raddr invalid rport 0` parses; `rport` non-numeric →
+  0). Accepts the bare and `a=`-prefixed forms.
+- `knvstd_main.c`: `webrtc_answer_state` grows the ICE fields (dest,
+  credential copies, tie-breaker, counters, mapped address, pacing);
+  `sess_webrtc_answer_send` copies both credential pairs, arms the
+  m-line destination and draws the tie-breaker; the trickle-candidate
+  branch parses + reconnects + emits **`webrtc_stun_arm`**; the new
+  **`sess_webrtc_stun_tick`** runs at `hb_duty` after the drain;
+  the drain upgrades to recvfrom, gains the SUCCESS-response branch
+  (**`webrtc_stun_resp`**, one-shot **`webrtc_stun_ice_ok`**) and
+  answers requests (**`webrtc_stun_in`** gains `mi`/`mi_key`/
+  `answered`/`src`/`reply_bytes`/`head`); `webrtc_answer_summary`
+  gains `dest`/`dest_typ`/`stun_out`/`stun_resp_in`/`stun_answered`/
+  `stun_bad`/`first_resp_ms`/`ice_ok`/`mapped_ip`/`mapped_port`.
+  B1/B2 behavior when the flag is absent: unchanged.
+
+### 66.5 Test canon for 5d
+
+`test_knsock` **124/0** (+22): the `buildn` golden is a full 96-byte ICE
+check (USERNAME+PRIORITY+USE-CANDIDATE+ICE-CONTROLLING+MI+FP) generated
+by the independent Python reference **after** it reproduced the three
+existing goldens byte-exact; `build2 == buildn` parity; the five
+argument rejections; the 52-byte zero-attribute degenerate; and the
+recvfrom battery (loopback source ip/port exact, timeout zeroing, the
+wrapper, a connected socket reporting its pinned peer). `test_knsdp`
+**100/0** (+16): the two REAL runB2a candidate lines verbatim, the
+`candidate_host` round-trip, `a=` form with numeric raddr/rport, the
+tcp/component-9 shape with ignored extensions, IPv6 (`ip_be == 0`), and
+nine rejections. Native battery **NATIVE TESTS PASS** (26 gates, zero
+FAIL); `cross_check.sh` **CROSS-CHECK PASS** — run IN THE SANDBOX this
+time (mingw-w64 12.2.0 installed), zero warnings under `-Werror` on
+both arches; the paranoid knvstd leg clean; launcher battery 168/0
+(no launcher change). `check_summary_skeleton.py` stays operator-side
+(the skeleton-113 contract is untouched — 5d adds event lines and
+probe-summary fields only).
+
+### 66.6 runB2b flight card (probe, NOT a keeper attempt)
+
+Params (the launcher's params box already opens with them):
+`--cm-profile=browser --webrtc-answer=45 --session-queue-timeout=1500`.
+Log folder `runB2b`, draw 1 first; push `logs\runB2b\1\` to
+`karnyjohnny/karnynow-logs`. Rig rebuild REQUIRED (T10 first: expect
+ALL PASS with the grown knsock/knsdp counts).
+
+**PASS oracle (all of):**
+1. `webrtc_stun_arm` with `dest:"80.250.98.<x>:5004"`-shape address,
+   `typ:"srflx"`, within ~0.5 s of `webrtc_answer_sent` (the candidate
+   trickles ~67 ms after the answer).
+2. `webrtc_stun_out` n ≥ 1, `bytes` ≈ 90–110, first within ~0.5 s of
+   the arm.
+3. `webrtc_stun_resp` with `inspect:1`, `mi:1`, and `first_resp_ms`
+   **< 2000** (a real RTT to the seat is tens of ms).
+4. `webrtc_stun_ice_ok`, and summary `mapped_ip` == the CM `clientIp`
+   of THIS flight (public address — the NAT round-trip proof),
+   `ice_ok:1`, `stun_bad:0`.
+5. **The WS survives past 17 s**: no `ws_recv rc:-2` before ~45 s,
+   `linger_ms` ≈ 45000, server hbs keep arriving at ~2 s cadence past
+   the old kill point.
+6. Bonus (not required for pass): `stun_in`/`stun_answered` > 0 — the
+   seat's own consent checks at us, with `mi_key:"ours"` proving the
+   credential direction.
+
+**FAIL branches (read the events in this order):**
+- `stun_out` > 0 but `stun_resp_in:0` at 45 s → our UDP is not
+  reaching the seat (router/CGNAT) or the seat ignores checks. The
+  wire dump shows our datagrams leaving; next single variable: bind
+  the bundle socket to `clientBundlePort:49006` (the 5b-deferred card
+  comes back), then an explicit srflx candidate trickled from the
+  mapped address.
+- `stun_resp` with `mi:0` → the credential direction is not the
+  recipient's-password rule; `mi_key` on any `stun_in` says which key
+  the seat itself uses — mirror it (one-line change).
+- `stun_resp` with `inspect:0` (or STUN-looking heads inside
+  `webrtc_udp_in`) → the seat signs FINGERPRINT with the RFC constant;
+  the dumped head hex proves it; add the dual-constant tolerance.
+- `ice_ok:1` but the WS still dies at ~17 s → the seat's timer waits
+  for DTLS/connected, not ICE: go straight to B3 (DTLS-SRTP, server
+  actpass + our setup:active ⇒ WE send the ClientHello), or it wants
+  an explicit srflx candidate — decide from whether `stun_in` (its
+  own checks at us) appeared after ice_ok.
+- `dtls_in` > 0 at any point → the seat trusts the exchange and wants
+  DTLS: heads hex-dumped, B3 fast-tracked.
+
+**B2.5 pass = `webrtc_stun_ice_ok` + a public `mapped_ip` + a WS alive
+at 45 s.** That is a hole punched through the NAT with the seat's own
+blessing — everything B3 (DTLS-SRTP + media) needs on the other end of
+a live, mutually-validated socket pair.
+
+## 67. Slice 5e (B-TRACK): runB2b is READ — the 5d machinery works end to end (arm on the trickle, 7 checks at the exact doubling cadence, the seat's candidate parsed to the last field) and one bug ate the flight: `kn_sdp_candidate_parse` assembled `ip_be` MSB-first while every kn_sock caller uses `in_addr.s_addr` semantics — so BOTH draws punched at a byte-reversed address (`41.98.250.80` instead of `80.250.98.41`) into a black hole, and the suite stayed green because it asserted the parser against ITSELF. The fix is one function; the lesson is a test-design rule: **pin the contract BETWEEN modules, not each module's internal consistency.** Also measured: the draw-2 extra flags (`--input-anti-afk/--session-present/--session-audio-play/--session-release`) are PROVABLY inert in probe mode — `sess_webrtc_probe` returns and the queue loop breaks with `webrtc_answer_done` before the native pipeline is ever consulted
+
+### 67.1 The runB2b flights, measured (2026-11-03, two draws, Endfield, T10 after the rebuild: 0 FAIL)
+
+Draw 1 (10:21:36–10:24:09 UTC, seat `80.250.98.41`; the manifest still
+says `runB2a\2` — the operator reused the folder name, harmless) and
+draw 2 (10:26:07–10:28:40 UTC, seat `80.250.98.37`, the four extra
+flags). The summaries are the same class, and every 5d mechanism is
+visible working in production except the destination bytes:
+
+- `webrtc_stun_arm` fires on the trickle in both draws:
+  `typ:"srflx"`, `priority:1677721855`, foundation echoed
+  (`1467274095` / `1467232955`) — the candidate parser read the seat's
+  line correctly, including `raddr invalid rport 0`.
+- **Pacing exact:** `stun_out:7` inside a ~17.4 s linger = sends at
+  t ≈ 0 / 0.5 / 1.5 / 3.5 / 7.5 / 11.5 / 15.5 s — the 500 ms doubling
+  with the 4 s cap, to the tick.
+- `cert:"real"`, `acks_in:3`, `server_cands:1`, answer accepted — the
+  §66.1 contract behavior reproduced on two fresh seats.
+- `stun_resp_in:0`, `stun_answered:0`, `stun_bad:0`, `ice_ok:0`,
+  `mapped_ip:"-"`, and the WS died at `linger_ms` 17444 / 17308 — the
+  same `video.timeoutLengthMs:15000` kill as runB2a, because from the
+  seat's point of view NOTHING changed: it still received zero UDP.
+
+### 67.2 The bug — one convention, two modules, zero cross-tests
+
+The arm event prints `dest:"41.98.250.80:5004"` (draw 1) and
+`"37.98.250.80:5004"` (draw 2): the seat octets **reversed**. The 5d
+`sdp_ipv4_be` built the value MSB-first (`v = v<<8 | oct` →
+`0x50FA6229` for `80.250.98.41`), while `kn_sock_ipv4_parse` — the
+convention every kn_sock caller speaks — produces `in_addr.s_addr`
+semantics (`a | b<<8 | c<<16 | d<<24`, i.e. the octets sit in wire
+order in memory). Consequences, both fatal for the flight:
+
+1. `kn_sock_udp_connect`/`sendto` got the reversed u32 → the checks
+   flew to `41.98.250.80` / `37.98.250.80` — unallocated addresses,
+   black-holed.
+2. The reconnect pinned the socket's kernel filter to that wrong peer,
+   so even traffic from the real seat would have been dropped.
+
+**Why the suite was green:** `test_knsdp` asserted
+`c.ip_be == ((80u<<24)|(250u<<16)|(98u<<8)|36u)` — the parser checked
+against a constant written in the parser's OWN (wrong) convention.
+Self-consistent, useless. The invariant that matters — *the two
+modules agree on the wire format* — was untested, and the flight
+measured it instead. Test-design rule for the ledger: **when two
+modules share a representation, the test must link both and compare
+them directly.**
+
+### 67.3 Slice 5e — the fix and the guard that keeps it fixed
+
+- `kn_sdp.c`: `sdp_ipv4_be` now parses the four octets into a byte
+  array and `memcpy`s it into the u32 — endian-neutral, s_addr
+  semantics by construction, no kn_sock dependency added.
+- `test_knsdp.c` links `kn_sock` now and pins the invariant twice:
+  the real runB2a line (`ip_be == kn_sock_ipv4_parse("80.250.98.36")`)
+  and a six-address vector (`80.250.98.41` and `192.168.100.11` — the
+  exact two addresses runB2b reversed — plus `1.2.3.4`,
+  `255.255.255.255`, `0.0.0.0`, `8.8.8.8`). Either module drifting
+  from the other turns the suite red.
+- Build lines: `build_native_tests.sh` and `cross_check.sh` grow
+  `kn_sock.c + kn_sha1.c + sha1.c` (+ `-lws2_32` on the cross leg) for
+  `test_knsdp`; CMake links everything through `kncore` already —
+  untouched.
+- Gates: `test_knsdp` **102/0** (+2), `test_knsock` 124/0 (unchanged),
+  **NATIVE TESTS PASS** (26), **CROSS-CHECK PASS** (both arches,
+  `-Werror`), paranoid leg clean.
+
+### 67.4 The draw-2 flags question, answered with code
+
+`--input-anti-afk=60000 --session-present --session-audio-play
+--session-release` change NOTHING in answer-probe mode: on a WebRTC
+seat the queue loop calls `sess_webrtc_probe` and `break`s with
+`stop_reason:"webrtc_answer_done"` — the native pipeline those flags
+feed (present pump, audio play, anti-afk input, release path) is never
+consulted. Both draws' summaries confirm it empirically (same event
+class, same counters modulo the seat). Flying the minimal card
+(draw-1 params) keeps one variable per flight; the extra flags are
+harmless but noise.
+
+### 67.5 runB2c flight card (the §66.6 card, unchanged — now with the destination regression guard)
+
+Params: `--cm-profile=browser --webrtc-answer=45
+--session-queue-timeout=1500` (the minimal draw-1 set). Folder
+`runB2c`, draw 1, push `logs\runB2c\1\` to
+`karnyjohnny/karnynow-logs`. Rig rebuild REQUIRED (T10: expect
+`test_knsdp` 102).
+
+**PASS oracle = §66.6 verbatim, plus one new line-0 check:** the
+`webrtc_stun_arm` `dest` IP must string-match the IP inside the
+`webrtc_candidate` line of the same flight (e.g. candidate
+`… 80.250.98.x 5004 …` → `dest:"80.250.98.x:5004"`). A reversed
+dest is now caught by the operator in ten seconds, by the suite in
+zero.
+
+Everything else stands: `stun_out` ≥ 1; `webrtc_stun_resp`
+`inspect:1 mi:1` with `first_ms < 2000`; `webrtc_stun_ice_ok`;
+summary `mapped_ip` == the flight's CM `clientIp` (public);
+**WS alive at 45 s** (`linger_ms` ≈ 45000). FAIL branches: §66.6 —
+with the destination bug closed, `stun_resp_in:0` now genuinely means
+"our UDP does not reach the seat or the seat ignores it", and the next
+single variable would be the `clientBundlePort:49006` bind.
+
+## 68. Slice 5f (B-TRACK, docs-only): runB2c is a CLEAN PASS — **the 17-second ceiling is broken**: ICE hole-punched in BOTH directions (our check answered `inspect:1 mi:1` at 1556 ms; the seat sent 261 of its own checks, all answered, `mi_key:"ours"` confirming the recipient's-password rule in production), the WS lived the FULL 45 s window (`linger_ms:45019`, zero error frames), `stun_bad:0` — and `dtls_in:0` says the seat is now waiting for OUR ClientHello, which is exactly the B3 slice: `kn_dtls` (already a full DTLS 1.2 active client with the fingerprint pin, use_srtp negotiation and the EXTRACTOR-dtls_srtp export) gets wired into the probe's single-reader drain
+
+### 68.1 The runB2c readout (draw 1, 2026-11-03 12:04:55–12:08:01 local, Endfield, seat `80.250.98.41`, T10 before the flight: ALL PASS 89/0)
+
+The oracle of §66.6 + the §67.5 guard, line by line:
+
+| # | Oracle item | Measured | Verdict |
+|---|---|---|---|
+| 0 | arm dest == candidate IP (string) | candidate `80.250.98.41 5004 srflx` → `dest:"80.250.98.41:5004"` | **PASS** |
+| 1 | `webrtc_stun_arm` srflx, fast | arm on the trickle (~70 ms after the answer) | **PASS** |
+| 2 | `stun_out` ≥ 1 | 12 (3 punch + 9 consent at 5.05 s spacing — `n:11 t_ms:39462`, `n:12 t_ms:44508`) | **PASS** |
+| 3 | resp `inspect:1 mi:1`, `first_ms < 2000` | resp #1: `len:64 inspect:1 mi:1 first_ms:1556 src:80.250.98.41:5004` | **PASS** |
+| 4 | `ice_ok`, `mapped_ip` not-ours | `ice_ok:1`, `mapped:"10.222.254.7:62091"` (≠ LAN `192.168.100.11:52576` — IP **and** port translated) | **PASS** (see 68.2) |
+| 5 | WS alive at 45 s | `linger_ms:45019`, `frames_in:28`, no `rc:-2`, no error/bye, clean `webrtc_answer_done` + `cm_cancel 200` | **PASS** |
+| 6 | bonus: seat checks at us | `stun_in:261`, `stun_answered:261`, `mi_key:"ours"` | **PASS** |
+
+Counters: `acks_in:3`, `server_cands:1`, `stun_resp_in:43`,
+`stun_bad:0`, `dtls_in:0`, `other_in:0`, `cert:"real"`, wire dump 206
+records / 37 redactions. `exit_code:1` + `E_SESSION_NOT_READY` remain
+the by-design probe artifact.
+
+### 68.2 Two measured facts that rewrite oracle wording
+
+**`mapped_ip` is `10.222.254.7`, not the CM `clientIp`
+(`151.248.x.x`).** §66.6 expected the public address; the seat instead
+reports a source from RFC1918 10/8 with a translated port (62091 vs our
+52576). Read: between our router and the seat process there is at least
+one MORE NAT layer on NVIDIA's side (their media edge receives our
+public flow and re-NATs it into the seat's private netns). The oracle's
+INTENT — "the seat sees a translated address, not our LAN candidate" —
+is satisfied exactly: `10.222.254.7:62091` is neither `192.168.100.11`
+nor `52576`, and the pair validated in both directions. Corrected
+oracle for future cards: **mapped ≠ local (ip AND port), pair validated
+both ways** — the "public IP" expectation was my shorthand, falsified
+by their topology, not by our stack.
+
+**The seat over-answers: 43 SUCCESS responses to 12 of our checks**
+(every one `inspect:1 mi:1`, `stun_bad:0`). Its own request cadence at
+us is ~6/s (261 in ~44 s) — the pre-connection `pingInterval…Ms:500`
+duty from the offer's nvstSdp, now measured from the receiving end.
+None of this needs handling beyond what the drain already does; it is
+recorded because B3's liveness math should use the seat's real ~170 ms
+keepalive, not the 5 s consent figure.
+
+### 68.3 B2.5 CLOSED
+
+RunB2a died at 17.02 s with zero UDP exchanged; runB2c lived 45.0 s
+with mutually validated ICE — the ONLY variable changed was the
+destination bytes (5e's fix). The seat's `video.timeoutLengthMs:15000`
+is satisfied by a validated pair: the timer that killed three flight
+generations is disarmed. First time in project history a GFN connection
+survived past the server's ICE timeout. runB2c is the new baseline
+artifact (`karnyjohnny/karnynow-logs @ 606c15e`).
+
+### 68.4 Decision: B3 = DTLS-SRTP, and the stack already exists
+
+`dtls_in:0` + our answer's `setup:active` + the offer's `actpass`
+ice-lite ⇒ WE are the DTLS client and the seat waits for our
+ClientHello (the same gating nvst.rs uses: real inbound STUN first —
+we have 261 of them). The modules, all built and proven on the native
+track, cover the whole handshake:
+
+- **`kn_dtls`** (701 lines): DTLS 1.2 active client, mbedTLS backend,
+  INJECT-QUEUE BIO (the pump owns the socket and feeds
+  `kn_dtls_inject`; the module never recvs — exactly the probe drain's
+  single-reader discipline), fingerprint-PIN policy (verify callback,
+  `KN_DTLS_ERR_PIN` on mismatch), retransmission timers on
+  `kn_sock_now_ms`, **use_srtp negotiation** (`kn_dtls_srtp_profile`,
+  D-t9) and **`kn_dtls_srtp_export`** (F11: EXTRACTOR-dtls_srtp over
+  the captured master secret + randoms, out[60] with the server-write
+  key/salt halves for the receive direction).
+- **`kn_cert`**: real identity — the flight's `cert:"real"` proves the
+  mbedTLS backend is live in the rig build; the fingerprint that flew
+  in our answer is the one B3's handshake will present.
+- **`knsrtp` + `kn_rx`**: `kn_srtp_kdf128` over the exported server
+  half (RFC 3711 labels) feeds the existing video depacketizer
+  (H264 PTs 96/97 from the offer, already parsed by `kn_sdp`).
+
+B3's integration scope (next round's code): the pin from
+`kn_sdp_offer.fingerprint` (parsed, unused so far), ClientHello gated
+on `ice_ok`, DTLS-first-byte (20..63) demux in the drain → inject →
+poll → sendto, ready → `srtp_export` → kdf → first SRTP video packets
+counted/decoded. B4 then takes the SCTP datachannel (`kn_sctp`),
+input and the media heartbeat. The runB3a flight card ships with the
+B3 code — one variable: DTLS up, first media bytes seen.
+
+### 68.5 This round's shape
+
+Docs-only: no C changed (the gates stand at slice 5e's canon), the
+deliverable is the readout + the B3 decision. Patch
+`0004-slice-5f-runB2c-pass-b3-decision.patch`, base `327bb87`.
+
+## 69. Slice 5g (B-TRACK): **B3 SHIPS — DTLS-SRTP is wired into the probe.** runB2c proved the validated pair and left `dtls_in:0`: the seat waits for OUR ClientHello. This slice connects the three modules the native track already proved — `kn_cert` (the answer's fingerprint IS the handshake identity), `kn_dtls` (DTLS 1.2 active client, fingerprint pin, use_srtp negotiation, EXTRACTOR-dtls_srtp export) and `kn_rx`'s SRTP session (AES-128-CM + HMAC-SHA1, replay window, in-place unprotect) — to the probe's single-reader drain, and ships the runB3a card. One file changed: `streamer/src/knvstd_main.c`. One flight variable: **the handshake comes up and the first authenticated SRTP bytes decode.**
+
+### 69.1 What the code does (the whole slice, in wire order)
+
+1. **`sess_webrtc_answer_send` keeps the identity.** The real `kn_cert`
+   generated for the answer's fingerprint is no longer freed after
+   fingerprinting — the handle lives in `as->cert` until probe teardown
+   (the native R3-B rule verbatim: *"a placeholder fingerprint has no
+   keypair behind it — announcing one and handshaking another would be
+   a lie"*). The offer's sha-256 pin is copied into `as->srv_fp`
+   (colon-hex, prefix already stripped by `kn_sdp_offer_parse`) via a
+   **bounded memcpy with an honest empty-pin fallback**: an oversize
+   value cannot be a usable pin, and `no_remote_fp` at the arm gate
+   beats a truncated lie. (This guard is not decoration — the paranoid
+   leg's `-Wformat-truncation=2` flagged the naive `snprintf("%s")`
+   char[128]→char[96] copy as an error, and it was right to.)
+2. **NEW `sess_webrtc_dtls_tick`** runs at `hb_duty` on **every** pass,
+   right after `sess_webrtc_stun_tick`. It is a separate function
+   because the STUN tick early-returns on its own pacing
+   (`next_stun_ms`) — and mbedTLS's DTLS retransmission timers are
+   driven **inside** `kn_dtls_poll` calls, so the poll cadence must be
+   "every loop", never "when STUN feels like it".
+   - **Arm gate** (one-shot, `dtls_noarm_logged`): fire on
+     `ice_ok || stun_in` — the nvst :8196 rule, a REAL inbound STUN
+     first, never synthesized (the probe cannot fake `stun_in`: only
+     the seat's datagrams increment it). Refusals log the native
+     reasons verbatim: `no_real_cert` / `no_remote_fp` /
+     `backend_unavailable` / `no_dest`; a failed `kn_dtls_client` logs
+     `client_init` + the module's own detail string.
+   - **Poll**: one `kn_dtls_poll` per pass while armed and not final.
+     `KN_DTLS_READY` → capture stats/ciphersuite/version/first_app
+     head → `webrtc_dtls_ready`; negative rc → `webrtc_dtls_fail`
+     (rc/verify/pin_matched/last_rc/records/polls), then
+     `kn_dtls_free` + NULL (the object refuses further polling; the
+     summary reports the corpse via `dtls_fail_rc`).
+   - **SRTP derivation on ready**: `kn_dtls_srtp_profile` must be
+     `0x0001` (SRTP_AES128_CM_HMAC_SHA1_80 — the offer's use_srtp
+     list, negotiated) and `kn_dtls_srtp_export` must succeed; then
+     `kn_rx_srtp_session_init(CM128_HMAC_SHA1, km+16, 16, km+46, 14,
+     tag 10)` — the **server-write halves** of the 60-byte EXTRACTOR
+     output (F11 layout), the same halves the native audio arm proved
+     against the rig. `km` is memset-scrubbed immediately (§7: shapes
+     and ids in the log, never keys). Anything else — including "the
+     extension was absent" (`srtp_prof:0`) — stays honestly disarmed
+     and the media branch reports `KN_RX_DROP_NO_CIPHER` instead of
+     pretending.
+3. **The drain's demux grows one branch and one line.** The existing
+   DTLS classifier (`0x14..0x17` + `[1]==0xFE`, i.e. record
+   content-types CCS/alert/handshake/appdata at DTLS 1.2 version
+   0xFEFD) is kept — it is **stricter** than `kn_dtls_peek`'s 20..63
+   window and can never steal an RTP-shaped datagram (first byte
+   0x80..0xBF). Each classified DTLS record is now also
+   `kn_dtls_inject`ed (copies to the module's bounded queue, never
+   blocks; overflow counts in `records_dropped`, not in lost bytes).
+   The NEW media branch sits after the STUN-request branch:
+   `dtls_ready && dl >= 12 && (upkt[0] & 0xC0) == 0x80` → capture the
+   head hex **FIRST** (unprotect is IN PLACE — the wire bytes are the
+   evidence, the decoded header the verdict) → `kn_rx_srtp_unprotect`
+   → `KN_RX_OK` counts `media_ok` (+ first pt/ssrc/seq latched),
+   `KN_RX_DROP_AUTH_FAILED` counts `media_authfail`, every other
+   verdict (malformed/replay/no-cipher) counts `media_other` with the
+   `detail` code. Event budget: the first 3 media datagrams always
+   log, failures keep logging to n≤8 (a wall of auth failures is
+   diagnostic, a wall of successes is noise — the counters carry it).
+   RTP-shaped datagrams **before** `dtls_ready` fall through to
+   `other_in` with their head hex — attempting SRTP before the keys
+   exist is a category error, and the honest bucket keeps the
+   evidence.
+4. **Teardown order is the borrow order reversed**: `kn_dtls_free` →
+   `kn_cert_free` → `kn_sock_udp_close` (the DTLS object borrows both
+   the socket and the cert for its whole life).
+5. **`webrtc_answer_summary` grows the B3 block**: `dtls_armed`,
+   `dtls_ready`, `dtls_ms` (arm→ready), `dtls_fail_rc`, `srtp_prof`,
+   `srtp_derived`, `media_in/ok/authfail/other`, `first_media_ms`
+   (relative to answer-sent, like every other `*_ms`), `first_pt`,
+   `first_ssrc`, `first_seq`.
+
+### 69.2 Event dictionary (new / grown this slice)
+
+- `webrtc_dtls_arm` — `armed:1` (pin_len, cert_real, dest_port, t_ms)
+  or `armed:0` + `reason` (+ `detail` on client_init). One-shot.
+- `webrtc_dtls_ready` — ms (arm→ready), version, cipher, records_in /
+  records_out, verify (0 = clean), pin_matched, srtp_prof, app_records
+  / app_bytes / first_app_len / first_app (hex head ≤ 32 B — an SCTP
+  INIT here is B4's design input, R3-C's old finding), t-relative.
+- `webrtc_srtp_arm` — derived:0/1, profile. (derived:0 with
+  profile:1 means the export or session_init failed — read the build;
+  profile:0 means the seat never negotiated use_srtp — read the
+  offer.)
+- `webrtc_dtls_fail` — rc (KN_DTLS_ERR_* negative), verify,
+  pin_matched, last_rc (the fatal mbedTLS code), records_in/out,
+  polls, t_ms.
+- `webrtc_media` — n, len, urc (0 = KN_RX_OK, >0 = the drop verdict),
+  detail, plain (plaintext length, tag stripped), pt, ssrc, seq,
+  t_ms, head (PRE-decryption hex ≤ 32 B).
+- `webrtc_answer_summary` — the 69.1(5) fields appended to the 5d/5e
+  shape.
+
+### 69.3 Gate canon (measured this round, sandbox Debian 12)
+
+- `build_native_tests.sh`: **NATIVE TESTS PASS** (knsdp 102/0,
+  knogg 163/0, knarx 62/0, knwire 52/0, JSONL + ZIP validation; the
+  kn_dtls legs run STUBBED natively — the real battery is cmake's).
+- `cross_check.sh`: **CROSS-CHECK PASS**, zero warnings under
+  `-Wall -Wextra -Werror` on **both** arches (x86_64 + i686), the
+  paranoid knvstd leg (`-Wunused-but-set-variable
+  -Wformat-truncation=2`) included — it caught the pin-copy
+  truncation class BEFORE shipping, exactly what round XXVII built it
+  for. usrsctp leg SKIPs (tree absent = normal state).
+- **NEW this slice**: project cmake with the REAL mbedTLS backend
+  (`-DKN_TLS_BACKEND=mbedtls`, third_party staged by
+  `tools/prepare_mbedtls_sandbox.sh`) → build 100% → **ctest 29/29**,
+  including `test_kndtls`'s real loopback-UDP battery **39/0** and
+  `test_kncert` **10/0**. The slice's own code path (kn_dtls +
+  kn_rx_srtp against real mbedTLS) is the same code the rig links.
+- Launcher: **168/0** (untouched, re-run as the regression floor).
+- **No new unit tests, deliberately**: the slice is pure integration
+  (no new module, no new parser, no shared representation crossing a
+  module boundary — the 5e ledger rule doesn't bite here). The
+  integration itself has exactly one honest test environment: the
+  seat. runB3a IS the test.
+
+### 69.4 runB3a — the flight card
+
+**Pre-flight (operator, in order):**
+1. Apply `0005-slice-5g-b3-dtls-srtp.patch` on `poprawki-agenta`
+   (base: the pushed 0004 HEAD), rebuild via **T10** — expect
+   `ALL PASS` (89/0 class; the kndtls leg now runs the REAL battery
+   because the rig build carries mbedTLS — 39/0, not the stub shape).
+2. Launcher: run folder `runB3a` (free name, 5c), draw 1, params
+   EXACTLY the minimal card (the extra session flags are provably
+   inert in probe mode — §67.4):
+   `--cm-profile=browser --webrtc-answer=45 --session-queue-timeout=1500`
+3. One draw. This is a probe, not a keeper attempt.
+
+**PASS oracle (every line must hold):**
+1. `webrtc_dtls_arm` `armed:1` (any `armed:0` is a named branch below).
+2. `webrtc_dtls_ready` with `pin_matched:1`, `verify:0`,
+   `srtp_prof:1`, `ms` < ~5000 (loopback-class RTT to the seat is
+   ~30-60 ms; 5 s is generous).
+3. `webrtc_srtp_arm` `derived:1`.
+4. `webrtc_media` with `urc:0` — at least one; `media_ok ≥ 1`,
+   `media_authfail:0`, `first_pt` ∈ the offer's PT set (96/97 video,
+   RTX, or the opus PT), `first_media_ms` < `linger_ms`.
+5. `webrtc_answer_summary`: `dtls_armed:1 dtls_ready:1 srtp_derived:1
+   media_ok ≥ 1 media_authfail:0 dtls_fail_rc:0` AND the runB2c
+   regression floor intact: `ice_ok:1`, `stun_answered ≥ 1`,
+   `linger_ms ≈ 45000` (the WS must still live the full window —
+   a B3 that kills the WS is a B3 that changed two variables).
+6. Clean exit shape: `webrtc_answer_done` + `cm_cancel 200`
+   (exit_code 1 remains the known probe artifact).
+
+**Named fail branches (readout → first action):**
+- `armed:0 reason:no_real_cert` → the rig build lost the mbedTLS
+  backend; check T10's `KN_TLS_BACKEND` line and `cert:"real"` in the
+  `identity` event.
+- `armed:0 reason:no_remote_fp` → the offer carried no sha-256
+  fingerprint (or an oversize one — see 69.1(1)); diff the flight's
+  `webrtc_offer_sdp` against runB2c's.
+- `armed:0 reason:backend_unavailable` → same as no_real_cert, one
+  layer down (`kn_dtls_available()` false in the linked binary).
+- `webrtc_dtls_fail rc:-3` (`ERR_PIN`) with `pin_matched:0` → the
+  seat's cert does not match the offer's fingerprint: pin-copy bug on
+  our side (compare `pin_len:95` in the arm event) or seat-side cert
+  rotation between offer and handshake (re-fly once before believing
+  it).
+- `rc:-4` (`ERR_HANDSHAKE`) → read `last_rc` (the mbedTLS code):
+  version/ciphersuite disagreement or a half-eaten flight; the
+  `records_in/out` pair says whether the seat replied at all.
+- `rc:-7` (`ERR_IO`) → our sendto died; check the socket state in the
+  same window (`webrtc_stun_out` errors).
+- `dtls_ready:1` but `media_in:0` → the seat sent no RTP inside the
+  window: either it gates media on the SCTP datachannel coming up
+  (B4's variable — note `first_app` in the ready event: an SCTP INIT
+  from the seat would be visible there) or media arrived pre-ready
+  (`other_in` heads starting 0x80.. in the wire dump say exactly
+  this).
+- `media_authfail > 0` → wrong key material: the halves are km+16
+  (key) / km+46 (salt), tag 10, profile 0x0001 — the native-proven
+  set; if those are confirmed, the seat derived under a different
+  SRTP profile than it negotiated (compare `srtp_prof` with the
+  offer's use_srtp list).
+- `media_other > 0` with `detail` = kn_gs malformed codes → RTP
+  header shapes the depacketizer rejects; the pre-decryption heads in
+  the events are the ground truth — B3.5's design input, not a B3
+  failure, as long as `media_ok ≥ 1` holds.
+
+### 69.5 This round's shape
+
+One file of C (`streamer/src/knvstd_main.c`), no new modules, no
+build-system change, no launcher change, no kn_* API change — the
+slice consumes three existing, rig-proven APIs exactly as the native
+track did. Docs: this section, START-HERE §43, INTEGRATION slice 5g.
+Patch `0005-slice-5g-b3-dtls-srtp.patch`, base = the operator's
+pushed 0004 HEAD on `poprawki-agenta`. Next: **runB3a**; then B3.5
+(`kn_rx_video` depacketization — decode the first NALUs, not just
+count them) and B4 (SCTP datachannel + input + media heartbeat).
+
+## 70. Slice 5h (B-TRACK, docs-only): **runB3a is a CLEAN PASS — the first DTLS handshake and the first authenticated media bytes in project history.** All six §69.4 oracle lines held on the first flight of the 5g code: arm at ice_ok+1 ms, handshake in **481 ms** (`pin_matched:1`, `verify:0`, DTLSv1.2, `TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256`), SRTP derived (`profile:1`), and **2306 SRTP-authenticated packets with ZERO auth failures** — the km+16/km+46 server-write halves + tag 10, proven on native audio, are now proven on the B-track against a live seat. The WS lived the full window again (`linger_ms:45078`). And the flight answered the next design question before we had to ask it: **the seat sent an SCTP INIT as app record #1 at ready+0 ms and no video ever arrived — B4 is the datachannel.**
+
+### 70.1 The flight (draw 1, 2026-11-03 ~13:12 local, Endfield, seat `80.250.98.39:5004`, T10 ALL PASS 89/0 with the kndtls REAL battery 39/0)
+
+Queue 71→0 (a real queue this time), ad NO-FILL again (empty
+`<VAST version="4.0"/>` → `VAST_NO_ADS_AFTER_WRAPPER` cancel — the
+B1-class path), seat `conn0_usage:14 alp:5`, WS 101, offer 3122 B /
+105 lines, answer 1421 B + nvstSdp 3710 B, `cert:"real"`, PTs from
+the offer: **video 96, rtx 97, audio 111**. Millisecond timeline
+(t = answer-sent):
+
+| t (ms) | event |
+|---|---|
+| 1 | first check at the 47998 m-line dummy (black-holed, by design) |
+| 372 | trickle candidate `80.250.98.39:5004 srflx` → `webrtc_stun_arm`, socket reconnected |
+| 1626 | authenticated SUCCESS → `ice_ok` (`inspect:1 mi:1`), mapped `10.222.254.5:62548` |
+| 1627 | the seat's 3 checks answered (`mi_key:"ours"`, username `DINe:bfe4c298`) — and `webrtc_dtls_arm armed:1` the SAME millisecond |
+| ~1627 | first inbound DTLS record: 654 B (ServerHello..ServerHelloDone flight; NO HelloVerifyRequest — the seat skipped the cookie exchange) |
+| ~2108 | `webrtc_dtls_ready ms:481` — 3 records out, 8 in; `first_app` = a 44-byte SCTP INIT (below); `webrtc_srtp_arm derived:1` |
+| 2357 | first authenticated media (`urc:0`, pt 111, ssrc 1, seq 9, plain 105) |
+| 3611…44818 | 9 consent refreshes at 5.15 s spacing, all answered |
+| 45078 | linger ends: `webrtc_answer_done` + `cm_cancel 200` (exit 1 = the known probe artifact) |
+
+Summary verdict block: `dtls_armed:1 dtls_ready:1 dtls_ms:481
+dtls_fail_rc:0 srtp_prof:1 srtp_derived:1 media_in:2884 media_ok:2306
+media_authfail:0 media_other:578 first_media_ms:2357 first_pt:111
+first_ssrc:1 first_seq:9` + the runB2c floor intact (`ice_ok:1`,
+`stun_bad:0`, full-window linger).
+
+### 70.2 The accounting CLOSES — every datagram is in exactly one bucket
+
+- **`other_in:9` = audio seq 0..8, which arrived BEFORE `dtls_ready`**
+  (the seat started streaming the instant its own Finished went out —
+  a race we cannot win and do not need to). The two logged heads
+  confirm it: `90ef0000…` = V2/X1, PT 111 + marker, seq 0; `906f0001…`
+  = seq 1. First authenticated = seq 9 at ready+249 ms. The honest
+  `other_in` bucket (§69.1(3)) did exactly its job: no fake drops, no
+  fake auths, and the sequence numbers prove nothing was lost between
+  the buckets.
+- **`media_ok:2306` ≈ 54.0/s over the 42.72 s post-ready window** —
+  the opus audio stream (PT 111, ssrc 1; a 20 ms cadence is 50/s, the
+  excess is start-up burst/jitter; payload-level reading is B3.5's
+  job, not the verdict's). Plain lengths 105/106 = wire 115/116 − tag
+  10 ✓.
+- **`media_other:578` ≈ 13.5/s — the SRTCP class** (RTCP SR/RR +
+  transport-cc feedback; the offer carries `extmap:3
+  transport-wide-cc`). RTCP-mux means they arrive 0x80-shaped, our
+  SRTP-only session rejects them as malformed/no-cipher, and they are
+  counted, not logged (the n≤8 failure budget had been spent on…
+  nothing — the first 8 media datagrams all authenticated, so zero
+  failure events printed; the counter is the evidence). B4 must decide
+  whether to answer TWCC/RR at all — the reference's rtcp behaviour is
+  the spec.
+- **`media_authfail:0` over 2306 packets** is the headline: the
+  F11 EXTRACTOR layout (server-write key km[16..32), salt km[46..60)),
+  profile 0x0001, tag 10 — derived from the native AUDIO track — is
+  correct for the B-track RECEIVE direction against a production
+  seat. One variable, one flight, confirmed.
+
+### 70.3 The SCTP INIT, decoded (the 44-byte `first_app`)
+
+`13881388 00000000 7409a4ac | 01 00 001e | 47069b6f 00500000 0080
+0080 b53078ba` + 12 bytes past the event's 32-byte head:
+
+| field | value |
+|---|---|
+| SCTP src/dst port | 5000 → 5000 (the WebRTC datachannel convention) |
+| verification tag | 0 (correct for INIT) |
+| chunk | 0x01 INIT, len 30 |
+| Initiate Tag | `0x47069b6f` (goes into our INIT-ACK) |
+| a_rwnd | 5,242,880 B |
+| outbound/inbound streams | 128 / 128 |
+| initial TSN | `0xb53078ba` |
+| tail | ~10 B optional param + padding — bytes 33..44 were NOT printed (the 5g event caps the head hex at 32 B; the MODULE captured up to `KN_DTLS_FIRST_APP_CAP` = 64, so the bytes existed in stats and were thrown away by the printer — B4 prints the full 64 and/or reads records via `kn_dtls_read_app`) |
+
+This is the seat asking for the datachannel **immediately** — app
+record #1, ready+0 ms, before a single media packet. Whether it
+retransmitted INIT during the 45 s (usrsctp would, at 1/2/4/8 s…) is
+UNMEASURED: stats were printed once at ready, the wire dump is
+TLS-plaintext-only (no UDP records), and kn_dtls drains app records
+into `app_records/app_bytes` counters nobody re-read. B4 adds the
+teardown stats line; the question is moot anyway once we answer INITs.
+
+### 70.4 The ICE delta vs runB2c is a finding, not a regression
+
+runB2c (no DTLS): the seat checked us **261** times (~6/s keepalive).
+runB3a: **3** checks, all at t≈1627, none after — the seat's ICE
+liveness duty collapses once the DTLS/SRTP session itself proves the
+peer alive. Our side held the 5.15 s consent cadence (stun_out 12 =
+3 punch + 9 consent), `stun_resp_in:9`, `stun_bad:0`. Mapped
+`10.222.254.5:62548` — the private-netns re-NAT of §66.6's corrected
+oracle reproduces on a third seat (`.39` after `.41`). B3 liveness
+math: the seat needs NO STUN from us post-DTLS; keep the consent
+cadence anyway (it is free and it is what a browser does).
+
+### 70.5 DECISION: B4 = the SCTP datachannel (and why it jumps the ladder)
+
+Evidence, in order of strength: (1) the seat sent INIT at ready+0 and
+we dropped it (by design — the B3 slice had no SCTP); (2) **zero video
+packets** (PT 96/97) in 42.7 s while audio flowed — the strongest
+available signal that video is gated on something we are not doing,
+and the only something the seat visibly asked for is the datachannel;
+(3) the reference flow agrees — nvst/OpenNOW: `Event::Connected →
+dtls_ready → start_sctp(true)` before media (the native tree's own
+comment, knvstd_main.c ~:5000); (4) `kn_sctp` already exists and was
+built for exactly this bridge: `kn_sctp_open(write_cb =
+kn_dtls_write_app)`, `kn_sctp_inject` fed from `kn_dtls_read_app`
+(its header says so verbatim), `kn_sctp_poll` with a message callback,
+DCEP builders/parsers (`dcep_open_build`/`dcep_ack_build`/`dcep_parse`)
+— and the rig HAS real usrsctp (T10: "PASS usrsctp source already
+present"); the sandbox stubs it (cross-check leg SKIPs, cmake builds
+the honest stub).
+
+B3.5 (kn_rx_video depacketization) is DEFERRED until video bytes
+exist — depacketizing zero packets is not a slice. Audio opus decode
+is not needed for any verdict either. **One variable for runB4a: the
+datachannel comes up (INIT-ACK → COOKIE-ECHO → COOKIE-ACK → DCEP open
+→ first nvst message) — with "video PT 96 appears" as the readout that
+tells us whether the gate hypothesis was right.** The card ships with
+the B4 code slice (the 5g pattern), not before.
+
+B4 recon list (next round, before touching code):
+1. `kn_dtls_read_app` semantics: does the rx ring HOLD app records
+   until read (bounded, `app_q_dropped` on overflow) or auto-drain?
+   The stats comment says "discarded", the header says "pop ONE
+   decrypted app record" — resolve in code, not from comments.
+2. `kn_sctp_open` vs `kn_sctp_open_peer`/`open_server`: which role
+   answers an inbound INIT (we are the DTLS client but the SCTP
+   INIT came FROM the seat — usrsctp role semantics matter here).
+3. The nvst datachannel protocol on top of DCEP (channel ids/labels,
+   the message dialect — heartbeat, input, `session present`): from
+   `gfn_ref_out/opennow_webrtc_ref/` + the 2026-11-02 web capture.
+4. usrsctp staging for the sandbox (SETUP §2.2 pins `c625e219`;
+   without it the sandbox gate can only prove compile+stub, and the
+   real SCTP battery runs on the rig's T10 — name that limit in the
+   gate canon if it stays).
+5. Teardown stats for dtls (app_records/app_bytes/app_q_dropped/
+   peer_closed) into `webrtc_answer_summary` — cheap, closes 70.3's
+   unmeasured.
+
+### 70.6 The handoff audit (operator's question: can a cold chat take over?)
+
+Asked and answered honestly this round: **before this patch, NO.**
+START-HERE's §2 reading order, §3 "Current state" and §4 "What to do
+next" were frozen at the native era (round M, 2026-10-29) — the
+binding continuity rule in the file's own header was not being honored
+by the B-track rounds, which appended §37–§43 at the end but never
+re-pointed the front. The patch delivery protocol (one `.patch`,
+`git am`, base chain, branch `poprawki-agenta`), the flight-card
+conventions and the evidence-repo workflow lived in agent session
+memory, not in the repo. Fixed in this patch: START-HERE grows **§44
+—the B-track handoff** (you-are-here, working protocol, reading path,
+known artifacts) with banners on §2/§3/§4 and corrected bullets in
+§5/§11. After this patch the answer is YES with a defined entry
+point: **START-HERE §44 first**, then the §44.4 reading path.
+
+### 70.7 This round's shape
+
+Docs-only: RTSP §70 (this), START-HERE §44 + the banners/bullet
+fixes, INTEGRATION slice 5h. No C, no build, no launcher change — the
+slice-5g gate canon stands verbatim, the rig needs NO rebuild for
+this patch. Patch `0006-slice-5h-runB3a-pass-b4-decision.patch`, base
+`c7617de` (the operator's pushed 5g). Evidence: karnyjohnny/
+karnynow-logs @ `86716ed` (runB3a/1 + T10), archived to the
+workspace's `priv-logs/runB3a` (plus the previously missing
+runB2a/runB2b archives — §11's rule, now whole). Next round: **B4
+code slice + the runB4a card.**
+
+## 71. Slice 5i (B-TRACK): **B4 SHIPS — the probe answers the seat's SCTP INIT and opens the WebRTC datachannel profile.** runB3a measured the seat firing a 44-byte INIT at ready+0 ms and no video arriving; this slice wires `kn_sctp` (vendored usrsctp, AF_CONN over the kn_dtls app ring) into the probe as the association RESPONDER, opens OpenNOW's three WebRTC channels on up, ACKs whatever the seat opens, watches for the reference's input handshake, and closes runB3a's measurement blind spots (post-ready app-ring counters). One file changed: `streamer/src/knvstd_main.c`. One flight variable: **the datachannel comes up** — with "does video PT 96 start" as the scoring readout.
+
+### 71.1 The role decision: RESPOND, never race
+
+runB3a's `first_app` settled a question the native track never faced:
+on the WebRTC path the SEAT initiates the SCTP association (INIT at
+ready+0, ports 5000/5000, tag `0x47069b6f`, OS/MIS 128/128, TSN
+`0xb53078ba`). The native path was the opposite (the client
+`start_sctp(true)`s — nvst.rs:8221 — and `kn_sctp_open` exists for
+exactly that). Racing our own INIT against the seat's would invoke
+RFC 4960 §5.2.1 collision resolution on the very flight whose single
+variable is "does the channel come up" — so the probe arms
+**`kn_sctp_open_server`** (bind+listen on 5000; `kn_sctp_poll`'s
+accept path takes the first association, and accept-returning IS the
+server-side COMM_UP — kn_sctp.c's own rule). Consequences, all
+spec-backed:
+
+- We are the DCEP **server** (RFC 8832 §5.1: the side that accepted
+  the association) → our OPENs use **ODD** stream ids (1/3/5), while
+  the native profile's even ids (0..14) belong to the initiator role.
+- The establishment transition is watched via `kn_sctp_established()`
+  in the tick, NOT via the event callback: the server-mode accept
+  deliberately does not up-call (the COMM_UP notification may fire
+  before the accepted socket is re-subscribed — the code says so), so
+  the callback route would be a coin flip. Client-mode COMM_LOST
+  still surfaces through `kn_sctp_poll`'s `KN_SCTP_ERR_LOST` return,
+  logged once with the stats corpse.
+- If a future seat does NOT INIT (behavior variance), the flight
+  reads `sctp_armed:1, sctp_up:0, pkts_in:0` + `dtls_final
+  app_records:0` — a named branch (71.6), and the initiator fallback
+  becomes the next slice's decision, made from that evidence, not
+  guessed now.
+
+### 71.2 The channel profile: the reference's THREE, not the native eight
+
+OpenNOW's WebRTC transport (transport_input.rs
+`InputChannels::create`) creates exactly three channels; the native
+`kn_sctp_nvst_channels[8]` (control/custom/cursor/rtcp…) is the
+Mjolnir profile and would be the wrong wire. The probe's table
+mirrors the reference's creation order, reliability mapping
+(str0m's `Reliability`→DCEP: ordered+reliable → `RELIABLE`,
+`MaxPacketLifetime{300}` → `TIMED`/300 unordered,
+`MaxRetransmits{0}` → `REXMIT`/0 unordered), priority 0 and the
+empty protocol string:
+
+| sid | label | ordered | DCEP type | rel |
+|---|---|---|---|---|
+| 1 | `stats_channel` | no | REXMIT\|0x80 | 0 |
+| 3 | `input_channel_v1` | yes | RELIABLE | 0 |
+| 5 | `input_channel_partially_reliable` | no | TIMED\|0x80 | 300 |
+
+(The `|0x80` is applied by `kn_sctp_dcep_open_build` from the def's
+`unordered` flag — the table carries plain types, like the native
+one.)
+
+### 71.3 What the code does (wire order)
+
+1. **NEW `sess_webrtc_sctp_tick`** at `hb_duty`, after the DTLS tick.
+   Arms once on `dtls_ready` (one-shot `webrtc_sctp_arm`; refusals:
+   `backend_unavailable` — the stub build says so loudly — or
+   `open_failed` + detail). Every pass: drain the kn_dtls app ring
+   (`kn_dtls_read_app` loop → `kn_sctp_inject` — the ring KEEPS
+   records until read, 8×2048 B, so the seat's ready+0 INIT is
+   waiting for us even though the arm happens a tick later) →
+   `kn_sctp_poll` (flushes tx through `sess_webrtc_sctp_write` =
+   `kn_dtls_write_app`, up-calls messages). On the establishment
+   transition (one-shot): `webrtc_sctp_up` (ms + t_ms) and the three
+   OPENs (`dc_opened` = the count the stack accepted).
+2. **`sess_webrtc_sctp_msg`** (the rx up-call): DCEP OPEN from the
+   seat → `webrtc_dc_peer_open` (sid/label/type/unordered/rel, first
+   8 — WHICH channels the WebRTC seat opens toward us is an open
+   runB3a question) + an ACK back (str0m's rule, the native callback
+   does the same) → `peer_acked`; DCEP ACK → `dc_acked`, one-shot
+   `webrtc_dc_open` when opened==acked; any other message →
+   `sctp_msgs_in` + the **input-handshake watch**: the reference's
+   readiness gate is the server's first bytes on `input_channel_v1`
+   — LE16 `526` (`0x0e 0x02`) with an optional LE16 version, or a
+   bare `0x0e`-prefixed pair — detected content-first (sid-agnostic,
+   robust to whatever sid the seat maps the label to), logged once as
+   `webrtc_input_hs` (sid/ppi/len/ver/t_ms); everything else gets a
+   bounded head hex (`webrtc_sctp_msg`, first 5).
+3. **Teardown gains two evidence lines and an order**:
+   `webrtc_sctp_final` (established/lost/assoc_state+error/errno/
+   pkts+bytes in-out/txq_dropped/msgs/sends/send_errors/notif) then
+   `kn_sctp_close` — BEFORE `webrtc_dtls_final`
+   (app_records/app_bytes/**app_q_dropped**/**peer_closed**/records/
+   polls — this closes recon point #5: runB3a printed app stats only
+   at ready, so whether the seat re-INITed or sent more app data was
+   unmeasured; runB4a measures it) then `kn_dtls_free` →
+   `kn_cert_free` → sock close (borrow order reversed, as before).
+4. **`webrtc_answer_summary` grows the B4 block**: `sctp_armed`,
+   `sctp_up`, `sctp_ms`, `dc_opened`, `dc_acked`, `peer_opened`,
+   `peer_acked`, `sctp_msgs_in`, `hs_seen`, `hs_ver`, `first_hs_ms`;
+   the verdict comment carries the §71.6 oracle shape.
+
+### 71.4 Event dictionary (new / grown this slice)
+
+- `webrtc_sctp_arm` — armed:1 (role:"responder", port:5000, t_ms) or
+  armed:0 + reason (+detail). One-shot.
+- `webrtc_sctp_up` — ms (open→accept), t_ms. One-shot.
+- `webrtc_dc_peer_open` — sid/label/type/unordered/rel (first 8).
+- `webrtc_dc_open` — opened/acked/peer_opened/t_ms. One-shot at
+  opened==acked.
+- `webrtc_input_hs` — sid/ppi/len/ver/t_ms. One-shot.
+- `webrtc_sctp_msg` — n/sid/ppi/len/head (first 5 non-DCEP,
+  non-handshake messages).
+- `webrtc_sctp_down` — cause (named via `kn_sctp_assoc_state_name`),
+  assoc_state/error, errno, counters, t_ms. One-shot.
+- `webrtc_sctp_final` / `webrtc_dtls_final` — the teardown stats
+  (71.3(3)).
+- `webrtc_answer_summary` — the 71.3(4) fields.
+
+### 71.5 Gate canon (measured this round, sandbox Debian 12, ALL THREE
+real trees staged: tiny-aes/sha1 + mbedTLS 3.6.0 + usrsctp c625e219)
+
+- paranoid knvstd compile ×2 arches: zero warnings.
+- `build_native_tests.sh`: **NATIVE TESTS PASS** (kn_sctp natively =
+  the honest stub; the DCEP goldens vs `tools/sctp_reference.py` run
+  in every build).
+- `cross_check.sh`: **CROSS-CHECK PASS** zero warnings both arches —
+  and with usrsctp staged the **kn_sctp real-body cross leg COMPILED**
+  (no SKIP this time), so the mingw path of the vendored stack is
+  proven again.
+- project cmake `-DKN_TLS_BACKEND=mbedtls` (+usrsctp auto-detected:
+  "kn_sctp: usrsctp backend ENABLED") → build 100% → **ctest 29/29**,
+  `test_knsctp` **REAL battery 35/0** (AF_CONN loopback association:
+  open↔open_peer relay, DCEP round-trip, PR-SCTP sends) and
+  `test_kndtls` **39/0**.
+- launcher **168/0**.
+- **No new unit tests, deliberately** (the 5g rule stands): the slice
+  is integration of a golden-tested module; the DCEP wire builders it
+  uses are already pinned twice (Python reference + C goldens); the
+  association behavior itself has exactly one honest test environment
+  — the seat. runB4a IS the test.
+
+### 71.6 runB4a — the flight card
+
+**Pre-flight (operator, in order):**
+1. Apply `0007-slice-5i-b4-sctp-datachannel.patch` on
+   `poprawki-agenta` (base: the pushed 5h HEAD), rebuild via **T10** —
+   expect `ALL PASS` 89/0 class with `test_knsctp` REAL shape
+   (**35/0**, usrsctp is on the rig) and `test_kndtls` 39/0.
+2. Launcher: run folder `runB4a`, draw 1, params EXACTLY:
+   `--cm-profile=browser --webrtc-answer=45 --session-queue-timeout=1500`
+3. One draw; probe, not a keeper.
+
+**PASS oracle (the GATE — every line must hold):**
+1. `webrtc_sctp_arm` `armed:1 role:"responder"`.
+2. `webrtc_sctp_up` with `ms` < ~3000 (an INIT-ACK/COOKIE round trip
+   on a ~30-60 ms path; 3 s is generous).
+3. `dc_opened:3` AND `webrtc_dc_open` with `acked:3` (the seat
+   accepted our WebRTC profile).
+4. The B3 floor intact: `dtls_ready:1 srtp_derived:1 media_ok ≥ 1
+   media_authfail:0 dtls_fail_rc:0 ice_ok:1 linger_ms ≈ 45000`.
+5. Clean exit shape (`webrtc_answer_done` + `cm_cancel 200`, exit 1 =
+   the known artifact).
+
+**Scoring readout (NOT gating — this is what the flight TELLS us):**
+- `hs_seen:1` + `hs_ver` → the seat drove the reference's
+  input-readiness handshake with us (the reference gates "input
+  ready" on exactly this message).
+- video PT 96/97 in `webrtc_media`/`first_pt` → **the gate hypothesis
+  was right** (datachannel up ⇒ video flows) and B5 =
+  depacketization + input. If the channel is fully up, acked, and
+  handshaken but video still absent → the gate is something else
+  (the media heartbeat / an nvst control message on
+  control-style channels — the `webrtc_dc_peer_open` labels +
+  `webrtc_sctp_msg` heads are the design input, and `peer_opened > 0`
+  would mean the seat expects ITS channels to be used).
+
+**Named fail branches (readout → first action):**
+- `armed:0 reason:backend_unavailable` → the rig build lost usrsctp
+  (T10 says "usrsctp source already present" — check
+  `KN_SCTP_BACKEND_USRSCTP` in the build log).
+- `sctp_up:0`, `sctp_final pkts_out ≥ 1`, `pkts_in ≥ 1` → the
+  handshake stalled mid-way (cookie/verification-tag class): read
+  `assoc_state/assoc_error/errno` and re-fly once before believing a
+  seat quirk.
+- `sctp_up:0`, `pkts_in:0` → split by `webrtc_dtls_final
+  app_records`: ≥1 means the INIT reached the ring but not usrsctp
+  (our bug — inject path); 0 means **the seat never INITed this
+  flight** (behavior variance — re-fly once; if it repeats, the
+  initiator fallback (`kn_sctp_open`) becomes the next slice's
+  decision, made from this evidence).
+- `dc_opened:3, dc_acked:0` with `peer_opened > 0` → the seat opened
+  ITS own channels and ignored ours: the `webrtc_dc_peer_open` labels
+  are the answer key (maybe the WebRTC seat expects the client to use
+  only server-opened channels — a profile decision for B5, not a
+  bug).
+- `webrtc_sctp_down cause:shutdown_comp` → the seat decided the
+  session was over (read the t_ms: an early shutdown = policy; a
+  late one = the linger ending). `comm_lost` → the path died
+  (compare with the STUN consent counters in the same window).
+- WS dies before 45 s with the channel up → we changed two
+  variables; the summary's B3/B2 floor fields localize which.
+
+### 71.7 This round's shape
+
+One file of C (`streamer/src/knvstd_main.c`), no new modules, no
+kn_* API change, no build-system change, no launcher change — the
+slice consumes `kn_sctp`'s existing, golden-tested API exactly as the
+native pump did, with the two WebRTC-path differences (responder
+role, three-channel profile) living in the probe where the flight
+evidence lives. Docs: this section, START-HERE §45 + the §44 pointer
+updates, INTEGRATION slice 5i. Patch
+`0007-slice-5i-b4-sctp-datachannel.patch`, base = the operator's
+pushed 5h HEAD on `poprawki-agenta`. Next: **runB4a**; then B5 from
+its readout (depacketization if video flows; the peer-channel /
+heartbeat dialect if it doesn't).
+
+## 72. Slice 5j (B-TRACK): **runB4a is READ — the datachannel gate did NOT fire (sctp_up:0), the B3 floor held perfectly, and the readout found the bug in OUR integration: the probe stopped servicing DTLS after ready.** The seat's INIT was answered (our 356-byte INIT-ACK left as DTLS app record #4, `send_errors:0`), then five post-ready DTLS records arrived and sat **injected-but-undecrypted** — slice 5g's `dtls_tick` polled only while `!dtls_ready`, but the inject queue is processed ONLY inside `kn_dtls_poll` (post-ready poll = idempotent READY + `dtls_drain_app` into the app ring). The native pump carries the rule verbatim at ~:6086 — *"keep the established DTLS session serviced: poll (drains app records into the ring, answers post-handshake traffic)"* — and the 5g integration dropped that half. This is the 5e lesson's sibling: the flight measured what the suite could not (no unit test can starve a live seat). The fix is one guard; the role-flip question (§71.6's initiator branch) stays PARKED until runB4b says what those five records were.
+
+### 72.1 The flight (draw 1, 2026-11-03 ~14:5x local, seat `80.250.98.38:5004`, T10 ALL PASS 89/0 with test_knsctp REAL 35/0 + test_kndtls 39/0)
+
+| t (ms) | event |
+|---|---|
+| 1596 | `ice_ok` (mapped `10.222.254.4:61524` — 4th seat, 4th private-netns re-NAT) |
+| 1597 | `webrtc_dtls_arm armed:1`; handshake in **380 ms** (`records_in:8, records_out:3`) |
+| ~1977 | `webrtc_dtls_ready` — **`app_records:1` already at ready** (the seat's INIT, 44 B: tag begins `e624ab…`, same shape as runB3a's) |
+| 2010 | `webrtc_sctp_arm armed:1 role:"responder"`; the INIT drains ring→inject→usrsctp; **INIT-ACK out** (`pkts_out:1, bytes_out:356`; DTLS `records_out` 3→4, `send_errors:0`) |
+| 2261+ | audio flows: `first_seq:0`, `media_ok:2313`, `media_authfail:0`, `other_in:0` (NO pre-ready race this flight — the whole stream arrived post-ready) |
+| …45092 | five post-ready DTLS records arrive (`records_in` 8→13) — **never processed** (`polls:3`, frozen at the handshake); no COOKIE-ECHO ever reaches usrsctp (`pkts_in` stays 1, `msgs_in:0`), no SCTP retransmit of our INIT-ACK class visible either |
+| 45092 | linger ends full-window; clean `webrtc_answer_done` + `cm_cancel 200` |
+
+Gate score vs §71.6: lines 1/4/5 **held** (`armed:1 responder`; B3
+floor perfect; clean exit) — lines 2/3 **failed** (`sctp_up:0`,
+`dc_opened:0`) via the named branch "`sctp_up:0`, `pkts_in ≥ 1`" —
+and the branch's own instrumentation (`webrtc_sctp_final` /
+`webrtc_dtls_final`, shipped in 5i for exactly this) localized the
+fault to OUR side of the wire in one read.
+
+### 72.2 The diagnosis, in counter arithmetic (why it is OUR bug)
+
+- `polls:3` — the 5g gate `!as->dtls_ready` stopped polling at ready
+  (three handshake polls total).
+- `records_in:13` at teardown vs **8 at ready** (the ready event
+  printed it) → five datagrams were injected post-ready.
+- `app_q_dropped:0`, `app_records:1`, `app_bytes:44` → nothing was
+  decrypted after the INIT; the inject queue never overflowed — it
+  simply was never drained. The queue is drained ONLY by
+  `dtls_drain_app`, whose ONLY call sites are inside `kn_dtls_poll`
+  (kn_dtls.c :464 post-ready path, :483 at the ready transition).
+- `sctp_final pkts_in:1` → usrsctp saw only the INIT. Had any of the
+  five been decrypted, they would have landed in the app ring, and
+  the sctp tick's `read_app` loop (which ran every pass, starved)
+  would have injected them.
+- What were the five? **Unidentified in runB4a by evidence budget**:
+  the `webrtc_dtls_in` head printout (2) was spent on handshake
+  datagrams. Two hypotheses survive the counters: **(A)** the seat's
+  COOKIE-ECHO + T1-cookie retransmits — the cadence 1+2+4+8+16 s
+  sums to 31 s inside the 43 s post-ready window, and five records
+  is exactly original+4; or **(B)** duplicate/retransmitted handshake
+  flights the seat emitted post-ready (mbedTLS would absorb them
+  silently once processed). Hypothesis A means the responder design
+  was RIGHT and the association was mid-handshake while we starved
+  it; hypothesis B means the seat's INIT is vestigial and §71.6's
+  initiator branch activates. runB4b discriminates with the fix +
+  the widened head budget — no guessing now.
+
+### 72.3 The fix (slice 5j, one variable)
+
+1. **Poll forever**: the `dtls_tick` gate loses `!as->dtls_ready` —
+   every pass polls while armed and not fatal. Post-ready poll is
+   the module's documented idempotent READY + app drain; the ready
+   block keeps its own one-shot guard (`!as->dtls_ready && drc ==
+   KN_DTLS_READY`) so stats/export/events fire exactly once; the
+   fail branch semantics are unchanged (a post-ready negative can
+   only be a latched write-path fatal — logging + freeing is the
+   honest response, and the sctp `write_cb` already NULL-checks).
+2. **Post-ready head budget**: `webrtc_dtls_in` now also prints for
+   post-ready datagrams up to global n ≤ 24 (worst case ~16 extra
+   lines) — the first byte names the class even when the module
+   absorbs the record silently: `0x16` = handshake duplicate
+   (hypothesis B), `0x17` = app data (hypothesis A).
+3. **The role stays RESPONDER** (odd sids, `open_server`) — the
+   role-flip to initiator (even sids, `kn_sctp_open`, RFC 4960
+   §5.2.1 collision handling for the seat's ready+0 INIT) is the
+   named next branch IF runB4b shows the five records were 0x16
+   duplicates and the seat truly never answers an INIT-ACK. One
+   variable per flight: 5j changes servicing, not roles.
+
+### 72.4 Everything else runB4a confirmed (the floor is solid)
+
+DTLS in 380 ms (`pin_matched:1 verify:0 srtp_prof:1 derived:1`);
+audio `media_ok:2313` / `media_authfail:0` (second consecutive
+flight of clean keys; `media_other:601` = the SRTCP class, ~14/s,
+consistent with runB3a's 578); `stun_in:6`/answered 6 (seat-check
+variance 3..6 across flights — post-DTLS liveness, §70.4); WS full
+window (`linger_ms:45092`); `peer_closed:0`, `records_dropped:0`,
+`txq_dropped:0`. The 5i instrumentation (`sctp_final`/`dtls_final`)
+paid for itself on its first flight: the diagnosis needed no wire
+dump, no re-fly, no guessing.
+
+### 72.5 Gate canon (measured this round; trees staged: vendored
+aes/sha1 + mbedTLS 3.6.0 + usrsctp c625e2195060, all SHA-verified)
+
+paranoid ×2 arches clean · NATIVE TESTS PASS · CROSS-CHECK PASS zero
+warnings both arches (kn_sctp real-body leg compiled) · cmake
+`-DKN_TLS_BACKEND=mbedtls` + usrsctp ENABLED → **ctest 29/29**,
+`test_knsctp` REAL **35/0**, `test_kndtls` REAL **39/0** · launcher
+**168/0** · no new unit tests (integration servicing fix; the
+starvation class is only observable against a live seat — named in
+the ledger beside 5e's cross-module rule: **an integration slice
+inherits the FULL service contract of the modules it wires, not just
+the half that runs before the first success**).
+
+### 72.6 runB4b — the flight card
+
+**Pre-flight:** apply `0008-slice-5j-dtls-post-ready-service.patch`
+(base: the pushed 5i HEAD), T10 rebuild → `ALL PASS` 89/0 (same
+REAL shapes 35/0 + 39/0). Launcher: run folder `runB4b`, draw 1,
+params EXACTLY `--cm-profile=browser --webrtc-answer=45
+--session-queue-timeout=1500`.
+
+**PASS oracle (the §71.6 gate, unchanged — role stays responder):**
+1. `webrtc_sctp_arm armed:1 role:"responder"`
+2. `webrtc_sctp_up ms < ~3000`
+3. `dc_opened:3` + `webrtc_dc_open acked:3`
+4. B3 floor: `dtls_ready:1 srtp_derived:1 media_ok ≥ 1
+   media_authfail:0 ice_ok:1 linger_ms ≈ 45000`
+5. clean exit (`webrtc_answer_done` + `cm_cancel 200`)
+
+**Scoring readout (unchanged):** `hs_seen:1`? video PT 96/97 in
+`webrtc_media`?
+
+**Named branches (this flight DISCRIMINATES §72.2's A/B either way):**
+- `sctp_up:1` → hypothesis A confirmed (the five were COOKIE-ECHO
+  class); the association lives; score the readout; B5 = whatever
+  the scoring says (video → depacketization; no video → the control
+  dialect, with `webrtc_dc_peer_open` labels + `webrtc_sctp_msg`
+  heads as the design input).
+- `sctp_up:0` BUT `app_records > 1` / `pkts_in > 1` → the records
+  were processed this time and usrsctp still didn't establish: read
+  `sctp_final` (`assoc_state/error/errno`) — a cookie-validation or
+  tag-mismatch class; the heads (0x17) + counters localize it.
+- `sctp_up:0` AND `app_records:1` AND the new post-ready
+  `webrtc_dtls_in` heads show `0x16…` → hypothesis B: the seat's
+  INIT is vestigial (sent once, never retransmitted — two flights,
+  two seats) and NOTHING follows an INIT-ACK → **the role flip
+  (initiator, even sids) becomes the next slice's single variable**,
+  exactly as §71.6 pre-named it.
+- floor broken (WS dies early / media stops) → the poll change
+  touched two variables by accident; localize via `dtls_final`
+  (polls now ≈ passes; a post-ready `webrtc_dtls_fail` names a
+  latched write-path fatal).
+
+### 72.7 This round's shape
+
+One file of C (`streamer/src/knvstd_main.c`, one guard + one budget
++ comments), no API/module/build/launcher change. Docs: this
+section, START-HERE §46 + the §44 pointers, INTEGRATION slice 5j.
+Patch `0008-slice-5j-dtls-post-ready-service.patch`, base = the
+operator's pushed 5i HEAD (`d9696ba`). Evidence: karnynow-logs @
+`cedd37a` (runB4a/1 + T10), archived to `priv-logs/runB4a`. Next:
+**runB4b** — the flight that discriminates A/B and, on A, scores the
+whole B4 gate.
+
+## 73. Slice 5k (B-track): runB4b READ — draws 1-3 died at the CLOUD DOOR (stale token, HTTP 500 `INTERNAL_ERROR_STATUS 8A910003`), draw 4 (fresh token) VERIFIED the 5j starvation fix (`sctp_up:1`, hypothesis A confirmed, role-flip branch DEAD) and exposed the NEXT single fault: our odd sids 1/3/5 collided with the seat's own channels — the ground-truth browser dump says the client's channels live on EVEN sids 0/2/4/6. 5k = the sid fix + per-ack evidence + non-200 CM error-body extraction.
+
+### 73.0 Verdict
+
+**Draws 1-3: NO-READ for B4 — the flights never reached WebRTC.** All 15 `POST /v2/session` attempts (3 draws × 5 with the 20/40/80/160 s backoff) returned **HTTP 500** with a JSON body carrying `requestStatus.statusDescription:"INTERNAL_ERROR_STATUS 8A910003"`, `unifiedErrorCode:-1970208765` (= 0x8A910003), `statusCode:4`, `serverId:"NP-WAW-01"` — and a freshly allocated session skeleton (`sessionId` + `resourcePath` + `usage:10`) per attempt. **Root cause: a stale session token** — the same binary, the same byte-identical request (wire-diff vs runB4a: only the random `SubSessionId` and `traceparent` differ; body 1610 B both) had returned 200 `SUCCESS_STATUS` from the SAME serverId four hours earlier, and the operator's control — **30 minutes of gameplay on the official web client between draws 2 and 3** (browser holds its own fresh auth) — rules out ban, account block, network path and CM outage. A fresh token made draw 4 succeed immediately (200 → queue → seat). GFN's error hygiene is poor here: an auth-layer rejection surfaces as a generic 500 internal error, and our client made it worse by printing `desc:"" cloud_status:0` — the reason was IN the body, but `cm_round` returned before extraction on non-200 (fixed in 5k, unit-tested with the verbatim draw-1 body). Operator-side checklist item (named in §73.6): the launcher's logged-out state is easy to miss (grey text) — `cm_create` 500 + `INTERNAL_ERROR_STATUS 8A910003` on the console = relogin, not a protocol problem.
+
+**Draw 4: the 5j fix PASSES its gate and hypothesis A is CONFIRMED.** `webrtc_dtls_final polls:180` (runB4a: 3 — frozen): the post-ready records are now processed, and the head budget shows exactly what they were: n=9 `0x14` (CCS), n=10 `0x16` (the seat's Finished, epoch 1), n=11+ `0x17` (app data — the SCTP stream). **Not handshake duplicates: live traffic** — runB4a starved a real association mid-establishment, the responder design was right, and the initiator-flip branch parked in §72.3 is **DEAD** (never activate it). `webrtc_sctp_up ms:514 t_ms:2777`, `sctp_final established:1 assoc_state:1 lost:0 pkts_in:17 pkts_out:14 msgs_in:8 sends:5 send_errors:0 txq_dropped:0`, floor intact (`dtls_ready` 374 ms, `srtp_derived:1`, `media_ok:2223 authfail:0`, `ice_ok` 1803 ms, `linger_ms:45201`, `app_q_dropped:0`, `peer_closed:0`).
+
+**But the scoring readout found the next fault: the channel profile's sid parity.** `dc_opened:3, dc_acked:1` — the seat opened ITS channels first (`webrtc_dc_peer_open sid:1 label:"control_channel"`, `sid:3 label:"remote_trace_channel"`, both RELIABLE ordered) and our 5i profile (odd sids 1/3/5, per RFC 8832 §5.1 parity for the association responder) **collided on 1 and 3**. The seat silently ignored the colliding OPENs (no NACK in the msgs_in arithmetic: 8 = 2 OPEN + 1 ACK + 5 JSON) and acked only the free sid 5. Consequence chain: the seat never saw an `input_channel_v1` → never sent the input handshake (`hs_seen:0`) → video stayed dark (media arithmetic: `media_in:2805 ≈ audio ~50/s × 43 s + SRTCP 582` — the runB4a audio-only profile; PT 96 would have added ~90/s). **Draw 5: partial** — killed in the queue (position 89→70, evening peak); no read beyond "token still fresh, queue busy".
+
+### 73.1 Draws 1-3 timeline (the CM door)
+
+| t (UTC, 2026-11-03) | event |
+|---|---|
+| ~14:32 | T10 on the rig: **ALL PASS 89/0** (build 15:30:55 local; vendored trees staged; the same binary flew all five draws) |
+| 14:48:04–14:53:10 | draw 1: `cm_create_backoff` 500 ×4 (attempts at +0/+20/+60/+140 s, the 5th at +300 s), `error cm_create http_status:500 desc:""`, exit 1 |
+| ~14:55–15:00 | draw 2: identical (5×500, same body shape, new sessionId/requestId per attempt) |
+| ~15:00–15:22 | **operator control: official web client, 30 min of gameplay, streaming ended by hand** — account alive, seats available, network fine |
+| ~15:23–15:28 | draw 3: identical 5×500 — the control brackets the failure: whatever changed, it is specific to OUR request's auth material, not the account |
+| after | operator re-logins (fresh token) |
+| ~16:40 local | draw 4: **200 `SUCCESS_STATUS`** → queue position 118 → seat; draw 5 shortly after: queue 89→70, killed early (partial) |
+
+Wire evidence (draw 1 `wire_r1.txt`, 15 records): the request is byte-identical to runB4a's successful create except `SubSessionId` (random per launch) and `traceparent`; every 500 body carries a distinct allocated `sessionId` (e.g. `58149d2c-708d-456f-bb2d-a7a2a36bfa3d`) with `sessionControlInfo.resourcePath:"/v2/session/<id>"`, `usage:10`, `port:443` — the CM front allocated a session object and its backend then failed the request; `otherUserSessions:[]` in every response (no concurrent-session conflict, no zombie accumulation visible). `statusCode:4` + `session.errorCode:1` + `status:0`. The one changed variable across the boundary is the Authorization material (redacted in the dump, length 1091 in both eras — a JWT swap is length-invisible; the operator confirmed the relogin and the immediate success).
+
+### 73.2 Draw 4 — the 5j verification, line by line
+
+Seat `185.136.71.135:5004` (6th distinct seat; mapped `10.222.254.4:60437` — 5th private-netns re-NAT). Timeline: `cm_created` → queue 118→0 (~7 min, free-tier evening peak) → ad gate: `ad_offered len_s:120 required:1` → `ad_vast` 200 with an EMPTY VAST (`VAST_NO_ADS_AFTER_WRAPPER`) → `ad_cancel` 200 (first flight with no ad inventory; the F36 ad path handled it cleanly) → `cm_control` relearned `np-lon-06` (create was served by NP-WAW-01; the poll host follows `sessionControlInfo`/relearn as designed) → WS `101` → offer (4 m-lines, video PT 96/97/99..108, ice-lite) → answer+nvst SDP sent → `ice_ok t_ms:1803` → `dtls_ready ms:374` (`records_in:8`, `app_records:1`, `first_app` = the seat's 44-byte INIT: ports 5000/5000, Initiate Tag `0xccd16522`, OS/MIS 128/128, TSN `0x5a418f54`) → `srtp_arm derived:1` → `sctp_arm armed:1 role:"responder" t_ms:2274` → post-ready heads: n=9 `14fefd…` CCS, n=10 `16fefd0001…` Finished (epoch 1), n=11+ `17fefd0001…` app data → **`sctp_up ms:514 t_ms:2777`** → `dc_peer_open sid:1 control_channel` + `sid:3 remote_trace_channel` (acked: `peer_acked:2`) → seat JSON on control_channel (`sctp_msg` ×5, ppi 51 WebRTC-string: `{"videoStreamProgressEve…` ×2 (93 B), `{"gameSessionHdrMode":{…` (52 B), `{"customMessage":"{\"mes…` (701 B + 368 B)) → our OPENs: `dc_opened:3`, **`dc_acked:1`** → `hs_seen:0` → audio flows the whole linger (`first_media_ms:2525`, `first_pt:111`, `media_ok:2223`, `authfail:0`), video never starts → teardown: `sctp_final established:1 pkts_in:17 pkts_out:14 bytes_in:5744 bytes_out:964 msgs_in:8 sends:5 send_errors:0`, `dtls_final app_records:17 app_bytes:5744 records_in:26 records_out:17 polls:180 app_q_dropped:0 peer_closed:0 records_dropped:0`, `linger_ms:45201`, `other_in:6` (the runB3a pre-ready-RTP class: two `webrtc_udp_in` events (33 B + 192 B, PT 111 heads) arrived before the SRTP arm — benign, runB4a had zero of these purely by seat timing), `stun_in:6/answered:6`, `cm_cancel` 200, probe exits `stop_reason:"webrtc_answer_done"` (the standard probe-mode exit).
+
+The polls counter is the cleanest 5j proof: 180 polls over the 45 s linger (one per duty pass) vs runB4a's 3 (frozen at ready) — and `records_in:26` all processed (8 pre-ready + 18 post-ready), `app_records:17` drained. The runB4a five-record mystery resolves as: CCS + Finished + the first app-data records (COOKIE-ECHO class) — hypothesis A of §72.2 exactly.
+
+### 73.3 The sid-collision discovery (the fault draw 4 exposed)
+
+5i chose odd sids 1/3/5 from RFC 8832 §5.1 ("the DCEP server — the side that did NOT initiate the association — uses odd stream ids"): runB3a measured the seat INITiating, so we responded and took the odd space. **GFN does not follow RFC parity.** Measured, draw 4: the seat (SCTP initiator, DTLS server) opened its channels on ODD sids — `control_channel`=1, `remote_trace_channel`=3. Our OPENs on 1/3 arrived on streams the seat had already claimed; it ignored them (RFC 8832 §5.1 collision handling would have the DCEP client — by role, the seat — keep its channel and the server close the duplicate; silently dropping the OPEN with no NACK is what we measured: msgs_in 8 = 2 OPEN + 1 ACK + 5 JSON, no NACK among the first-5 heads, all ppi-51 JSON). Only sid 5 — free — was acked. Which channel survived: by elimination, `input_channel_partially_reliable` on sid 5 (the only OPEN not colliding); the aggregate `dc_acked:1` could not say (5k adds the per-ack sid line).
+
+Ground truth, browser dump (`priv-logs/gfn_ref_out/webrtc_internals_dump.txt`, real streaming session 2026-11-02, `dataChannelIdentifier` stats blocks): **input_channel_v1=0, input_channel_partially_reliable=2, cursor_channel=4, stats_channel=6 — all EVEN — plus control_channel=1 (seat's)**. Combined with draw 4: the parity rule GFN actually runs is **DTLS-role parity** (DTLS server → odd, DTLS client → even), not SCTP-INIT-role parity. The browser (answerer, `setup:active`, DTLS client — exactly our position) takes the evens; the seat keeps the odds.
+
+OpenNOW cross-check (full clone @ `1cb3479e`, `webrtc/input.rs InputChannels::create`): creates THREE channels with NO explicit ids — `stats_channel` (unordered, MaxRetransmits{0}), `input_channel_v1` (ordered reliable), `input_channel_partially_reliable` (unordered, MaxPacketLifetime{300}) — and str0m auto-assigns EVEN sids in creation order on the DTLS-client side: stats=0, v1=2, partial=4. OpenNOW streams video against real seats with THAT mapping, which proves two things: (1) even parity is the client's, (2) **the seat maps channels by LABEL, not by a fixed sid↔label binding** (the browser's v1=0/partial=2/stats=6 vs OpenNOW's stats=0/v1=2/partial=4 — both work). `cursor_channel` is absent from OpenNOW ⇒ not needed for video.
+
+### 73.4 What is NOT the video gate (evidence, not guesswork)
+
+- **The seat's control_channel JSON is ignorable.** `videoStreamProgressEvent`, `gameSessionHdrMode`, `customMessage` appear NOWHERE in the entire OpenNOW repo (grep over the full clone); its WebRTC event loop (`webrtc/mod.rs:963-982`) handles ONLY its own input channels (`channel_opened`/`channel_data`/`channel_closed`) and media — the seat's opened channels are auto-acked by str0m and their payloads dropped. OpenNOW streams fine ⇒ the control dialect does not gate video start. (The native nvst path in `nvst.rs` has its own control-channel logic — different transport, out of scope.)
+- **No client message is required at handshake time.** OpenNOW's `InputChannelState`: the seat's first bytes on `input_channel_v1` are the handshake (LE16 526 = `0e 02`, optional LE16 version; legacy `[0x0e,2,3,0]` → version 3 and `[0x0e,3]` → 0x030e also accepted); the client RECORDS the version and sends nothing back. `InputReady` only flips a flag; input frames flow when the user generates input (version>2 framing: `0x23` + BE64 µs + `0x21`+BE16 len for kinds 5/7/12 else `0x22`, then the nvst payload; version≤2 or kind 2: raw).
+- **`stats_channel` is created but silent** — OpenNOW discards its ChannelId and never writes to it.
+- **The one media-plane watchdog OpenNOW does run**: when no video frames are published, `progress.poll` → `control.request_keyframe(video_mid)` → str0m RTCP **PLI/FIR** on the video mid, rate-limited (`KEYFRAME_INTERVAL`). If video stays dark after the sid fix, an RTCP receiver-feedback path (RR + PLI/FIR; our probe currently sends NO RTCP — `media_other:582` is inbound SRTCP only) is the pre-named next single variable.
+
+### 73.5 Slice 5k — what changed (one flight variable + two evidence paths)
+
+1. **The flight variable: `sess_webrtc_channels` sids 1/3/5 → 0/2/4** (`streamer/src/knvstd_main.c`), creation order and reliability mapping untouched (stats REXMIT/0 unordered, v1 RELIABLE ordered, partial TIMED/300 unordered — OpenNOW-exact). The comment block now carries the empirical parity rule (DTLS-role, browser-dump ids, label-mapping proof) in place of the falsified RFC rationale.
+2. **Per-ack sid evidence**: the DCEP ACK branch prints `webrtc_dc_ack {sid,n,t_ms}` for the first 3 acks (RFC 8832 §5.2: the ACK travels on the OPEN's stream, so the callback sid names the channel). runB4c will say WHICH channels were accepted without arithmetic.
+3. **CM error-body extraction on non-200** (`streamer/src/kn_cm.c cm_round`): best-effort `kn_cm_extract_session` when `resp.status != 200` and a non-truncated JSON body exists (guarded by `jsonbuf[0]`, so the empty-body 503 path — and its existing unit test — behave exactly as before). `extract_session` fills `requestStatus.{statusCode,unifiedErrorCode,statusDescription}` and `session.{status,errorCode,sessionId}` BEFORE its hard sessionId gate, so a rejected payload now surfaces its cloud-side reason in the caller's `desc`/`cloud_status` fields. Error path only — the 200 flow is untouched. **Unit-tested** with the verbatim draw-1 body: `test_kncm` 278/0 (7 new checks: status pass-through, statusCode/unifiedErrorCode/desc mirroring, skeleton fields, sessionId survival).
+
+NOT in 5k (next variables, evidence-decided): RTCP RR/PLI/FIR feedback, input-frame sending (0x23 framing), any control_channel reply, cursor_channel, initiator anything (DEAD branch).
+
+### 73.6 runB4c card (the gate + discriminating branches)
+
+Preflight (draws 1-3 lesson): **verify the launcher shows a LOGGED-IN session before flying** (the grey logged-out styling is easy to miss); a console `cm_create` error now self-names — `desc:"INTERNAL_ERROR_STATUS 8A910003"` = stale token → relogin, do NOT burn draws. Rig: T10 rebuild REQUIRED (expect ALL PASS 89/0; knsctp REAL 35/0 shape). Card: draw 1, minimal (`--cm-profile=browser --webrtc-answer=45 --session-queue-timeout=1500`), probe `--session-seconds=120`; queue tolerance — draw 4 sat ~7 min at position 118 in the evening peak, `--session-queue-timeout=1500` covers it.
+
+**GATE (PASS = all of):** `armed:1 role:"responder"` → `sctp_up` ms<3000 → `dc_opened:3` **AND `dc_acked:3`** with `webrtc_dc_open opened:3 acked:3` and three `webrtc_dc_ack` lines (sids 0,2,4 in any order) → the B3/B4 floor intact (`dtls_ready`, `srtp_derived:1`, `media_ok≥1`, `authfail:0`, `ice_ok`, full linger) → clean exit.
+
+**SCORING READOUT (not gating):** `hs_seen:1` with `ver` + `first_hs_ms` + the sid it arrived on (expect sid 2 = input_channel_v1; OpenNOW accepts versions 2/3/0x030e)? Any PT 96/97 in `webrtc_media`/summary (video start)? `peer_opened` set (control_channel=1 ± remote_trace=3)?
+
+**Branches:** (i) `dc_acked:3` + `hs_seen:1` + video PT 96 flows → **B4 FULL PASS → B5 = depacketization + input** (kn_rx_video + the 0x23 framing per the recorded version). (ii) `dc_acked:3` + `hs_seen:1` + video dark → next single variable = **RTCP receiver feedback** (RR + PLI/FIR on the video mid, OpenNOW's watchdog pattern; §73.4). (iii) `dc_acked:3` + `hs_seen:0` → the seat's handshake is gated on something else — read the `sctp_msg` heads (new messages may appear on our now-visible channels). (iv) `dc_acked<3` → the `webrtc_dc_ack` sids name the rejected channel; re-examine label/parity against the dump. (v) floor broken → `dtls_final`/`sctp_final` localize as before.
+
+### 73.7 Shape
+
+Draw 4 in one line: **queue 118→seat in ~7 min, no ads in inventory, ice 1.8 s, dtls 374 ms, sctp up 514 ms after arm, the seat's two odd-sid channels acked, our three odd-sid OPENs 1/3-collided (acked:1), handshake never came, audio-only for 45 s, clean teardown, zero drops anywhere.** The B-track ladder stands on: cm(5a) → answer(5b) → launcher(5c) → ice(5d/5e) → B2c PASS(5f) → dtls-srtp(5g) → B3 PASS(5h) → sctp responder(5i) → starvation fix(5j, VERIFIED by draw 4) → **sid parity fix (5k, this slice)** → runB4c → (branches above) → B5 → G2' 60-min keeper.
