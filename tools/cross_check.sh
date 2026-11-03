@@ -59,6 +59,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
     $CC $CFLAGS -c streamer/src/kn_sock.c  -o build/cross/kn_sock_$arch.o
     $CC $CFLAGS -c streamer/src/kn_ws.c    -o build/cross/kn_ws_$arch.o
     $CC $CFLAGS -c streamer/src/kn_rtsp.c  -o build/cross/kn_rtsp_$arch.o
+    $CC $CFLAGS -c streamer/src/kn_sdp.c   -o build/cross/kn_sdp_$arch.o
     $CC $CFLAGS -c streamer/src/kn_json.c  -o build/cross/kn_json_$arch.o
     $CC $CFLAGS -c streamer/src/kn_http.c  -o build/cross/kn_http_$arch.o
     $CC $CFLAGS -c streamer/src/kn_cm.c    -o build/cross/kn_cm_$arch.o
@@ -162,6 +163,8 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         $LDFLAGS -o build/cross/test_knws_$arch.exe
     $CC $CFLAGS streamer/src/kn_rtsp.c streamer/tests/test_knrtsp.c \
         $LDFLAGS -o build/cross/test_knrtsp_$arch.exe
+    $CC $CFLAGS streamer/src/kn_sdp.c streamer/tests/test_knsdp.c \
+        $LDFLAGS -o build/cross/test_knsdp_$arch.exe
     $CC $CFLAGS streamer/src/kn_json.c streamer/src/kn_http.c \
         streamer/src/kn_cm.c streamer/tests/test_kncm.c \
         $LDFLAGS -o build/cross/test_kncm_$arch.exe
@@ -194,7 +197,7 @@ for CC in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
         streamer/src/kn_perf.c streamer/src/kn_audio.c \
         streamer/src/kn_net.c streamer/src/kn_wire.c \
         streamer/src/kn_rx.c streamer/src/kn_sock.c \
-        streamer/src/kn_ws.c streamer/src/kn_rtsp.c \
+        streamer/src/kn_ws.c streamer/src/kn_rtsp.c streamer/src/kn_sdp.c \
         streamer/src/kn_json.c streamer/src/kn_http.c streamer/src/kn_cm.c \
         streamer/src/kn_cert.c streamer/src/kn_dtls.c \
         streamer/src/kn_sctp.c streamer/src/kn_input.c \

@@ -6446,3 +6446,307 @@ response, compare with §64.2's table.
 most valuable byte sequence in the project right now: it is the last
 piece of ground truth between us and a streaming browser-parity
 client.
+
+## 65. Slice 5b (B-TRACK): the B1 probe is VERIFIED THREE TIMES (runB1/runB2/runB3, 2026-11-02), the runB3 wire dump is decoded END TO END — and it rewrites the offer's anatomy: the server's `{"type":"offer"}` carries THREE fields (`sdp` = the 3122 B classic WebRTC SDP the probe captured, `nvstSdp` = a ~40 KB server configuration document, `nvstServerOverrides` = 25 `key: value` lines) — and B2 ships: `kn_sdp` (offer parse + answer SDP + nvstSdp builders, 84 golden checks against the runB3 offer) and `--webrtc-answer`, which answers the offer FOR REAL (answer + nvstSdp + the host candidate on a live UDP bundle socket) and watches what the server does
+
+### 65.1 The three probe flights — identical healthy shapes, the ad question CLOSED
+
+Three B1 flights on the slice-5a build (`5a304c5`), all with
+`--cm-profile=browser --webrtc-probe=45`, full consoles + logs in
+`karnyjohnny/karnynow-logs` (runB1/runB2 pasted by the operator,
+runB3 pushed with `console.log` + `wire.txt` + diag zip):
+
+| stage | runB1 | runB2 | runB3 |
+|---|---|---|---|
+| T10 rebuild | ALL PASS 89 | — | — |
+| `ad_offered` | `len_s:120 required:1` | same | same |
+| `ad_vast` | `http 200 media:0 trackers:0` | same | same |
+| `ad_cancel` | `VAST_NO_ADS_AFTER_WRAPPER` | same | same (`vast_excerpt` = empty `<VAST version="4.0"/>`) |
+| queue | ~100–140 s (pos 39→0, `have_queue:0 seat_step:3` blips at 0, then `status:2`) | same | same |
+| `webrtc_seat` | `usage 14 alp 5 :443 /nvst/`, dashed FQDN ip | same | `80-250-98-40.…` |
+| `webrtc_ws_open` | `rc:0 http_status:101 peer_id:peer-<10 digits>` | same | same |
+| offer | `got_offer:1`, ~1 s after 101 | same | same — `sdp_bytes:3122 lines:105 m_lines:4` |
+| linger 5 s | `frames_in:6 frames_out:7 hb_sent:3 acks_sent:2 peer_info_seen:2 candidates:0 my_id:2` | same (±1 frame) | same, `elapsed_ms:5282` |
+| exit | `stop_reason:"webrtc_offer_captured"` + `cm_cancel rc:0 http_status:200` | same | same |
+
+**The a339b52 mystery is CLOSED with evidence:** the ad slot returned a
+NO-FILL VAST (empty `<VAST version="4.0"/>`), our nine-sequence cancel
+path handled it exactly as designed, and the queue proceeded to a real
+seat on all three flights. Ads are not a blocker for the B-track.
+
+**The critical B2 design fact from the lingers: `candidates:0`.** The
+server — despite `a=ice-options:trickle` in its offer — sent ZERO
+candidates BEFORE our answer. ICE trickle starts only after the client
+answers. B1's "no candidates" was the protocol working as designed,
+not a defect.
+
+### 65.2 The runB3 wire dump, decoded — and the redactor seam that hid it
+
+`runB3/wire.txt` = 112 records (`W|R t_ms len red` + hex payload;
+bytes_out 80 636 / bytes_in 154 097 / redactions 37). Records 0–74 +
+110–111 are the CM HTTPS plane (create, 34 polls, the gampad VAST GET,
+the ad PUT, the DELETE) in full plaintext. **Records 75–109 are the
+whole /nvst/ WebSocket dialog** — the seam hooks in
+`kn_net_tls_stream_send/recv` captured the probe stream exactly as
+designed:
+
+```
+ 75 W  GET /nvst/sign_in?peer_id=peer-3780135254&version=3.0&peer_role=1&pairing_id=a40…
+ 76 R  HTTP/1.1 101 Switching Protocols … sec-websocket-accept …
+ 77+78 W  our peer_info frame (header+payload = 2 records — kn_ws writes them separately)
+ 79 R  frame 1 (752 B): {"headers":{…echo of our HTTP headers…},
+                        "peer_info":{"browser":"Chrome","browserVersion":"109.0.0.0",
+                                     "connected":true,"id":2,"name":"peer-3780135254",…}}
+ 80 R  frame 2 (328 B): {"ackid":1,"headers":{…},"peer_info":{"browser":"","id":1,
+                        "name":"OneSdkServer-16565219568958313662","peer_role":0,…}}
+ 81+82 W  {"ack":1}
+ 83–96 R  frame 3 (49 746 B, split over 14 TLS reads): the OFFER
+ 97+98 W  {"ack":2}
+ 99 R  {"ack":1}                       (server acks OUR ackid 1)
+100 R  {"hb":1}  t=141 742             (2.1 s after the offer!)
+101+102 W {"hb":1} … 103 R {"hb":1} t=143 669 … 104+105 W {"hb":1}
+106+107 W {"hb":1} t=144 420 (our own 5-s duty beat)
+108+109 W close frame, code 1000       → 110 DELETE /v2/session → 200
+```
+
+**Why ASCII grep found nothing for two rounds:** the payloads are hex,
+AND the one record that mattered was mangled by our own redactor. F34's
+`kn_wire_redact` rule 1 X-fills `a=ice-pwd:` **up to the first real
+CR/LF byte** — but inside a WS frame the SDP is JSON-escaped, so its
+line breaks are the two-character `\r\n` sequences and NO real CR/LF
+exists until the record ends. Record 83 (4096 B) therefore lost
+everything from `a=ice-pwd:` to its tail: the ice-pwd value, the
+fingerprint, `setup:actpass`, ALL FOUR classic media sections — AND the
+five characters `","nv` … i.e. the JSON boundary between the offer's
+`sdp` field and its `nvstSdp` field. The hex record then parses (in
+Python, faithfully) as ONE fused 44 508-char `sdp` string with no
+`rtpmap` anywhere. **`kn_json` is innocent; the probe's `sdp_bytes:3122`
+is the TRUE `sdp` field.** Console and wire are complementary: the
+console carries the unredacted classic SDP, the wire carries the nvst
+configuration. Decoded artifacts (priv-logs/runB3/):
+`ws_frames_decoded.txt` (all 6 server + 7 client frames),
+`offer_field_sdp.txt` (the fused/redacted field, 44 508 chars),
+`server_nvstSdp_reconstructed.txt` (the true server nvstSdp, 40 520
+chars / 960 lines), `offer_field_nvstServerOverrides.txt`.
+
+**The TRUE offer** (inner `peer_msg.msg`, three keys):
+
+```json
+{"type":"offer",
+ "sdp":"<3122 B classic WebRTC SDP — the console's webrtc_offer_sdp, §64>",
+ "nvstSdp":"v=0 \r\na=general.enetControlChannel.channelCount:1 \r\n…40 KB…",
+ "nvstServerOverrides":"audio.enableTimestampAudioBuffer: 1\n…25 lines…"}
+```
+
+The server `nvstSdp` is a configuration document in the SAME dialect
+our client nvstSdp must speak (LF/CRLF aside): session-level
+`a=general.*` (155), `a=runtime.*` (19), then `m=video 0 RTP/AVP` with
+`a=video.*` (206) + `a=vqos.*` (438) + `a=qscore/bwe/clientPerfBr/
+packetPacing`, then `m=audio 0` (audio/aqos/audioBitrate), `m=mic 0`
+(mic.*), `m=application 0 udp` (ri.*). Every line ends `" \r\n"`.
+Parameters that matter downstream (all measured from runB3):
+
+| parameter | value | why it matters |
+|---|---|---|
+| `general.clientBundlePort` | 49006 | the port the server EXPECTS our bundle on (we send an ephemeral host candidate instead — OpenNOW does the same and streams; if B2's STUN never arrives, binding 49006 is the first experiment) |
+| `general.serverBundlePort` | 47999 | server media port (+47998 in the m-lines) |
+| `general.enetControlChannel.mtuSize` | 1191 | B4 SCTP sizing |
+| `general.enetControlChannel.heartbeatIntervalMs` | 500 | B4 control-channel duty |
+| `general.pingVersion` / `pingIntervalBefore/AfterConnectionMs` | 6 / 500 / 500 | WS-level keepalive expectations |
+| `ri.partialReliableThresholdMs` | 0 (override: **300**) | B4 input channel lifetime |
+| `ri.hidDeviceMask` / `…TransferGamepad` / `…TransferHid` | 4 / 255 / 2^64−1 | server's values; the CLIENT nvstSdp sends OpenNOW's defaults (§65.4) |
+| `aqos.bitRate` / `audioBitrate.remote2chMin/Max` | 96000 / 96 / 128 kbps | B3 audio decode budget |
+| `general.featureFlags` | 183 | server feature word |
+
+`nvstServerOverrides` (25 lines, verbatim in priv-logs): the server's
+late corrections to its own config — `ri.partialReliableThresholdMs: 300`,
+`general.pingIntervalBeforeConnectionMs: 20`, `…AfterConnectionMs: 100`,
+`video[0].adaptiveQuantization.*`, `vqos[0].*`, `video[0].framePacing.pid.minTargetFrameTimeUs: 7936` (=120 fps pacing — the rig encodes up to 120).
+
+### 65.3 Signaling facts, now all measured (not inferred)
+
+* **Ids.** Frame 1's `peer_info` is OUR echo: `id:2` (the numeric id the
+  server assigns us), `name:"peer-3780135254"` (our WS query peer_id).
+  Frame 2 is the remote: `id:1`, `name:"OneSdkServer-…"`. Envelopes:
+  offer came `{"from":1,"to":2}` → our answer goes `{"from":2,"to":1}`.
+  (The probe's name-match logic for `my_id` was right; slice 5b adds
+  `remote_id` from `peer_msg.from`, default 1 = OpenNOW's.)
+* **Ack duty works both ways:** every foreign `ackid:N` gets `{"ack":N}`;
+  the server acked our peer_info (`{"ack":1}` at +58 ms after the offer).
+* **Heartbeats:** the server beats every ~2.1 s (t=141 742, 143 669 —
+  NOT the 5 s of OpenNOW's client-side duty); answering its `{"hb":1}`
+  with `{"hb":1}` plus our own 5-s beat was accepted without comment.
+* **Close:** a client close frame with code 1000 after the linger was
+  accepted; the CM DELETE released the seat (200).
+* The server echoes our HTTP request headers in frames 1–2 (including
+  `x-country:PL`, `x-forwarded-for`) — informational, no action needed.
+
+### 65.4 The answer contract (what B2 sends, and why each line)
+
+The client answers with ONE peer_msg
+`{"type":"answer","sdp":"…","nvstSdp":"…"}` followed by ONE peer_msg
+carrying the local candidate (OpenNOW `core_mod.rs:442-448`). `kn_sdp`
+builds both from the classic offer:
+
+**Answer SDP** (CRLF; golden-pinned against the runB3 offer in
+`test_knsdp.c`): session `v=0/o=- <rand> 2 IN IP4 127.0.0.1/s=-/t=0 0`,
+`a=group:BUNDLE` mirroring ALL offer mids in order (rejected sections
+stay in the bundle), our `a=ice-ufrag/ice-pwd/fingerprint:sha-256`, and
+**`a=setup:active`** (offer says `actpass` + `ice-lite` → we are the
+DTLS client and the ICE controlling agent — OpenNOW sets exactly
+`set_ice_controlling(ice_lite)` + `start_dtls(true)`). Per section:
+* video (offer `sendonly`): `m=video <ourPort> UDP/TLS/RTP/SAVPF 96 97`
+  — **the OFFER's payload types** (H264 `profile-level-id=42001f` + its
+  RTX `apt=96;rtx-time=125`), rtpmap/fmtp/rtcp-fb lines copied verbatim,
+  all three extmaps (3 TWCC / 7 video-timing / 12 playout-delay)
+  mirrored, `a=recvonly`, rtcp-mux, rtcp-rsize, `c=IN IP4 0.0.0.0`.
+* audio (offer `sendonly`): opus 111 only — **RED 63 dropped** (str0m
+  has no RED; OpenNOW's answer negotiates opus alone and streams),
+  `a=ptime:10` mirrored, recvonly.
+* application: `m=application <ourPort> UDP/DTLS/SCTP webrtc-datachannel`
+  + `a=sctp-port:5000` + `a=max-message-size:262144` mirrored.
+* mic (offer `recvonly`): REJECTED — `m=audio 0 UDP/TLS/RTP/SAVPF 111`
+  + `a=mid:3` + `a=inactive` (port-0 with the offered formats kept =
+  str0m's disabled-section shape, which OpenNOW explicitly patches to
+  carry the offered pts).
+* Anything unanswerable (no H264 in the offer, etc.) degrades to the
+  same rejection, never to a failed answer.
+
+**nvstSdp** (LF-joined; OpenNOW `nvst_answer()` recipe, byte-faithful):
+`v=0` + the verbatim `o=SdpTest test_id_13 14 IN IPv4 127.0.0.1` +
+`s=-`/`t=0 0`; the identity triplet `a=general.icePassword /
+iceUserNameFragment / dtlsFingerprint` from OUR answer material; the
+74-line `video_attributes.sdp` table (embedded verbatim in `kn_sdp.c`);
+`a=video.framePacing.pid.minTargetFrameTimeUs:950000/fps` (31666 @30);
+the fps>60/≥240 blocks (implemented, dormant at 30);
+`a=packetPacing.numGroups:5` (3 only @120); `clientViewportWd/Ht`,
+`maxFPS`, `bitDepth:8`; the bitrate ladder
+`max=clamp(kbps,1000,200000)`, `min=min(max,5000)`,
+`initial=max(min,max/4)` → at our 20 000 kbps default: 20000/5000/5000
+on `initialBitrateKbps`, `vqos.bw.maximum/minimum/peak/serverPeak`,
+`vqos.grc.maximumBitrateKbps`; then `m=audio 0 RTP/AVP`+`a=msid:audio`,
+`m=application 0 RTP/AVP`+`a=msid:input_1`, and the **ri.\* defaults
+30 / 4294967295 / 15 / 4294967295**. Deliberate decision: the server's
+own nvstSdp ri-block (`thresholdMs:0`, `hidDeviceMask:4`, gamepad 255,
+hid 2^64−1) is NOT echoed — OpenNOW reads ri.\* from the CLASSIC offer
+(which has none), so its production answers carry exactly these
+defaults, and `partialReliableThresholdMs:0` would even fail its own
+`>0` validation. We mirror the reference client, not the server config.
+
+**Local candidate:** `candidate:1 1 udp 2122260223 <routedIP> <port>
+typ host` (the F37 ANNOUNCE form — flight-proven in the nvst family;
+Chrome host priority), sent as
+`{"candidate":"…","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":null}`
+— the first BUNDLE mid (audio, per OpenNOW's `candidate_target()`), and
+`usernameFragment:null` because that is what serde emits for their
+`Option::None` (flight-proven by their production traffic).
+
+### 65.5 Slice 5b — the code (one patch, base `5a304c5`)
+
+* NEW `streamer/include/kn/kn_sdp.h` + `streamer/src/kn_sdp.c` — pure
+  string transformers, no allocation/IO/globals: `kn_sdp_offer_parse`
+  (CRLF+LF, ≤8 sections, keeps rtpmap/fmtp/rtcp-fb/extmap lines
+  verbatim per section, picks H264+RTX and opus PTs),
+  `kn_sdp_answer_build`, `kn_sdp_nvst_build`, `kn_sdp_candidate_host`
+  (§65.4 rules; every output caller-buffered, honest ERR_BIG).
+* NEW `streamer/tests/test_knsdp.c` — **84 checks**: the REAL runB3
+  offer embedded as the parse golden (ufrag/pwd/fingerprint/setup/
+  ice-lite/trickle, all four sections' kinds/mids/dirs/PTs/sctp), the
+  full answer golden (48 lines, byte-exact, derived from §65.4 against
+  the offer — not from the builder), synthetic-rule battery (offer
+  `setup:active`→answer `passive`; AV1-only video→rejected with formats
+  kept; `sendrecv` audio→recvonly; datachannel mirrored), the nvst
+  battery (LF-only, trailing-newline join, identity triplet, table
+  present, pacing 31666/7916, numGroups 5/3, the ladder incl. both
+  clamps, the exact ri tail golden), candidate golden, error paths.
+* EDITED `streamer/src/knvstd_main.c` — `--webrtc-answer[=S]` (bare=45,
+  clamp 10..300; supersedes `--webrtc-probe` when both are given).
+  `sess_webrtc_probe` grows an `answer_s` parameter; **with the flag
+  absent every B1 byte path is unchanged**. After the offer capture:
+  `sess_webrtc_answer_send` resolves the media IP (dotted parse → the
+  dashed first label `80-250-98-40.` → `kn_net_dns_lookup`), opens +
+  `connect()`s the UDP bundle socket to the offer's first media port
+  (47998; connect picks the routed SOURCE address — the F37 pattern),
+  generates the identity (`sess_local_identity`; fingerprint upgraded
+  to a REAL `kn_cert` ECDSA P-256 cert when the mbedtls backend is in
+  the build — `cert:"real"` in the event, B3's handshake will
+  regenerate its own), builds+sends the answer/nvstSdp/candidate
+  envelopes (`from`=our assigned id, `to`=`peer_msg.from`), prints the
+  full `webrtc_answer_sdp` + `webrtc_nvst_sdp` documents once, then the
+  linger loop (deadline = answer_s) drains the socket each beat:
+  STUN Binding requests counted with the USERNAME attribute extracted
+  (`"serverUfrag:ourUfrag"` = the server ACCEPTED our credentials —
+  the pass signal), DTLS records (0x14–0x17 + 0xFE) and anything else
+  hex-dumped (first 2–3 of each class), `{"ack":N}` frames counted,
+  server trickle candidates flowing through the existing
+  `webrtc_candidate` events. Teardown closes the socket; the summary
+  pair (`webrtc_probe_summary` + the new `webrtc_answer_summary`)
+  always prints. `stop_reason: webrtc_answer_done | webrtc_answer_failed`.
+* EDITED `CMakeLists.txt`, `tools/build_native_tests.sh` (KNCORE +
+  build + run + rc29 in the aggregation), `tools/cross_check.sh`
+  (per-file leg, test exe, KCORE for the knvstd link).
+* Gates (sandbox): `tools/build_native_tests.sh` **NATIVE TESTS PASS**,
+  ZERO warnings, now **26 suites** — `test_knsdp` **84/0**, `test_knws`
+  92/0, `test_kncm` 272/0, everything else unchanged; the paranoid
+  knvstd leg (`-Werror -Wunused-but-set-variable -Wformat-truncation=2`)
+  clean; knvstd smoke + jsonl contract clean. NOT run here: cross_check
+  (no mingw in this sandbox — the rig's T10 is the cross gate),
+  skeleton check (no summary-key change: B2 adds EVENT LINES only,
+  F41/B1 precedent).
+
+### 65.6 B2 flight card (answer probe — still not a keeper attempt)
+
+Rebuild on the rig (T10 gate first: expect **ALL PASS 89** plus the new
+`test_knsdp` checks in the count). ONE flight, off-peak:
+
+```
+knvstd --session --session-token=<TOK> --session-app=<APPID> ^
+  --cm-profile=browser --webrtc-answer=45 --session-seconds=300 ^
+  --session-queue-timeout=1500 --log-dir=logs\runB2a --wire-dump=logs\runB2a\wire.txt
+```
+
+Budget ~6–9 min (queue 100–140 s + ad no-fill + 45 s linger). Push the
+whole log dir + wire.txt + console to `karnyjohnny/karnynow-logs`.
+
+**Oracle — what to check and how much:**
+
+| line | healthy value | meaning |
+|------|---------------|---------|
+| `webrtc_offer_sdp` | present, `sdp_bytes:3122`-ish | B1 shape intact |
+| `webrtc_answer_sdp` | full ~1.4 KB answer in the log | the answer document, diffable |
+| `webrtc_nvst_sdp` | `bytes:3710`-ish | the nvstSdp document |
+| `webrtc_answer_sent` | `cert:"real"`, `local_ip:"192.168.…"` (the rig's LAN addr), `video_pt:96 video_rtx:97 audio_pt:111`, `from:2 to:1`-ish | identity + envelope addressed correctly |
+| `webrtc_local_candidate` | `candidate:"candidate:1 1 udp 2122260223 <ip> <port> typ host"` | the host candidate went out |
+| `webrtc_answer_summary.acks_in` | **≥2** within ~2 s | the server accepted BOTH frames syntactically |
+| `webrtc_answer_summary.server_cands` | **≥1**, strings logged | trickle started (the B1 unknown) |
+| `webrtc_stun_in` | **n≥1**, `username:"<8hex>:<our4char>"`, `first_stun_ms` < ~3000 | **THE pass signal: the server believes our answer and ICE-checks us** |
+| `webrtc_dtls_in` | 0 expected (we never reply to STUN, so ICE can't complete) | DTLS>0 would mean the server skipped checks |
+| errors | no `webrtc_probe error:"server"`, no `bye`, WS open the whole linger | the answer wasn't rejected |
+| final | `stop_reason:"webrtc_answer_done"` + `cm_cancel 200` | seat released cleanly |
+
+**Failure branches, in order of likelihood:**
+`acks_in:0` and silence → the envelope/escaping is wrong: diff our
+`msg` bytes in wire.txt against §65.2's frame list (double-escaping of
+the inner JSON is the classic trap — `sess_json_esc` runs twice, verify
+the wire shows `\\r\\n` inside `msg`). An `error` frame → the
+`webrtc_peer_msg` snippet carries the reason verbatim; log it, that IS
+the measurement. `server_cands` arrive but no STUN within 10 s → our
+candidate string is suspect: compare against the SERVER's candidate
+shape (now logged in full) and adapt foundation/priority/`generation`
+in `kn_sdp_candidate_host`. STUN arrives with a username whose second
+half is NOT our ufrag → identity mismatch between the answer SDP and
+the nvstSdp triplet (they are built from one cfg — would be a builder
+bug; the goldens say otherwise). `BYE`/`peerRemoved` right after the
+answer → permission/identity problem (token-device mismatch) — relogin.
+No STUN AND no candidates AND acks present → the server waits for
+something else in the answer (a missing attribute): wire.txt frame 3
+vs our answer frame is the diff to run, and `general.clientBundlePort
+49006` (§65.2) is the first experiment — bind the socket to 49006
+instead of ephemeral.
+
+**B2 pass = `webrtc_stun_in` with the right username.** That single
+line proves: offer parsed, answer accepted, nvstSdp accepted,
+candidate understood, and the server is trying to reach us — everything
+B3 (DTLS-SRTP + media) needs to exist on the other end of a real
+socket. B3 then answers the STUN, completes DTLS with the kn_cert/kn_dtls
+machinery, and the depacketizer starts eating RTP.

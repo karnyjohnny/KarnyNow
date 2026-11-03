@@ -51,6 +51,7 @@
 #include "kn/kn_perf.h"
 #include "kn/kn_rtsp.h"
 #include "kn/kn_rx.h"
+#include "kn/kn_sdp.h"   /* B-track slice 5b: offer parse + answer/nvstSdp */
 #include "kn/kn_selftest.h"
 #include "kn/kn_sha1.h"
 #include "kn/kn_sock.h"
@@ -134,6 +135,16 @@ static void usage(void)
            "                                stdout, release the seat. Default 30,\n"
            "                                clamped 5..600. Fly with\n"
            "                                --cm-profile=browser.)\n"
+           "         [--webrtc-answer[=S]]  (B-track slice 5b: everything\n"
+           "                                --webrtc-probe does, PLUS answers the\n"
+           "                                offer for real — answer SDP + nvstSdp\n"
+           "                                + the host candidate on a live UDP\n"
+           "                                bundle socket — then watches the\n"
+           "                                server for S seconds (default 45,\n"
+           "                                clamped 10..300): trickle candidates,\n"
+           "                                STUN checks, acks, errors. No media\n"
+           "                                is served yet (that is B3). Overrides\n"
+           "                                --webrtc-probe when both are given.)\n"
            "         [--session-keep]  (leave the cloud session alive on abort\n"
            "                           so the GFN web UI can RESUME it)\n"
            "         [--session-play-wait=N]   (ms to wait for DTLS+SCTP up\n"
@@ -1527,6 +1538,10 @@ static int  g_sess_present = 0;   /* round N (F20): --session-present */
  * builder needs). 0 = off (the old fail-fast stays). Default wait 30 s,
  * clamped 5..600 in main. */
 static long g_sess_webrtc_probe = 0;
+/* B-track slice 5b (RTSP §65): --webrtc-answer[=S]. Superset of the
+ * probe — after the offer is captured it answers for real (answer SDP +
+ * nvstSdp + host candidate) and watches the server for S seconds. */
+static long g_sess_webrtc_answer = 0;
 static int  g_sess_interactive = 0; /* round N slice 4j (F33): --session-interactive */
 static int  g_sess_audio_play = 0; /* round N slice 3 (F21): --session-audio-play */
 
@@ -7012,11 +7027,350 @@ static size_t sess_json_esc(char *dst, size_t dstsz,
     return o;
 }
 
+/* B-track slice 5b (RTSP §65.5): the post-answer observation state.
+ * The probe owns one of these; sess_webrtc_answer_send() opens the UDP
+ * bundle socket and sends the answer + nvstSdp + host candidate, then
+ * the probe loop drains the socket and counts what the server does.
+ * B2 SERVES NO MEDIA on purpose: no STUN reply, no DTLS — the flight's
+ * single variable is "does the server accept our answer and start ICE".
+ * The wire dump (--wire-dump) captures every byte either way. */
+typedef struct {
+    int          active;          /* answer sent; the socket is live */
+    int          sent;            /* answer+nvstSdp frame went out */
+    int          cand_sent;       /* the host candidate went out */
+    const char  *cert_src;        /* "real" | "placeholder" fingerprint */
+    kn_sock_udp  sock;
+    int          sock_open;
+    char         local_ip[24];    /* the routed source addr (dotted) */
+    unsigned     local_port;
+    unsigned long long stun_in, dtls_in, other_in, acks_in;
+    unsigned long long first_stun_ms;   /* 0 = none seen */
+    uint64_t     t0;              /* answer-sent timestamp */
+} webrtc_answer_state;
+
+/* Resolve the seat host to a numeric IPv4 for the UDP route: the CM
+ * conn0_ip is a DASHED hostname in the runB1-B3 seats
+ * ("80-250-98-40.cloudmatchbeta.nvidiagrid.net") whose first label
+ * encodes the literal IPv4 — NVIDIA's own scheme. Order: dotted parse,
+ * dash-label decode, DNS (kn_net_dns_lookup). Returns 0 on failure. */
+static uint32_t sess_webrtc_media_ip(const char *host)
+{
+    uint32_t ip = 0;
+    if (!host || !host[0]) return 0;
+    if (kn_sock_ipv4_parse(host, &ip) == 0 && ip) return ip;
+    {   /* the dashed first label: "A-B-C-D.rest" */
+        unsigned a = 0, b = 0, c = 0, d = 0;
+        if (sscanf(host, "%u-%u-%u-%u.", &a, &b, &c, &d) == 4 &&
+            a < 256 && b < 256 && c < 256 && d < 256) {
+            char dotted[16];
+            snprintf(dotted, sizeof dotted, "%u.%u.%u.%u", a, b, c, d);
+            if (kn_sock_ipv4_parse(dotted, &ip) == 0 && ip) return ip;
+        }
+    }
+    {   /* last resort: the platform resolver */
+        kn_net_dns dns;
+        memset(&dns, 0, sizeof dns);
+        (void)kn_net_dns_lookup(host, &dns);
+        if (dns.rc == 0 && dns.first_v4[0] &&
+            kn_sock_ipv4_parse(dns.first_v4, &ip) == 0 && ip)
+            return ip;
+    }
+    return 0;
+}
+
+/* Build and send the answer + nvstSdp + the host candidate over the
+ * already-open signaling WS. Returns 0 when the answer frame went out
+ * (the candidate may still fail — as->cand_sent says which). Every
+ * failure mode prints its own webrtc_answer event. */
+static int sess_webrtc_answer_send(kn_ws_client *wsc,
+                                   unsigned long long *out_ackid,
+                                   long long my_id, long long remote_id,
+                                   const kn_cm_settings *st,
+                                   const char *media_host,
+                                   const char *offer_sdp,
+                                   webrtc_answer_state *as)
+{
+    static kn_sdp_offer off;
+    static char ans[8 * 1024], nvst[12 * 1024];
+    static char esc_a[12 * 1024], esc_n[20 * 1024];
+    static char inner[36 * 1024], esc_i[72 * 1024], env[80 * 1024];
+    static char cand[160], inner2[512], esc_i2[1024], env2[1536];
+    char ufrag[24], pwd[32], fp[KN_CERT_FP_LEN + 1], err[200];
+    kn_sdp_answer_cfg cfg;
+    uint32_t mip;
+    uint16_t mport;
+    const char *cert_src = "placeholder";
+    int rc, n;
+
+    memset(as, 0, sizeof *as);
+    as->cert_src = cert_src;
+    rc = kn_sdp_offer_parse(offer_sdp, &off);
+    if (rc != KN_SDP_OK) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"offer_parse\",\"rc\":%d}\n", rc);
+        fflush(stdout);
+        return -1;
+    }
+    sess_local_identity(ufrag, sizeof ufrag, pwd, sizeof pwd,
+                        fp, sizeof fp);
+    if (kn_cert_available()) {
+        /* the REAL certificate fingerprint — B3's DTLS handshake will
+         * regenerate/keep one; for B2 the fingerprint only has to be
+         * well-formed and stable within the flight (the F37 R3-A
+         * pattern, kn_cert.h header contract). */
+        kn_cert *cert = kn_cert_generate(err, sizeof err);
+        if (cert) {
+            if (kn_cert_fingerprint(cert, fp, sizeof fp) == 0)
+                cert_src = "real";
+            kn_cert_free(cert);
+        }
+        as->cert_src = cert_src;
+    }
+    mip = sess_webrtc_media_ip(media_host);
+    mport = (off.n_media > 0 && off.m[0].port > 0 &&
+             off.m[0].port <= 65535) ? (uint16_t)off.m[0].port : 47998;
+    if (!mip) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"media_ip\",\"host\":\"%.60s\"}\n",
+               media_host ? media_host : "");
+        fflush(stdout);
+        return -1;
+    }
+    if (kn_sock_udp_open(&as->sock, NULL, 0, KN_SOCK_RCVBUF_DEFAULT,
+                         err, sizeof err) != KN_SOCK_OK) {
+        char e[200];
+        sess_json_esc(e, sizeof e, err, strlen(err));
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"udp_open\",\"detail\":\"%s\"}\n", e);
+        fflush(stdout);
+        return -1;
+    }
+    as->sock_open = 1;
+    if (kn_sock_udp_connect(&as->sock, mip, mport) != KN_SOCK_OK) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"udp_connect\"}\n");
+        fflush(stdout);
+        kn_sock_udp_close(&as->sock);
+        as->sock_open = 0;
+        return -1;
+    }
+    {   /* connect() picked the route's source address — expose it */
+        const uint8_t *la = (const uint8_t *)&as->sock.local_addr;
+        snprintf(as->local_ip, sizeof as->local_ip, "%u.%u.%u.%u",
+                 la[0], la[1], la[2], la[3]);
+        as->local_port = kn_sock_udp_port(&as->sock);
+    }
+    memset(&cfg, 0, sizeof cfg);
+    cfg.local_ip = "0.0.0.0";       /* the answer's c= line: the browser
+                                       sends 0.0.0.0 with trickle ICE;
+                                       the candidate carries the real
+                                       address (OpenNOW/str0m parity) */
+    cfg.local_port = as->local_port;
+    cfg.ufrag = ufrag;
+    cfg.pwd = pwd;
+    cfg.fingerprint = fp;
+    {
+        uint8_t r8[8];
+        unsigned long sid = 1;
+        int i;
+        if (kn_ws_rand(r8, sizeof r8) == 0)
+            for (i = 0; i < 4; ++i) sid = sid * 251u + r8[i];
+        cfg.sess_id = sid;
+    }
+    cfg.width  = st ? st->width  : 1280u;
+    cfg.height = st ? st->height : 720u;
+    cfg.fps    = st && st->fps ? st->fps : 30u;
+    cfg.bitrate_kbps = 20000u;      /* B2 default (RTSP §65.5): the nvst
+                                       ladder clamps to 1000..200000;
+                                       20 Mbps suits the E5500 seat */
+    rc = kn_sdp_answer_build(&off, &cfg, ans, sizeof ans);
+    if (rc != KN_SDP_OK) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"answer_build\",\"rc\":%d}\n", rc);
+        fflush(stdout);
+        return -1;
+    }
+    rc = kn_sdp_nvst_build(&cfg, nvst, sizeof nvst);
+    if (rc != KN_SDP_OK) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"nvst_build\",\"rc\":%d}\n", rc);
+        fflush(stdout);
+        return -1;
+    }
+    if (sess_json_esc(esc_a, sizeof esc_a, ans, strlen(ans)) == 0 ||
+        sess_json_esc(esc_n, sizeof esc_n, nvst, strlen(nvst)) == 0) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"esc\"}\n");
+        fflush(stdout);
+        return -1;
+    }
+    /* the full documents go to the console ONCE each (the flight log is
+     * the diffable artifact; the wire dump keeps the framed bytes) */
+    printf("{\"mode\":\"session\",\"event\":\"webrtc_answer_sdp\","
+           "\"sdp\":\"%s\"}\n", esc_a);
+    printf("{\"mode\":\"session\",\"event\":\"webrtc_nvst_sdp\","
+           "\"nvst_sdp\":\"%s\",\"bytes\":%llu}\n", esc_n,
+           (unsigned long long)strlen(nvst));
+    fflush(stdout);
+    n = snprintf(inner, sizeof inner,
+                 "{\"type\":\"answer\",\"sdp\":\"%s\",\"nvstSdp\":\"%s\"}",
+                 esc_a, esc_n);
+    if (n < 0 || (size_t)n >= sizeof inner) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"inner_big\"}\n");
+        fflush(stdout);
+        return -1;
+    }
+    if (sess_json_esc(esc_i, sizeof esc_i, inner, (size_t)n) == 0) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"esc_inner\"}\n");
+        fflush(stdout);
+        return -1;
+    }
+    n = snprintf(env, sizeof env,
+                 "{\"ackid\":%llu,\"peer_msg\":{\"from\":%lld,\"to\":%lld,"
+                 "\"msg\":\"%s\"}}",
+                 ++*out_ackid, my_id, remote_id, esc_i);
+    if (n < 0 || (size_t)n >= sizeof env ||
+        kn_ws_send_text(wsc, env, (size_t)n) != KN_WS_OK) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer\","
+               "\"error\":\"answer_send\"}\n");
+        fflush(stdout);
+        return -1;
+    }
+    as->sent = 1;
+    as->t0 = kn_sock_now_ms();
+    printf("{\"mode\":\"session\",\"event\":\"webrtc_answer_sent\","
+           "\"answer_bytes\":%llu,\"nvst_bytes\":%llu,\"cert\":\"%s\","
+           "\"ufrag_len\":%d,\"pwd_len\":%d,\"fp_len\":%d,"
+           "\"from\":%lld,\"to\":%lld,\"ackid\":%llu,"
+           "\"local_ip\":\"%s\",\"local_port\":%u,\"media_port\":%u,"
+           "\"video_pt\":%d,\"video_rtx\":%d,\"audio_pt\":%d}\n",
+           (unsigned long long)strlen(ans),
+           (unsigned long long)strlen(nvst), cert_src,
+           (int)strlen(ufrag), (int)strlen(pwd), (int)strlen(fp),
+           my_id, remote_id, *out_ackid,
+           as->local_ip, as->local_port, (unsigned)mport,
+           off.n_media > 1 ? off.m[1].h264_pt : 0,
+           off.n_media > 1 ? off.m[1].h264_rtx_pt : 0,
+           off.n_media > 0 ? off.m[0].opus_pt : 0);
+    fflush(stdout);
+    /* the local host candidate, attached to the first bundled mid
+     * (OpenNOW candidate_target(): the first mid of the BUNDLE group —
+     * with the runB3 offer that is "0", the audio section) */
+    if (kn_sdp_candidate_host(as->local_ip, as->local_port,
+                              cand, sizeof cand) == KN_SDP_OK) {
+        const char *mid0 = off.n_media > 0 ? off.m[0].mid : "0";
+        n = snprintf(inner2, sizeof inner2,
+                     "{\"candidate\":\"%s\",\"sdpMid\":\"%.8s\","
+                     "\"sdpMLineIndex\":0,\"usernameFragment\":null}",
+                     cand, mid0[0] ? mid0 : "0");
+        if (n > 0 && (size_t)n < sizeof inner2 &&
+            sess_json_esc(esc_i2, sizeof esc_i2, inner2, (size_t)n) &&
+            (n = snprintf(env2, sizeof env2,
+                          "{\"ackid\":%llu,\"peer_msg\":{\"from\":%lld,"
+                          "\"to\":%lld,\"msg\":\"%s\"}}",
+                          ++*out_ackid, my_id, remote_id, esc_i2)) > 0 &&
+            (size_t)n < sizeof env2 &&
+            kn_ws_send_text(wsc, env2, (size_t)n) == KN_WS_OK) {
+            as->cand_sent = 1;
+            printf("{\"mode\":\"session\",\"event\":"
+                   "\"webrtc_local_candidate\",\"candidate\":\"%s\","
+                   "\"sdpMid\":\"%.8s\",\"ackid\":%llu}\n",
+                   cand, mid0[0] ? mid0 : "0", *out_ackid);
+        } else {
+            printf("{\"mode\":\"session\",\"event\":"
+                   "\"webrtc_local_candidate\",\"error\":\"send\"}\n");
+        }
+        fflush(stdout);
+    }
+    return 0;
+}
+
+/* One UDP datagram classification step for the B2 linger loop: STUN
+ * binding requests (the server's ICE checks at us), DTLS records (would
+ * mean the server already trusts the exchange), anything else. The
+ * first few of each class are hex-dumped; the STUN USERNAME attribute
+ * is extracted because its "serverUfrag:ourUfrag" shape is the direct
+ * proof the server ACCEPTED our ICE credentials. Nothing is answered
+ * (B2 is observation; B3 brings the ICE/DTLS machinery). */
+static void sess_webrtc_answer_drain(webrtc_answer_state *as)
+{
+    static uint8_t upkt[2048];
+    int k;
+    if (!as->active || !as->sock_open) return;
+    for (k = 0; k < 16; ++k) {
+        size_t dl = 0;
+        int tr = 0;
+        uint64_t now;
+        if (kn_sock_udp_recv(&as->sock, upkt, sizeof upkt, 0, &dl, &tr)
+                != 1 || dl == 0)
+            break;
+        now = kn_sock_now_ms();
+        if (dl >= 20 && upkt[0] == 0x00 && upkt[1] == 0x01) {
+            /* STUN Binding request */
+            ++as->stun_in;
+            if (!as->first_stun_ms)
+                as->first_stun_ms =
+                    (unsigned long long)(now - (uint64_t)as->t0);
+            if (as->stun_in <= 3) {
+                size_t off = 20;
+                char user[256] = "";
+                while (off + 4 <= dl) {
+                    unsigned t = ((unsigned)upkt[off] << 8) | upkt[off + 1];
+                    unsigned l = ((unsigned)upkt[off + 2] << 8) |
+                                 upkt[off + 3];
+                    if (t == 0x0006u && l < sizeof user) {
+                        memcpy(user, upkt + off + 4, l);
+                        user[l] = '\0';
+                        break;
+                    }
+                    off += 4u + l + ((4u - (l & 3u)) & 3u);
+                }
+                printf("{\"mode\":\"session\",\"event\":\"webrtc_stun_in\","
+                       "\"n\":%llu,\"len\":%llu,\"username\":\"%.120s\","
+                       "\"first_ms\":%llu}\n", as->stun_in,
+                       (unsigned long long)dl, user,
+                       as->first_stun_ms);
+                fflush(stdout);
+            }
+        } else if (dl >= 13 && upkt[0] >= 0x14 && upkt[0] <= 0x17 &&
+                   upkt[1] == 0xFE) {
+            ++as->dtls_in;
+            if (as->dtls_in <= 2) {
+                size_t i, hn = dl < 32 ? dl : 32;
+                char hx[80];
+                for (i = 0; i < hn && i < 32; ++i)
+                    snprintf(hx + i * 2, 3, "%02x", upkt[i]);
+                hx[hn * 2 < sizeof hx ? hn * 2 : sizeof hx - 1] = '\0';
+                printf("{\"mode\":\"session\",\"event\":\"webrtc_dtls_in\","
+                       "\"n\":%llu,\"len\":%llu,\"head\":\"%s\"}\n",
+                       as->dtls_in, (unsigned long long)dl, hx);
+                fflush(stdout);
+            }
+        } else {
+            ++as->other_in;
+            if (as->other_in <= 2) {
+                size_t i, hn = dl < 24 ? dl : 24;
+                char hx[64];
+                for (i = 0; i < hn && i < 24; ++i)
+                    snprintf(hx + i * 2, 3, "%02x", upkt[i]);
+                hx[hn * 2 < sizeof hx ? hn * 2 : sizeof hx - 1] = '\0';
+                printf("{\"mode\":\"session\",\"event\":\"webrtc_udp_in\","
+                       "\"n\":%llu,\"len\":%llu,\"head\":\"%s\"}\n",
+                       as->other_in, (unsigned long long)dl, hx);
+                fflush(stdout);
+            }
+        }
+    }
+}
+
 /* Returns 0 when the server's SDP offer was captured (event
  * webrtc_offer_sdp on stdout), -1 otherwise (every failure mode logs
  * its own event; the summary line is always emitted). */
 static int sess_webrtc_probe(const kn_cm_settings *st,
-                             const kn_cm_session *sess, long wait_s)
+                             const kn_cm_session *sess, long wait_s,
+                             long answer_s)
 {
     static kn_ws_client wsc;
     static uint8_t wsmsg[300 * 1024];       /* >= MAX_SDP_BYTES + slack */
@@ -7026,6 +7380,9 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
     static char escbuf[600 * 1024];         /* escaped SDP: \r\n -> \\r\\n
                                                can nearly double 256 KiB */
     static kn_jdoc d;
+    webrtc_answer_state as;                 /* slice 5b (B2) */
+    long long remote_id = 1;                /* OpenNOW's default to-id */
+    int remote_id_known = 0;
     kn_ws_io io;
     tls_ctx c;
     void *tls;
@@ -7038,6 +7395,8 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
     int my_id_known = 0, got_offer = 0, opened = 0, sdp_lines = 0, m_lines = 0;
     uint16_t port;
 
+    memset(&as, 0, sizeof as);
+    as.cert_src = "none";
     port = (sess->conn0_port > 0 && sess->conn0_port <= 65535)
                ? (uint16_t)sess->conn0_port : 443;
     if (kn_ws_rand(rnd, sizeof rnd) != 0) {
@@ -7145,6 +7504,10 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
                 goto hb_duty;
             }
             root = kn_json_root(&d);
+            /* slice 5b: the server's {"ack":N} frames ack OUR ackids —
+             * count them (the answer/candidate frames expect acks) */
+            node = kn_json_get(&d, root, "ack");
+            if (node) ++as.acks_in;
             /* our own echoed peer_info: learn the assigned id by name */
             pi = kn_json_get(&d, root, "peer_info");
             nid = pi ? kn_json_get(&d, pi, "id") : NULL;
@@ -7202,6 +7565,16 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
             }
             /* peer_msg: the nested JSON-string envelope */
             pm = kn_json_get(&d, root, "peer_msg");
+            if (pm) {   /* slice 5b: the envelope's "from" is the remote
+                         * peer id our answer must be addressed to
+                         * (runB3: OneSdkServer, id 1) */
+                const kn_jnode *fr = kn_json_get(&d, pm, "from");
+                long long fv = 0;
+                if (fr && kn_json_int(fr, &fv) == KN_JSON_OK) {
+                    remote_id = fv;
+                    remote_id_known = 1;
+                }
+            }
             msg = pm ? kn_json_get(&d, pm, "msg") : NULL;
             if (msg && msg->type == KN_J_STR &&
                 kn_json_str_copy(msg, msgbuf, sizeof msgbuf) == KN_JSON_OK) {
@@ -7243,8 +7616,39 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
                                "\"webrtc_offer_sdp\",\"sdp\":\"%s\"}\n",
                                escbuf);
                         fflush(stdout);
-                        /* linger 5 s (at most) for the trailing trickle */
-                        {
+                        if (answer_s > 0) {
+                            /* slice 5b (B2): answer for real, then watch
+                             * the server for answer_s seconds. The
+                             * offer's "sdp" field is the classic
+                             * WebRTC SDP; runB3 proved the ~40 KB
+                             * nvstSdp arrives as a SEPARATE field of
+                             * the same inner message (RTSP §65.2 —
+                             * the wire redactor fused them inside
+                             * wire.txt, the live parse does not). */
+                            int arc = sess_webrtc_answer_send(
+                                &wsc, &out_ackid,
+                                my_id_known ? my_id : 0,
+                                remote_id_known ? remote_id : 1,
+                                st, sess->conn0_ip, sdpbuf, &as);
+                            if (arc == 0 && as.sent) {
+                                as.active = 1;
+                                deadline = kn_sock_now_ms() +
+                                           (uint64_t)answer_s * 1000u;
+                                printf("{\"mode\":\"session\","
+                                       "\"event\":\"webrtc_answer_mode\","
+                                       "\"linger_s\":%ld,\"cand\":%d}\n",
+                                       answer_s, as.cand_sent);
+                                fflush(stdout);
+                            } else {
+                                printf("{\"mode\":\"session\","
+                                       "\"event\":\"webrtc_answer\","
+                                       "\"error\":\"send_failed\"}\n");
+                                fflush(stdout);
+                                break;      /* nothing left to observe */
+                            }
+                        } else {
+                            /* linger 5 s (at most) for the trailing
+                             * trickle (B1: none arrived pre-answer) */
                             uint64_t linger = kn_sock_now_ms() + 5000u;
                             if (linger < deadline) deadline = linger;
                         }
@@ -7278,6 +7682,7 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
             }
         }
 hb_duty:
+        sess_webrtc_answer_drain(&as);      /* slice 5b: the UDP watch */
         if (kn_sock_now_ms() - hb_at >= 5000u) {
             if (kn_ws_send_text(&wsc, "{\"hb\":1}", 8) == KN_WS_OK)
                 ++hb_sent;
@@ -7287,17 +7692,42 @@ hb_duty:
 
     (void)kn_ws_send_close(&wsc, 1000);
     kn_net_tls_stream_close(tls);
+    if (as.sock_open) {                     /* slice 5b: the bundle sock */
+        kn_sock_udp_close(&as.sock);
+        as.sock_open = 0;
+    }
     printf("{\"mode\":\"session\",\"event\":\"webrtc_probe_summary\","
            "\"got_offer\":%d,\"frames_in\":%llu,\"frames_out\":%llu,"
            "\"hb_sent\":%llu,\"acks_sent\":%llu,\"peer_info_seen\":%llu,"
            "\"candidates\":%llu,\"my_id\":%lld,\"my_id_known\":%d,"
+           "\"remote_id\":%lld,\"remote_id_known\":%d,"
            "\"elapsed_ms\":%llu,\"stop\":%d}\n",
            got_offer, frames_in, wsc.frames_out, hb_sent, acks_sent,
-           peers, cands, my_id, my_id_known,
+           peers, cands, my_id, my_id_known, remote_id, remote_id_known,
            (unsigned long long)(kn_sock_now_ms() - t0),
            g_knv_stop ? 1 : 0);
+    if (answer_s > 0) {
+        /* the B2 verdict line: did the server take the answer? The
+         * pass shape (RTSP §65.6): answer_sent=1, acks_in >= 1,
+         * server_cands > 0 within ~2 s, stun_in > 0 (ICE checks at us,
+         * USERNAME "serverUfrag:ourUfrag"), no error/bye frames. */
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_answer_summary\","
+               "\"answer_sent\":%d,\"cand_sent\":%d,\"cert\":\"%s\","
+               "\"local_ip\":\"%s\",\"local_port\":%u,"
+               "\"acks_in\":%llu,\"server_cands\":%llu,"
+               "\"stun_in\":%llu,\"dtls_in\":%llu,\"other_in\":%llu,"
+               "\"first_stun_ms\":%llu,\"linger_ms\":%llu,\"stop\":%d}\n",
+               as.sent, as.cand_sent, as.cert_src ? as.cert_src : "?",
+               as.local_ip, as.local_port,
+               as.acks_in, cands, as.stun_in, as.dtls_in, as.other_in,
+               as.first_stun_ms,
+               (unsigned long long)(as.t0 ? kn_sock_now_ms() -
+                                     (uint64_t)as.t0 : 0ull),
+               g_knv_stop ? 1 : 0);
+        fflush(stdout);
+    }
     fflush(stdout);
-    return got_offer ? 0 : -1;
+    return (got_offer && (answer_s <= 0 || as.sent)) ? 0 : -1;
 }
 
 static int run_session(const char *token, const char *device_id,
@@ -7923,7 +8353,8 @@ static int run_session(const char *token, const char *device_id,
              * The probe captures the offer (the answer builder's ground
              * truth) and releases the seat; the fail-fast below stays
              * for non-probe runs. */
-            if (g_sess_webrtc_probe > 0 && sess.status >= 2 &&
+            if ((g_sess_webrtc_probe > 0 || g_sess_webrtc_answer > 0) &&
+                sess.status >= 2 &&
                 !sess.have_rtsps && sess.conn_count > 0 &&
                 sess.conn0_usage == 14 && sess.conn0_ip[0]) {
                 int prc;
@@ -7940,9 +8371,19 @@ static int run_session(const char *token, const char *device_id,
                        (long long)sess.conn0_alp,
                        (long long)sess.conn0_port, pe, sess.conn0_path);
                 fflush(stdout);
-                prc = sess_webrtc_probe(&st, &sess, g_sess_webrtc_probe);
-                stop_reason = prc == 0 ? "webrtc_offer_captured"
-                                       : "webrtc_probe_failed";
+                /* slice 5b: --webrtc-answer supersedes the bare probe
+                 * (superset of it); the pre-offer window stays 60 s —
+                 * the offer arrives ~1 s after the WS opens (runB1-B3) */
+                prc = sess_webrtc_probe(
+                    &st, &sess,
+                    g_sess_webrtc_probe > 0 ? g_sess_webrtc_probe : 60,
+                    g_sess_webrtc_answer);
+                if (g_sess_webrtc_answer > 0)
+                    stop_reason = prc == 0 ? "webrtc_answer_done"
+                                           : "webrtc_answer_failed";
+                else
+                    stop_reason = prc == 0 ? "webrtc_offer_captured"
+                                           : "webrtc_probe_failed";
                 break;
             }
             /* F37 (run-101 read, RTSP §59.2): the unusable-seat
@@ -10693,6 +11134,15 @@ int main(int argc, char **argv)
                 a[14] == '=' ? strtol(a + 15, NULL, 10) : 30;
             if (g_sess_webrtc_probe < 5) g_sess_webrtc_probe = 5;
             if (g_sess_webrtc_probe > 600) g_sess_webrtc_probe = 600;
+        }
+        else if (strcmp(a, "--webrtc-answer") == 0 ||
+                 strncmp(a, "--webrtc-answer=", 16) == 0) {
+            /* B-track slice 5b: 0 = off; bare flag = 45 s post-answer
+             * observation window (RTSP §65.6 flight card B2) */
+            g_sess_webrtc_answer =
+                a[15] == '=' ? strtol(a + 16, NULL, 10) : 45;
+            if (g_sess_webrtc_answer < 10) g_sess_webrtc_answer = 10;
+            if (g_sess_webrtc_answer > 300) g_sess_webrtc_answer = 300;
         }
         else if (strncmp(a, "--session-play-wait=", 20) == 0)
             sess_play_wait = strtol(a + 20, NULL, 10);
