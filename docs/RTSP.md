@@ -7759,3 +7759,150 @@ updates, INTEGRATION slice 5i. Patch
 pushed 5h HEAD on `poprawki-agenta`. Next: **runB4a**; then B5 from
 its readout (depacketization if video flows; the peer-channel /
 heartbeat dialect if it doesn't).
+
+## 72. Slice 5j (B-TRACK): **runB4a is READ — the datachannel gate did NOT fire (sctp_up:0), the B3 floor held perfectly, and the readout found the bug in OUR integration: the probe stopped servicing DTLS after ready.** The seat's INIT was answered (our 356-byte INIT-ACK left as DTLS app record #4, `send_errors:0`), then five post-ready DTLS records arrived and sat **injected-but-undecrypted** — slice 5g's `dtls_tick` polled only while `!dtls_ready`, but the inject queue is processed ONLY inside `kn_dtls_poll` (post-ready poll = idempotent READY + `dtls_drain_app` into the app ring). The native pump carries the rule verbatim at ~:6086 — *"keep the established DTLS session serviced: poll (drains app records into the ring, answers post-handshake traffic)"* — and the 5g integration dropped that half. This is the 5e lesson's sibling: the flight measured what the suite could not (no unit test can starve a live seat). The fix is one guard; the role-flip question (§71.6's initiator branch) stays PARKED until runB4b says what those five records were.
+
+### 72.1 The flight (draw 1, 2026-11-03 ~14:5x local, seat `80.250.98.38:5004`, T10 ALL PASS 89/0 with test_knsctp REAL 35/0 + test_kndtls 39/0)
+
+| t (ms) | event |
+|---|---|
+| 1596 | `ice_ok` (mapped `10.222.254.4:61524` — 4th seat, 4th private-netns re-NAT) |
+| 1597 | `webrtc_dtls_arm armed:1`; handshake in **380 ms** (`records_in:8, records_out:3`) |
+| ~1977 | `webrtc_dtls_ready` — **`app_records:1` already at ready** (the seat's INIT, 44 B: tag begins `e624ab…`, same shape as runB3a's) |
+| 2010 | `webrtc_sctp_arm armed:1 role:"responder"`; the INIT drains ring→inject→usrsctp; **INIT-ACK out** (`pkts_out:1, bytes_out:356`; DTLS `records_out` 3→4, `send_errors:0`) |
+| 2261+ | audio flows: `first_seq:0`, `media_ok:2313`, `media_authfail:0`, `other_in:0` (NO pre-ready race this flight — the whole stream arrived post-ready) |
+| …45092 | five post-ready DTLS records arrive (`records_in` 8→13) — **never processed** (`polls:3`, frozen at the handshake); no COOKIE-ECHO ever reaches usrsctp (`pkts_in` stays 1, `msgs_in:0`), no SCTP retransmit of our INIT-ACK class visible either |
+| 45092 | linger ends full-window; clean `webrtc_answer_done` + `cm_cancel 200` |
+
+Gate score vs §71.6: lines 1/4/5 **held** (`armed:1 responder`; B3
+floor perfect; clean exit) — lines 2/3 **failed** (`sctp_up:0`,
+`dc_opened:0`) via the named branch "`sctp_up:0`, `pkts_in ≥ 1`" —
+and the branch's own instrumentation (`webrtc_sctp_final` /
+`webrtc_dtls_final`, shipped in 5i for exactly this) localized the
+fault to OUR side of the wire in one read.
+
+### 72.2 The diagnosis, in counter arithmetic (why it is OUR bug)
+
+- `polls:3` — the 5g gate `!as->dtls_ready` stopped polling at ready
+  (three handshake polls total).
+- `records_in:13` at teardown vs **8 at ready** (the ready event
+  printed it) → five datagrams were injected post-ready.
+- `app_q_dropped:0`, `app_records:1`, `app_bytes:44` → nothing was
+  decrypted after the INIT; the inject queue never overflowed — it
+  simply was never drained. The queue is drained ONLY by
+  `dtls_drain_app`, whose ONLY call sites are inside `kn_dtls_poll`
+  (kn_dtls.c :464 post-ready path, :483 at the ready transition).
+- `sctp_final pkts_in:1` → usrsctp saw only the INIT. Had any of the
+  five been decrypted, they would have landed in the app ring, and
+  the sctp tick's `read_app` loop (which ran every pass, starved)
+  would have injected them.
+- What were the five? **Unidentified in runB4a by evidence budget**:
+  the `webrtc_dtls_in` head printout (2) was spent on handshake
+  datagrams. Two hypotheses survive the counters: **(A)** the seat's
+  COOKIE-ECHO + T1-cookie retransmits — the cadence 1+2+4+8+16 s
+  sums to 31 s inside the 43 s post-ready window, and five records
+  is exactly original+4; or **(B)** duplicate/retransmitted handshake
+  flights the seat emitted post-ready (mbedTLS would absorb them
+  silently once processed). Hypothesis A means the responder design
+  was RIGHT and the association was mid-handshake while we starved
+  it; hypothesis B means the seat's INIT is vestigial and §71.6's
+  initiator branch activates. runB4b discriminates with the fix +
+  the widened head budget — no guessing now.
+
+### 72.3 The fix (slice 5j, one variable)
+
+1. **Poll forever**: the `dtls_tick` gate loses `!as->dtls_ready` —
+   every pass polls while armed and not fatal. Post-ready poll is
+   the module's documented idempotent READY + app drain; the ready
+   block keeps its own one-shot guard (`!as->dtls_ready && drc ==
+   KN_DTLS_READY`) so stats/export/events fire exactly once; the
+   fail branch semantics are unchanged (a post-ready negative can
+   only be a latched write-path fatal — logging + freeing is the
+   honest response, and the sctp `write_cb` already NULL-checks).
+2. **Post-ready head budget**: `webrtc_dtls_in` now also prints for
+   post-ready datagrams up to global n ≤ 24 (worst case ~16 extra
+   lines) — the first byte names the class even when the module
+   absorbs the record silently: `0x16` = handshake duplicate
+   (hypothesis B), `0x17` = app data (hypothesis A).
+3. **The role stays RESPONDER** (odd sids, `open_server`) — the
+   role-flip to initiator (even sids, `kn_sctp_open`, RFC 4960
+   §5.2.1 collision handling for the seat's ready+0 INIT) is the
+   named next branch IF runB4b shows the five records were 0x16
+   duplicates and the seat truly never answers an INIT-ACK. One
+   variable per flight: 5j changes servicing, not roles.
+
+### 72.4 Everything else runB4a confirmed (the floor is solid)
+
+DTLS in 380 ms (`pin_matched:1 verify:0 srtp_prof:1 derived:1`);
+audio `media_ok:2313` / `media_authfail:0` (second consecutive
+flight of clean keys; `media_other:601` = the SRTCP class, ~14/s,
+consistent with runB3a's 578); `stun_in:6`/answered 6 (seat-check
+variance 3..6 across flights — post-DTLS liveness, §70.4); WS full
+window (`linger_ms:45092`); `peer_closed:0`, `records_dropped:0`,
+`txq_dropped:0`. The 5i instrumentation (`sctp_final`/`dtls_final`)
+paid for itself on its first flight: the diagnosis needed no wire
+dump, no re-fly, no guessing.
+
+### 72.5 Gate canon (measured this round; trees staged: vendored
+aes/sha1 + mbedTLS 3.6.0 + usrsctp c625e2195060, all SHA-verified)
+
+paranoid ×2 arches clean · NATIVE TESTS PASS · CROSS-CHECK PASS zero
+warnings both arches (kn_sctp real-body leg compiled) · cmake
+`-DKN_TLS_BACKEND=mbedtls` + usrsctp ENABLED → **ctest 29/29**,
+`test_knsctp` REAL **35/0**, `test_kndtls` REAL **39/0** · launcher
+**168/0** · no new unit tests (integration servicing fix; the
+starvation class is only observable against a live seat — named in
+the ledger beside 5e's cross-module rule: **an integration slice
+inherits the FULL service contract of the modules it wires, not just
+the half that runs before the first success**).
+
+### 72.6 runB4b — the flight card
+
+**Pre-flight:** apply `0008-slice-5j-dtls-post-ready-service.patch`
+(base: the pushed 5i HEAD), T10 rebuild → `ALL PASS` 89/0 (same
+REAL shapes 35/0 + 39/0). Launcher: run folder `runB4b`, draw 1,
+params EXACTLY `--cm-profile=browser --webrtc-answer=45
+--session-queue-timeout=1500`.
+
+**PASS oracle (the §71.6 gate, unchanged — role stays responder):**
+1. `webrtc_sctp_arm armed:1 role:"responder"`
+2. `webrtc_sctp_up ms < ~3000`
+3. `dc_opened:3` + `webrtc_dc_open acked:3`
+4. B3 floor: `dtls_ready:1 srtp_derived:1 media_ok ≥ 1
+   media_authfail:0 ice_ok:1 linger_ms ≈ 45000`
+5. clean exit (`webrtc_answer_done` + `cm_cancel 200`)
+
+**Scoring readout (unchanged):** `hs_seen:1`? video PT 96/97 in
+`webrtc_media`?
+
+**Named branches (this flight DISCRIMINATES §72.2's A/B either way):**
+- `sctp_up:1` → hypothesis A confirmed (the five were COOKIE-ECHO
+  class); the association lives; score the readout; B5 = whatever
+  the scoring says (video → depacketization; no video → the control
+  dialect, with `webrtc_dc_peer_open` labels + `webrtc_sctp_msg`
+  heads as the design input).
+- `sctp_up:0` BUT `app_records > 1` / `pkts_in > 1` → the records
+  were processed this time and usrsctp still didn't establish: read
+  `sctp_final` (`assoc_state/error/errno`) — a cookie-validation or
+  tag-mismatch class; the heads (0x17) + counters localize it.
+- `sctp_up:0` AND `app_records:1` AND the new post-ready
+  `webrtc_dtls_in` heads show `0x16…` → hypothesis B: the seat's
+  INIT is vestigial (sent once, never retransmitted — two flights,
+  two seats) and NOTHING follows an INIT-ACK → **the role flip
+  (initiator, even sids) becomes the next slice's single variable**,
+  exactly as §71.6 pre-named it.
+- floor broken (WS dies early / media stops) → the poll change
+  touched two variables by accident; localize via `dtls_final`
+  (polls now ≈ passes; a post-ready `webrtc_dtls_fail` names a
+  latched write-path fatal).
+
+### 72.7 This round's shape
+
+One file of C (`streamer/src/knvstd_main.c`, one guard + one budget
++ comments), no API/module/build/launcher change. Docs: this
+section, START-HERE §46 + the §44 pointers, INTEGRATION slice 5j.
+Patch `0008-slice-5j-dtls-post-ready-service.patch`, base = the
+operator's pushed 5i HEAD (`d9696ba`). Evidence: karnynow-logs @
+`cedd37a` (runB4a/1 + T10), archived to `priv-logs/runB4a`. Next:
+**runB4b** — the flight that discriminates A/B and, on A, scores the
+whole B4 gate.

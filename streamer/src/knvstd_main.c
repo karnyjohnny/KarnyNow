@@ -7114,7 +7114,13 @@ typedef struct {
      * input-readiness gate is the server's [0x0e,…] handshake on
      * input_channel_v1 — detected and versioned here. One variable:
      * the datachannel comes up; the scoring readout is whether video
-     * PT 96 starts. */
+     * PT 96 starts. runB4a measured the responder half honestly: our
+     * INIT-ACK left (356 B, records_out 3→4, send_errors 0) and the
+     * seat side went silent — but five post-ready DTLS records
+     * arrived (T1 cadence class) and 5g's tick had stopped polling
+     * at ready, so they were never decrypted (the starvation fix is
+     * slice 5j; the role-flip question — initiator, even sids — is
+     * PARKED until runB4b says what those records were). */
     kn_sctp     *sctp;
     int          sctp_armed;        /* kn_sctp_open_server succeeded */
     int          sctp_noarm_logged;
@@ -7553,9 +7559,21 @@ static void sess_webrtc_dtls_tick(webrtc_answer_state *as)
             }
         }
     }
-    if (as->dtls && !as->dtls_ready && !as->dtls_fail_rc) {
+    if (as->dtls && !as->dtls_fail_rc) {
+        /* EVERY pass — including AFTER ready (slice 5j, the runB4a
+         * lesson): the inject queue is processed ONLY inside poll —
+         * post-ready poll is the idempotent KN_DTLS_READY +
+         * dtls_drain_app into the app ring. The native pump's rule
+         * verbatim ("keep the established DTLS session serviced:
+         * poll (drains app records into the ring, answers
+         * post-handshake traffic)" — knvstd ~:6086); 5g dropped that
+         * half and runB4a measured the starvation: polls:3 while
+         * records_in grew 8→13 — five post-ready records (the T1
+         * cadence 1+2+4+8+16 s fits COOKIE-ECHO retransmits inside
+         * the 43 s window) sat injected-but-undecrypted, so the SCTP
+         * layer never saw them (pkts_in stayed 1, sctp_up:0). */
         int drc = kn_dtls_poll(as->dtls);
-        if (drc == KN_DTLS_READY) {
+        if (!as->dtls_ready && drc == KN_DTLS_READY) {
             char cs[64], hx[65];
             kn_dtls_stats ds;
             uint8_t km[60];
@@ -8030,7 +8048,16 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
             ++as->dtls_in;
             if (as->dtls)
                 (void)kn_dtls_inject(as->dtls, upkt, dl);
-            if (as->dtls_in <= 2) {
+            /* slice 5j: post-ready records get their heads printed too
+             * (bounded: global n ≤ 24, so the worst case is ~16 extra
+             * lines) — runB4a's five unidentified post-ready records
+             * were invisible because the budget (2) was spent on the
+             * handshake datagrams. The first byte names the class even
+             * when the module absorbs the record silently: 0x16 =
+             * handshake (a duplicate flight), 0x17 = app data (the
+             * SCTP COOKIE-ECHO class). */
+            if (as->dtls_in <= 2 ||
+                (as->dtls_ready && as->dtls_in <= 24)) {
                 size_t i, hn = dl < 32 ? dl : 32;
                 char hx[80];
                 for (i = 0; i < hn && i < 32; ++i)

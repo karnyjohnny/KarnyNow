@@ -2144,11 +2144,15 @@ Two oracle corrections, both measured: `mapped_ip` came back **`10.222.254.7:620
   runB2b, the ledger's best lesson: pin contracts BETWEEN modules) →
   5f runB2c PASS (the 17 s ceiling broken: validated pair, 45 s WS) →
   5g B3 code (DTLS-SRTP wired into the probe) → 5h runB3a PASS +
-  this handoff audit → **5i B4 code: the SCTP datachannel responder
-  (SHIPPED — §45, RTSP §71)** → **NEXT: fly + read runB4a** (card:
-  RTSP §71.6) → then B5 from its readout (video depacketization if
-  PT 96 flows; the peer-channel/heartbeat dialect if not), input →
-  the goal: **G2' — a 60-minute keeper on the browser path.**
+  this handoff audit → 5i B4 code: the SCTP datachannel responder
+  (§45, RTSP §71) → runB4a read: gate did not fire — OUR post-ready
+  DTLS starvation (RTSP §72) → **5j the servicing fix (SHIPPED —
+  §46)** → **NEXT: fly + read runB4b** (card: RTSP §72.6 — it
+  discriminates COOKIE-ECHO-starved (A) from vestigial-INIT (B); on
+  B the role flip to initiator is the next variable) → then B5 from
+  the readout (video depacketization if PT 96 flows; the
+  peer-channel/heartbeat dialect if not), input → the goal: **G2' —
+  a 60-minute keeper on the browser path.**
 - **Branch state:** work happens on **`poprawki-agenta`**
   (`github.com/karnyjohnny/KarnyNow`). Chain: 5a `5e837c8` → 5b
   `e722462` → 5c `01f8f79` → 5d `a1e32af` → 5e `327bb87` → 5f
@@ -2172,25 +2176,34 @@ Two oracle corrections, both measured: `mapped_ip` came back **`10.222.254.7:620
   window (linger 45078 ms). The seat's own STUN checks collapsed from
   261 (runB2c, no DTLS) to 3 — DTLS/SRTP liveness disarms the seat's
   ICE keepalive duty. **UPDATE (slice 5i, §45): B4 shipped — the
-  probe now answers that INIT (responder role) and opens the
-  reference's three WebRTC channels; the next flight is runB4a (card:
-  RTSP §71.6).**
+  probe answers that INIT (responder role) and opens the reference's
+  three WebRTC channels. UPDATE 2 (slice 5j, §46): runB4a flew — the
+  gate did NOT fire (sctp_up:0) and the readout found the bug in OUR
+  integration: the probe stopped polling kn_dtls after ready, so five
+  post-ready records (COOKIE-ECHO+T1-retransmit class, 1+2+4+8+16 s)
+  sat injected-but-undecrypted (polls:3 vs records_in 8→13). The
+  servicing fix shipped (poll forever + post-ready head budget); the
+  role stays RESPONDER — the initiator flip is the pre-named next
+  branch IF runB4b proves the seat's INIT vestigial. Next flight:
+  runB4b (card: RTSP §72.6).**
 
 ### 44.2 What to do next (in order)
 
-1. **Fly runB4a** (operator): T10 rebuild first (expect ALL PASS
-   89/0 with the REAL shapes: test_knsctp 35/0 + test_kndtls 39/0),
-   run folder `runB4a`, draw 1, the minimal card. The PASS oracle,
-   the scoring readout (hs_seen? video PT 96?) and six named fail
-   branches: **RTSP §71.6**. Push the whole folder to
-   karnynow-logs.
-2. **Read runB4a into RTSP §72** and decide B5 from the evidence,
-   never from the plan: if video PT 96/97 flows → B5 =
-   depacketization (`kn_rx_video`, H264 96/97 + the GS framing) +
-   input on `input_channel_v1`; if the channel is up and acked but
-   video stays dark → the gate is the nvst control dialect — the
-   `webrtc_dc_peer_open` labels and `webrtc_sctp_msg` heads from the
-   flight are the design input (heartbeat / server-opened channels).
+1. **Fly runB4b** (operator): T10 rebuild first (expect ALL PASS
+   89/0, REAL shapes test_knsctp 35/0 + test_kndtls 39/0), run
+   folder `runB4b`, draw 1, the minimal card. The PASS oracle
+   (unchanged §71.6 gate: armed responder → sctp_up → 3/3 channels
+   → B3 floor → clean exit), the scoring readout (hs_seen? video
+   PT 96?) and the A/B-discriminating branches: **RTSP §72.6**.
+   Push the whole folder to karnynow-logs.
+2. **Read runB4b into RTSP §73** and branch on the evidence:
+   sctp_up:1 → score the readout (video flows → B5 =
+   depacketization `kn_rx_video` + input on `input_channel_v1`;
+   video dark → B5 = the nvst control dialect, with the
+   `webrtc_dc_peer_open` labels + `webrtc_sctp_msg` heads as the
+   design input). sctp_up:0 with 0x16 heads → the role flip
+   (initiator, even sids, `kn_sctp_open`) is the next single
+   variable, pre-named in §71.6/§72.3.
 3. Then, in evidence order: input, the media heartbeat, audio
    playback if wanted, and the **G2' 60-minute keeper attempt**.
 
@@ -2288,3 +2301,4 @@ Two oracle corrections, both measured: `mapped_ip` came back **`10.222.254.7:620
   post-DTLS the seat relaxes (§70.4). Neither is a failure; the
   summary counters are the truth.
 ## 45. Slice 5i (B-TRACK): **B4 SHIPS — the probe answers the seat's SCTP INIT.** The role decision comes straight from runB3a's evidence: the seat INITs the association at ready+0 ms, so the probe arms `kn_sctp_open_server` (bind+listen on 5000; poll's accept IS the server-side COMM_UP) instead of racing its own INIT (RFC 4960 collision resolution would have confounded the flight's single variable) — which makes us the DCEP server (RFC 8832 §5.1) with ODD sids, and the establishment transition is watched via `kn_sctp_established()` because the server-mode accept deliberately does not up-call events (kn_sctp.c's own rule; `KN_SCTP_ERR_LOST` from poll covers the down path, logged once with the stats corpse). On up the probe opens **OpenNOW's THREE WebRTC channels** (transport_input.rs `InputChannels::create` — `stats_channel` REXMIT/0 unordered, `input_channel_v1` RELIABLE ordered, `input_channel_partially_reliable` TIMED/300 unordered; priority 0, empty protocol — NOT the native eight-channel Mjolnir profile) on sids 1/3/5; inbound OPENs from the seat are ACKed with their labels logged (which channels the WebRTC seat opens toward us is an open runB3a question — ≤8 events); the rx watch detects the reference's **input handshake** content-first (LE16 526 = `0x0e 0x02` + optional LE16 version, or bare `0x0e`-pair, on any sid — the reference gates input-readiness on exactly this) as `webrtc_input_hs`. Wiring = the native pump pattern verbatim: every pass drains the kn_dtls app ring (`read_app` loop — the ring KEEPS records, so the ready+0 INIT waits for the arm one tick later) → `kn_sctp_inject` → `kn_sctp_poll` (tx flushes through `write_cb` = `kn_dtls_write_app`). Teardown gains `webrtc_sctp_final` + `webrtc_dtls_final` (post-ready `app_records/app_q_dropped/peer_closed` — closing runB3a's blind spot: whether the seat re-INITed or sent more app data was unmeasured) and the borrow order extends: sctp → dtls → cert → sock. Summary grows 11 B4 fields (sctp_armed/up/ms, dc_opened/acked, peer_opened/acked, sctp_msgs_in, hs_seen/ver, first_hs_ms). Events: `webrtc_sctp_arm/_up/_down/_final`, `webrtc_dc_peer_open`, `webrtc_dc_open`, `webrtc_input_hs`, `webrtc_sctp_msg`, `webrtc_dtls_final`. Gates (all THREE real trees staged: vendored aes/sha1 + mbedTLS 3.6.0 + usrsctp c625e219): paranoid ×2 arches clean, NATIVE TESTS PASS, CROSS-CHECK PASS zero warnings both arches **with the kn_sctp real-body leg compiled (no SKIP)**, cmake+ctest **29/29** incl. `test_knsctp` REAL battery **35/0** (AF_CONN loopback association + DCEP round-trip + PR-SCTP) and `test_kndtls` **39/0**, launcher 168/0; no new unit tests by design (integration of a golden-tested module — the DCEP builders are pinned twice already; the seat is the only honest test environment). **runB4a card (RTSP §71.6): T10 rebuild ALL PASS (knsctp REAL 35/0 shape) → draw 1, minimal card; GATE = armed:1 responder → sctp_up ms<3000 → dc_opened:3 + webrtc_dc_open acked:3 → the B3 floor intact → clean exit; SCORING READOUT = hs_seen:1? video PT 96/97 in webrtc_media?** One variable: the datachannel comes up. Patch `0007`, base = the pushed 5h HEAD.
+## 46. Slice 5j (B-TRACK): **runB4a READ — the datachannel gate did not fire, and the fault was OURS: the probe stopped servicing DTLS after ready.** The flight (seat 80.250.98.38, T10 ALL PASS 89/0 with knsctp REAL 35/0) ran 5i exactly as designed up to the wire: `ice_ok` 1596 ms → DTLS ready in **380 ms** with the seat's 44-byte INIT already in the app ring (`app_records:1` at ready) → `webrtc_sctp_arm armed:1 role:"responder"` at 2010 → our **INIT-ACK went out** (`pkts_out:1`, 356 B, DTLS `records_out` 3→4, `send_errors:0`) → then silence: `sctp_up:0`, `dc_opened:0`. The 5i teardown instrumentation localized the fault in one read: `polls:3` (frozen at the handshake) while `records_in` grew 8→13 — **five post-ready DTLS records sat injected-but-undecrypted**, because 5g's `dtls_tick` gated polling on `!dtls_ready` and the inject queue is processed ONLY inside `kn_dtls_poll` (post-ready poll = idempotent READY + `dtls_drain_app` → app ring). The native pump carries the missing rule verbatim (~:6086: *"keep the established DTLS session serviced"*). The five records' identity is unmeasured (head budget was spent on handshake datagrams) but their cadence fits COOKIE-ECHO + T1 retransmits (1+2+4+8+16 s = 31 s inside the 43 s window) — **hypothesis A: the responder design was right and we starved a live association mid-handshake**; hypothesis B (handshake duplicates, vestigial INIT) stays named. **The fix (one variable): poll every pass** (the ready block keeps its one-shot guard; post-ready negatives can only be latched write-path fatals — the fail branch stays honest) **+ post-ready `webrtc_dtls_in` heads to global n≤24** (first byte 0x16 vs 0x17 names the class in runB4b). **The role stays RESPONDER** — the initiator flip (even sids, `kn_sctp_open`, RFC 4960 §5.2.1 collision handling) activates only if runB4b proves B. The floor held perfectly meanwhile: audio `media_ok:2313 / authfail:0` (second clean flight of the km+16/km+46 keys), `other_in:0` (no pre-ready race this time), `linger_ms:45092`, mapped 10.222.254.4 (4th private-netns seat), `stun_in:6` answered 6. Gates: paranoid ×2 clean, NATIVE TESTS PASS, CROSS-CHECK PASS both arches (kn_sctp real-body leg compiled), cmake+ctest **29/29** (knsctp REAL 35/0, kndtls REAL 39/0), launcher 168/0; ledger rule added beside 5e's: **an integration slice inherits the FULL service contract of the modules it wires, not just the half that runs before the first success.** runB4b card + A/B-discriminating branches: RTSP §72.6. Patch `0008`, base `d9696ba` (the pushed 5i).
