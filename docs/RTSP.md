@@ -8064,3 +8064,74 @@ SRTCP is the enabling half: the inbound 601 packets are readable only after deri
 ### 74.7 Shape
 
 5l turns the probe from a listener into a WebRTC peer: it now speaks the receiver-feedback dialect (TWCC every 50 ms, RR at 1 s/5 s with LSR/DLSR, PLI at 1 Hz — all over SRTCP-CM with the 0x04 auth label) that every ground-truth source says the seat needs before it will push video, and it can finally read the seat's own RTCP. Ladder: cm(5a) → answer(5b) → launcher(5c) → ice(5d/5e) → B2c PASS(5f) → dtls-srtp(5g) → B3 PASS(5h) → sctp responder(5i) → starvation fix(5j) → sid parity + handshake(5k, VERIFIED by runB5a) → **RTCP feedback plane (5l, this slice)** → runB5b (the video-PT-96 gate) → B5 depacketize+decode+display+input → session mode → G2' 60-min keeper.
+
+---
+
+## 75. Slice 5m (B-track): runB5b READ — **BRANCH (i) FIRED ON BOTH DRAWS: VIDEO PT 96 FLOWS** (~450 pkt/s ≈ 3.6 Mbps, first packet ~1 s after the feedback plane opened) — the 5l receiver-feedback plane is flight-verified as THE video gate. The scoring readout names the next single fault with wire arithmetic: ONE shared RX replay window for all ssrcs — video's seq space (89→19150) pulled it past audio (→2300) and rtx/fec, killing every laggard stream (~4300 replay rejects hidden in `media_other`; audio survived exactly 91/89 packets) and rejecting all 9 audio SRs (`rtcp_replayed:9` = exactly the 45 s / 5 s cadence), which zeroed the audio RR's LSR/DLSR. 5m = PER-SSRC RX CRYPTO CONTEXTS (RFC 3711 §3.3.2/§3.4; str0m's SrtpCtx-per-stream) + the observability that names any remaining drop.
+
+### 75.1 runB5b READ — two draws, one build, one seat, identical signature
+
+Two draws on one build (compiled `Nov  3 2026 21:01:10`, T10 **ALL PASS 89/0**), flown back-to-back (21:05:28→21:08:34 and 21:08:46→21:11:50 local) against the SAME seat 80.250.97.37:5004 (mapped 10.222.254.3), queue 135→0 on draw 1. Exit code 1 on both — the honest-labels convention (`webrtc_answer_done`, no frames PRODUCED yet — the probe doesn't decode; expected until B5), `crash:False`, cm_cancel 200 both.
+
+**Draw 1, gate by gate:** `ice_ok t_ms:1605` → `dtls_ready ms:310` (pin_matched, srtp_prof 1, 44-B INIT at ready) → `webrtc_rtcp_arm armed:1 t_ms:1916` with the offer scan naming the plane: `video_ssrc_hint:2 pt_audio:111 pt_video:96` → `sctp_up ms:51 t_ms:1981` → `dc_acked:3` → `webrtc_input_hs sid:2 ppi:53 ver:3 t_ms:2756` → **`webrtc_video_first pt:96 ssrc:2 seq:90 t_ms:2963`**. The feedback plane ran exactly as built: `first_rtcp_out_ms:1931` (PLI index 0, then TWCC index 1 @2031, RR index 2 — one shared TX index sequence under our single sender-ssrc, correct per RFC 3711 §3.4 since the crypto context keys on the SENDER), `rtcp_out:869 = twcc_out:816 + rr_out:51 + pli_out:2`, `send_err:0`; `twcc_reports:816` ≈ one per 50 ms over 41 s; the register was flawless: `twcc_rec:19155` == `media_ok:19155` (every decrypted packet was TWCC-tagged), `dup/late/old/evict/trunc` all 0. The PLI watchdog fired twice pre-video and went silent the moment video arrived — its designed job.
+
+**The seat's RTCP, readable for the first time:** `rtcp_in:51` → `ok:42 + replayed:9`, `authfail:0 bad:0`, `first_rtcp_in_ms:2730`, and ALL 42 accepted packets are **SR** (`sr:42, rr:0, fb:0, psfb:0` — the seat sends no receiver feedback to a recvonly client; the 13/s class of runB5a never existed here: with video flowing, SRTCP is ~1.2/s). The evidence heads decode verbatim: `80c8 0006 00000001` = audio SR (ssrc 1) at t_ms 2730 with pkt_cnt 72, then `80c8 0006 00000002` video SRs (ssrc 2) at ~1/s — pkt_cnt deltas ≈ +470/s and octet deltas ≈ +480 KB/s ≈ **3.6 Mbps of live H264**, matching `video_in:19064` over the 42.5 s video window (~448/s).
+
+**The win, and the fault inside it:** `media_in:23456 = media_ok:19155 + media_other:4301`, `authfail:0`, `video_in:19064`, `first_video_ms:2963`. But `media_ok − video_in = 91` — **audio was decrypted for only ~1.8 s**: the 933 ms pre-video solo window (first_media 2030 → video_first 2963 ≈ 48 packets) plus ~43 more while video's seq crawled past audio's within the 64-slot window grace. Everything audio after the crossover died as `KN_RX_DROP_REPLAY_REJECTED` — invisible, because `media_other` was a catch-all and the failure-head budget (`media_in ≤ 8`) had burned out at t≈2 s, three seconds before the massacre began. Same story in SRTCP: the 9 rejected packets are EXACTLY the audio SRs (45 s / 5 s cadence; audio's own index sequence 2..10 against a window video had advanced to ~43), so the audio RR's LSR/DLSR stayed zeroed all flight.
+
+**Draw 2 is a clone** (same seat): `video_first pt:96 ssrc:2 seq:89 t_ms:2958`, `media_ok:19132 − video_in:19043 = 89` audio packets, `rtcp replayed:9`, `media_other:4296`, `out:873 (twcc 821, rr 51, pli 1)`, `send_err:0`, register clean, `hs_seen:1 ver:3`, `dc_acked:3`, full linger 45027 ms. Two independent draws, identical arithmetic ⇒ the diagnosis is not a timing fluke.
+
+**§74.6 verdict: BRANCH (i) — runB5b PASS.** Video PT 96 flows at broadcast bitrate ~1 s after feedback opens. The 5l plane is verified as the video gate; the ladder advances. The next single variable is the fault the win exposed.
+
+### 75.2 The fault: one shared RX replay window for four ssrc streams
+
+RFC 3711 §3.3.2: the replay list and the ROC belong to the CRYPTO CONTEXT, and a context exists per ssrc (§3.4 for the SRTCP index); str0m instantiates one `SrtpCtx` per stream; libwebrtc tracks per-ssrc. Our probe inherited kn_rx's single `kn_rx_srtp_session` (correct for the NATIVE path — one video stream by design) and one global `srtcp_replay` window. The GFN offer names four media ssrcs — 1 audio, 2 video, 3 rtx, 4 fec (the RR table's own comment predicted the set). With one window:
+
+- Video (seq 89→19150 at ~450/s) owns the window's high edge within ~150 ms of starting.
+- Audio (seq →2300 at ~51/s) falls more than 64 behind ⇒ every packet `REPLAY_REJECTED` ⇒ ~2210 rejects.
+- rtx/fec (own seq spaces, own ssrcs) ⇒ ~2090 more rejects — together the `media_other:4301` (minus the 51 demuxed SRTCP).
+- SRTCP: audio SR indices 2..10 vs video-advanced window ⇒ `replayed:9`, audio LSR/DLSR zeroed.
+
+Consequence for the mission: a B5 session with audio dead after 1.8 s and no rtx/fec for loss recovery is not a session. Per-ssrc RX contexts are the prerequisite — one variable, wire-proven by two draws.
+
+### 75.3 What 5m implements (probe layer only — modules untouched)
+
+- **`sess_srtp_slot(as, ssrc, now)`** — find-or-clone the per-ssrc `kn_rx_srtp_session`: struct-copy of the ARMED master (profile 0x0001 key material is session-wide — the KDF output does not depend on the ssrc; the per-packet IV already takes the packet's own ssrc, so clones share keys and differ only in the replay/ROC state) + `kn_srtp_replay_init` for a FRESH window. The ssrc is peeked from plaintext header bytes 8..12 BEFORE unprotect (RTP's first 12 octets are never encrypted). Creation prints `webrtc_ssrc_new {ssrc, slot, t_ms}` — runB5c names every stream, including the still-unidentified ~2090 (rtx/fec expectation, evidence-decided). 8 slots; table full → the master session (the old shared-window behavior, honest degradation, unreachable on four offered ssrcs).
+- **SRTCP per-sender-ssrc windows** — the global `srtcp_replay` is GONE; an 8-slot table keyed by the sender ssrc (plaintext bytes 4..8 of the SRTCP packet) does check/commit per context; creation prints `webrtc_srtcp_ctx {ssrc, ctx, t_ms}`. Arm resets both tables (clones are always taken from the armed master — no pre-arm stragglers by construction).
+- **Counter split:** `KN_RX_DROP_REPLAY_REJECTED` → NEW `media_replay`; `media_other` returns to being the true residual (malformed/no-cipher/unexpected).
+- **Failure evidence, decoupled from `media_in`:** the first 6 failures print `webrtc_media` lines WHENEVER they occur (runB5b's started at t≈3 s, long after the old `media_in ≤ 8` budget burned — 4300 drops had no faces; the 5k observability lesson applied preemptively), and every `webrtc_media` line gains `raw_ssrc` (the peeked header ssrc — on failures the parsed `ssrc` field is zeroed, so the raw peek is the only identity).
+- **`rr_lsr_ok`** — counts RR sends whose LSR/DLSR post-patch actually fired; with audio SRs accepted again, runB5c must show it ≈ video-SR count + audio-SR count (proves the SR cache → RR path for BOTH streams, not just video).
+- **`webrtc_answer_summary` +4 fields:** `media_replay, rtp_ssrcs, srtcp_ctxs, rr_lsr_ok`. The NATIVE `"summary"` printf is untouched — skeleton keyset verified identical to HEAD (115 recursive keys).
+
+### 75.4 Design notes
+
+- Clones share derived key material already resident in the master (the km itself was scrubbed at arm); no new secret surfaces, no per-ssrc KDF needed for this profile.
+- TX SRTCP is UNCHANGED by design: all our reports share one sender-ssrc (`"ONOW"`), so one index sequence (0..872 across draw 1) is exactly right per §3.4 — and the seat demonstrably accepted every packet (video responded within ~1 s both draws).
+- TWCC: with rtx/fec decrypting, their packets join the register when they carry the transport-wide extension (correct — the draft covers ALL packets on the transport); packets without it are skipped as before. `twcc_rec ≈ media_ok` is the runB5c invariant to watch.
+- The RR stats table (4 slots: audio/video/rtx/fec — the offer's exact set) now observes rtx/fec without RR-ing them (`do_rr` keys on the offer's opus/H264 PTs, 5l design, untouched).
+- kn_rx and knsrtp modules are deliberately UNCHANGED: the native path's single-stream assumption is correct there, and the multi-ssrc concern belongs to the WebRTC probe layer (house rule: modules stay pure, probe owns session policy).
+
+### 75.5 Gates — all green in-sandbox
+
+Paranoid knvstd compile zero warnings (native + both mingw arches inside cross-check); NATIVE TESTS PASS (27 suites, test_knsrtp 98/0, test_kntwcc 31/0 — no module change, counts hold); CROSS-CHECK PASS ×2 zero warnings -Wall -Wextra -Werror both arches (49 exes); cmake Release with SHA-verified vendors via T10 ensure_* (mbedTLS 3.6.0, usrsctp c625e2195060 ENABLED, opus 1.5.2 — 7/0) → **ctest 30/30**; launcher **168/0**; summary skeleton **115 == HEAD**. T10 suite list unchanged (knsdp precedent) ⇒ rig expected **ALL PASS 89**; rebuild REQUIRED (knvstd.exe changed).
+
+### 75.6 The runB5c card
+
+**PREFLIGHT:** launcher LOGGED IN; T10 rebuild → ALL PASS 89/0.
+**Card:** draw 1, minimal `--cm-profile=browser --webrtc-answer=45 --session-queue-timeout=1500` — one variable.
+
+**GATE (runB5b's whole set is now the FLOOR — video included):** ice/dtls/sctp floor → `dc_acked:3` → `hs_seen:1` → `rtcp_arm armed:1` → `rtcp_out>0`, `twcc_out>0`, `rr_out>0`, `send_err:0` → `rtcp_ok>0`, `replayed:0` → **`video_in>0` (regression gate now)**. NEW 5m gates: `webrtc_ssrc_new` lines name every stream (expect ssrc 1 + 2 + the rtx/fec set), `srtcp_ctxs ≥ 2`, **`media_replay ≈ 0`**, `media_other ≈ 0`.
+
+**SCORING READOUT (the slice win = the COMPLETE media plane):** `media_ok ≈ media_in − rtcp_in` — every stream decrypts for the FULL session: audio ~2300 alive end-to-end (not 91), video ~19000, rtx/fec ~2100 named by their `webrtc_ssrc_new` lines; `rr_lsr_ok ≈ 51` (video SRs ~42 + audio SRs ~9 — BOTH streams' LSR/DLSR live); `twcc_rec ≈ media_ok`; register clean (`dup/late/evict/trunc ≈ 0`); any residual `media_replay`/`media_other` wears a face (the 6 failure heads carry `raw_ssrc` + `urc` + `detail`).
+
+**Branches:**
+- **(i) all streams healthy** → the media plane is COMPLETE → next slice **B5** = depacketize + decode + display + input frames (ver-3 framing; the biggest slice yet — video PT 96 H264, audio opus, rtx/fec policy).
+- **(ii) `media_replay > 0` persists** → the failure heads name ssrc/urc/detail → localize (window-size edge? ROC estimation corner? a stream with a weird seq start?) — one measured fix.
+- **(iii) `authfail > 0` on rtx/fec** → those ssrcs don't share the session keys after all → localize via heads + detail; the clone model gets a per-ssrc KDF only if measured.
+- **(iv) audio decrypts but the seat STOPS audio** → our RR content (frac/cum math over the resurrected stream) is the suspect → read the RR block values next flight.
+- **(v) video regression (`video_in:0`)** → §74.6's localization branches; no new variable.
+- Note: exit code stays **1** until B5 ships frame production — expected, not a regression.
+
+### 75.7 Shape
+
+runB5b proved the thesis end-to-end: the seat's encoder waits for RECEIVER FEEDBACK — TWCC opened at 1931 ms, video answered at 2963 ms, at 3.6 Mbps, twice, on one build. 5m finishes the media plane's crypto bookkeeping (per-ssrc replay/ROC — the last silent killer between us and a full audio+video+rtx/fec decode surface). Ladder: cm(5a) → answer(5b) → launcher(5c) → ice(5d/5e) → B2c PASS(5f) → dtls-srtp(5g) → B3 PASS(5h) → sctp responder(5i) → starvation fix(5j) → sid parity + handshake(5k) → **RTCP feedback plane(5l, VERIFIED by runB5b: VIDEO FLOWS)** → **per-ssrc RX contexts (5m, this slice)** → runB5c (complete media plane gate) → B5 depacketize+decode+display+input → session mode → G2' 60-min keeper.

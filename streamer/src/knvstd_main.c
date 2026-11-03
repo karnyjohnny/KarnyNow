@@ -7040,6 +7040,17 @@ static size_t sess_json_esc(char *dst, size_t dstsz,
 #define SESS_RTP_DROPOUT   3000u
 #define SESS_RTP_MISORDER  100u
 #define SESS_RTP_SEQ_MOD   65536u
+/* Slice 5m: per-ssrc RX crypto-context slots. RFC 3711 §3.3.2/§3.4:
+ * the replay list and the ROC belong to the crypto context, and a
+ * context exists PER SSRC (str0m: one SrtpCtx per stream). The GFN
+ * offer names four media ssrcs (1 audio, 2 video, 3 rtx, 4 fec); 8
+ * slots leave headroom. runB5b (two draws, identical signature)
+ * measured the shared-window cost: video ssrc 2 (~450 pkt/s) pulled
+ * the single window past every other ssrc's seq space — audio
+ * survived only to the crossover (media_ok − video_in = 91/89) and
+ * ~4300 packets died as replay rejects inside media_other. */
+#define SESS_SRTP_MAX_SSRC  8
+#define SESS_SRTCP_MAX_SSRC 8
 
 typedef struct {
     uint32_t ssrc;
@@ -7250,7 +7261,17 @@ typedef struct {
     uint8_t      srtcp_tx_enc[16], srtcp_tx_auth[20], srtcp_tx_salt[14];
     uint8_t      srtcp_rx_enc[16], srtcp_rx_auth[20], srtcp_rx_salt[14];
     uint32_t     srtcp_tx_index;           /* next index; +1 mod 2^31 */
-    kn_srtp_replay srtcp_replay;           /* inbound SRTCP window */
+    /* Slice 5m: per-sender-ssrc SRTCP receive windows — every ssrc
+     * owns its SRTCP index sequence (RFC 3711 §3.4). runB5b: the
+     * single shared window rejected the audio SRs (5-s cadence,
+     * indices 2..10) once the video SRs (~1/s) had advanced it to
+     * ~43 — rtcp_replayed:9 == exactly 45 s / 5 s, and the audio
+     * RR's LSR/DLSR stayed zeroed. The sender ssrc is bytes 4..8 of
+     * the SRTCP packet (plaintext, like the whole first 8 octets). */
+    kn_srtp_replay srtcp_rpl[SESS_SRTCP_MAX_SSRC];
+    uint32_t     srtcp_rpl_ssrc[SESS_SRTCP_MAX_SSRC];
+    int          srtcp_rpl_used[SESS_SRTCP_MAX_SSRC];
+    unsigned     srtcp_ctxs;               /* srtcp contexts created */
     unsigned long long rtcp_in, rtcp_ok, rtcp_authfail, rtcp_bad,
                        rtcp_replayed;
     unsigned long long sr_in, rr_in, fb_in, psfb_in, other_rtcp_in;
@@ -7271,6 +7292,28 @@ typedef struct {
     unsigned long long first_video_ms;
     unsigned     first_video_pt, first_video_seq;
     uint32_t     first_video_ssrc;
+    /* Slice 5m: per-ssrc SRTP receive sessions — clones of the armed
+     * master (profile 0x0001 key material is session-wide; the IV
+     * already takes each packet's own ssrc), each with a FRESH
+     * replay/ROC window (RFC 3711 §3.3.2). The kn_rx module itself
+     * stays untouched: its single window is correct for the native
+     * single-ssrc stream. */
+    kn_rx_srtp_session srtp_slot[SESS_SRTP_MAX_SSRC];
+    uint32_t     srtp_slot_ssrc[SESS_SRTP_MAX_SSRC];
+    int          srtp_slot_used[SESS_SRTP_MAX_SSRC];
+    unsigned     srtp_slots;               /* rtp ssrc slots created */
+    unsigned long long media_replay;       /* KN_RX_DROP_REPLAY_REJECTED,
+                                             * split out of media_other —
+                                             * runB5b's ~4300 silent audio/
+                                             * rtx/fec rejects */
+    unsigned     media_fail_logged;        /* failure-head budget (6),
+                                             * independent of media_in —
+                                             * runB5b's rejects started at
+                                             * t≈3 s, long after the old
+                                             * media_in<=8 budget burned */
+    unsigned long long rr_lsr_ok;          /* RR sends patched with a
+                                             * non-zero LSR/DLSR (proves the
+                                             * SR cache -> RR path fires) */
 } webrtc_answer_state;
 
 /* Resolve the seat host to a numeric IPv4 for the UDP route: the CM
@@ -7789,7 +7832,15 @@ static void sess_webrtc_dtls_tick(webrtc_answer_state *as)
                         as->srtcp_derived = 1;
                         as->srtcp_tx_index = 0;   /* RFC 3711: zero before
                                                      the first packet */
-                        kn_srtp_replay_init(&as->srtcp_replay);
+                        /* Slice 5m: the per-ssrc context tables start
+                         * empty at arm — clones are taken from the ARMED
+                         * master, so no pre-arm clone can linger. */
+                        memset(as->srtp_slot_used, 0,
+                               sizeof as->srtp_slot_used);
+                        memset(as->srtcp_rpl_used, 0,
+                               sizeof as->srtcp_rpl_used);
+                        as->srtp_slots = 0;
+                        as->srtcp_ctxs = 0;
                         kn_twcc_init(&as->twcc);
                         as->next_twcc_ms = 0;     /* fire on first tick */
                         as->next_pli_ms = 0;
@@ -8129,6 +8180,47 @@ static void sess_webrtc_rtcp_send(webrtc_answer_state *as, uint8_t *pkt,
  * (RFC 3550 §6.4.1). SR senders' NTP timestamps land in the LSR/DLSR
  * cache; the PT classes are counted (runB5a's 601 media_other packets
  * finally get names). Evidence: the first 6 decrypted datagrams. */
+/* Slice 5m: find-or-clone the per-ssrc SRTP receive session. RFC 3711
+ * §3.3.2: the replay list and the ROC estimate belong to the crypto
+ * context, and a context exists per ssrc (str0m: one SrtpCtx per
+ * stream; profile 0x0001 key material is session-wide, so a clone
+ * shares the keys and only gets a FRESH window). runB5b wire evidence
+ * (two draws, identical): video ssrc 2 (seq 89→19150 at ~450/s,
+ * ~3.6 Mbps) pulled the single shared window past audio ssrc 1
+ * (~51/s) and the rtx/fec ssrcs — audio survived only the 933 ms
+ * pre-video window plus the ~64-packet grace (media_ok − video_in =
+ * 91/89) and ~4300 packets died as replay rejects. The ssrc is
+ * peeked from the plaintext header bytes 8..12 BEFORE unprotect.
+ * Table full → the master session (the old shared-window behavior,
+ * honestly degraded); GFN offers four ssrcs, the table holds eight. */
+static kn_rx_srtp_session *sess_srtp_slot(webrtc_answer_state *as,
+                                          uint32_t ssrc, uint64_t now_ms)
+{
+    int i, free_i = -1;
+    for (i = 0; i < SESS_SRTP_MAX_SSRC; ++i) {
+        if (as->srtp_slot_used[i]) {
+            if (as->srtp_slot_ssrc[i] == ssrc)
+                return &as->srtp_slot[i];
+        } else if (free_i < 0) {
+            free_i = i;
+        }
+    }
+    if (free_i < 0)
+        return &as->srtp;
+    as->srtp_slot[free_i] = as->srtp;          /* keys/profile/ready */
+    kn_srtp_replay_init(&as->srtp_slot[free_i].replay);
+    as->srtp_slot_used[free_i] = 1;
+    as->srtp_slot_ssrc[free_i] = ssrc;
+    ++as->srtp_slots;
+    printf("{\"mode\":\"session\",\"event\":\"webrtc_ssrc_new\","
+           "\"ssrc\":%u,\"slot\":%d,\"t_ms\":%llu}\n",
+           ssrc, free_i,
+           as->t0 ? (unsigned long long)(now_ms - (uint64_t)as->t0)
+                  : 0ull);
+    fflush(stdout);
+    return &as->srtp_slot[free_i];
+}
+
 static void sess_webrtc_srtcp_in(webrtc_answer_state *as, uint8_t *pkt,
                                  size_t dl, uint64_t now_ms)
 {
@@ -8147,11 +8239,51 @@ static void sess_webrtc_srtcp_in(webrtc_answer_state *as, uint8_t *pkt,
                                &index, &e, &plain);
     if (rc == 1) { ++as->rtcp_authfail; return; }
     if (rc != 0) { ++as->rtcp_bad; return; }
-    if (kn_srtp_replay_check(&as->srtcp_replay, (uint64_t)index) != 0) {
-        ++as->rtcp_replayed;
-        return;
+    /* Slice 5m: the replay context is keyed by the SENDER ssrc
+     * (bytes 4..8, plaintext) — every ssrc owns its own SRTCP index
+     * sequence (RFC 3711 §3.4). runB5b: the shared window rejected
+     * the audio SRs (indices 2..10 at the 5-s cadence) once the
+     * video SRs (~1/s) had advanced it — rtcp_replayed:9 == exactly
+     * 45 s / 5 s, and the audio RR's LSR/DLSR stayed zeroed. */
+    {
+        uint32_t ssrc = ((uint32_t)pkt[4] << 24) | ((uint32_t)pkt[5] << 16) |
+                        ((uint32_t)pkt[6] << 8) | (uint32_t)pkt[7];
+        kn_srtp_replay *w = NULL;
+        int i, free_i = -1;
+        for (i = 0; i < SESS_SRTCP_MAX_SSRC; ++i) {
+            if (as->srtcp_rpl_used[i]) {
+                if (as->srtcp_rpl_ssrc[i] == ssrc) {
+                    w = &as->srtcp_rpl[i];
+                    break;
+                }
+            } else if (free_i < 0) {
+                free_i = i;
+            }
+        }
+        if (!w && free_i >= 0) {
+            w = &as->srtcp_rpl[free_i];
+            kn_srtp_replay_init(w);
+            as->srtcp_rpl_used[free_i] = 1;
+            as->srtcp_rpl_ssrc[free_i] = ssrc;
+            ++as->srtcp_ctxs;
+            printf("{\"mode\":\"session\",\"event\":\"webrtc_srtcp_ctx\","
+                   "\"ssrc\":%u,\"ctx\":%d,\"t_ms\":%llu}\n",
+                   ssrc, free_i,
+                   as->t0 ? (unsigned long long)(now_ms - (uint64_t)as->t0)
+                          : 0ull);
+            fflush(stdout);
+        }
+        if (w) {
+            if (kn_srtp_replay_check(w, (uint64_t)index) != 0) {
+                ++as->rtcp_replayed;
+                return;
+            }
+            kn_srtp_replay_commit(w, (uint64_t)index);
+        }
+        /* w == NULL (all eight slots busy): accept without a replay
+         * check — honest degradation, unreachable on GFN's four
+         * ssrcs; the srtcp_ctxs count in the summary names it. */
     }
-    kn_srtp_replay_commit(&as->srtcp_replay, (uint64_t)index);
     ++as->rtcp_ok;
     if (!as->first_rtcp_ok_ms)
         as->first_rtcp_ok_ms = as->t0
@@ -8385,6 +8517,10 @@ static void sess_webrtc_rtcp_tick(webrtc_answer_state *as)
                 buf[29] = (uint8_t)(dlsr >> 16);
                 buf[30] = (uint8_t)(dlsr >> 8);
                 buf[31] = (uint8_t)dlsr;
+                ++as->rr_lsr_ok;   /* slice 5m: proves the SR cache ->
+                                    * LSR/DLSR path fires; runB5b's audio
+                                    * RRs were zeroed because the audio
+                                    * SRs were replay-rejected. */
             }
             sess_webrtc_rtcp_send(as, buf, 32, 1);
         }
@@ -8559,7 +8695,14 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
              * (63 red / 96..111 video+audio) never land in that range,
              * so the ambiguity RFC 5761 §4 warns about does not exist
              * in this session. runB5a's 601 media_other packets (~14/s)
-             * were these — opaque until now. */
+             * were these — their composition was NEVER decrypted (a
+             * dark session's SRTCP mix stays unmeasured). Slice 5m
+             * measured the demux live (runB5b ×2, video flowing):
+             * SRTCP is only ~1.2/s there (51 packets: 42 video SRs at
+             * ~1/s + 9 audio SRs at ~1/5 s, zero RR/FB/PSFB from the
+             * seat), and runB5b's media_other ≈ 4300 was the
+             * shared-window replay massacre — split into media_replay
+             * and fixed by the per-ssrc contexts (this slice). */
             sess_webrtc_srtcp_in(as, upkt, dl, now);
         } else if (as->dtls_ready && dl >= 12 &&
                    (upkt[0] & 0xC0) == 0x80) {
@@ -8575,6 +8718,14 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
             int detail = 0, urc;
             char hx[65];
             size_t i, hn;
+            /* Slice 5m: the ssrc sits in the plaintext header (bytes
+             * 8..12) — peek it BEFORE unprotect so every ssrc gets
+             * its own replay/ROC context (RFC 3711 §3.3.2). */
+            uint32_t raw_ssrc = ((uint32_t)upkt[8] << 24) |
+                                ((uint32_t)upkt[9] << 16) |
+                                ((uint32_t)upkt[10] << 8) |
+                                (uint32_t)upkt[11];
+            kn_rx_srtp_session *sl = sess_srtp_slot(as, raw_ssrc, now);
             memset(&rtp, 0, sizeof rtp);
             ++as->media_in;
             if (!as->first_media_ms)
@@ -8585,7 +8736,7 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
                 snprintf(hx + i * 2, 3, "%02x", upkt[i]);
             hx[hn * 2 < sizeof hx ? hn * 2 : sizeof hx - 1] = '\0';
             urc = as->srtp_derived
-                ? kn_rx_srtp_unprotect(&as->srtp, upkt, dl, &idx, &rtp,
+                ? kn_rx_srtp_unprotect(sl, upkt, dl, &idx, &rtp,
                                        &plain, &detail)
                 : KN_RX_DROP_NO_CIPHER;
             if (urc == KN_RX_OK) {
@@ -8624,18 +8775,28 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
                 }
             } else if (urc == KN_RX_DROP_AUTH_FAILED) {
                 ++as->media_authfail;
+            } else if (urc == KN_RX_DROP_REPLAY_REJECTED) {
+                /* Slice 5m: split out of media_other — runB5b's ~4300
+                 * silent audio/rtx/fec rejects hid in the catch-all
+                 * and had no faces (the old failure budget burned
+                 * before video even started). */
+                ++as->media_replay;
             } else {
                 ++as->media_other;
             }
             if (as->media_in <= 3 ||
-                (urc != KN_RX_OK && as->media_in <= 8)) {
+                (urc != KN_RX_OK && as->media_fail_logged < 6)) {
+                /* Slice 5m: failures get their OWN evidence budget,
+                 * independent of media_in — whenever they happen. */
+                if (urc != KN_RX_OK) ++as->media_fail_logged;
                 printf("{\"mode\":\"session\",\"event\":\"webrtc_media\","
                        "\"n\":%llu,\"len\":%llu,\"urc\":%d,\"detail\":%d,"
                        "\"plain\":%llu,\"pt\":%u,\"ssrc\":%u,\"seq\":%u,"
+                       "\"raw_ssrc\":%u,"
                        "\"t_ms\":%llu,\"head\":\"%s\"}\n",
                        as->media_in, (unsigned long long)dl, urc, detail,
                        (unsigned long long)plain, rtp.pt, rtp.ssrc,
-                       rtp.seq,
+                       rtp.seq, raw_ssrc,
                        as->t0 ? (unsigned long long)(now -
                             (uint64_t)as->t0) : 0ull, hx);
                 fflush(stdout);
@@ -9212,6 +9373,7 @@ hb_duty:
                "\"dtls_fail_rc\":%d,\"srtp_prof\":%u,\"srtp_derived\":%d,"
                "\"media_in\":%llu,\"media_ok\":%llu,"
                "\"media_authfail\":%llu,\"media_other\":%llu,"
+               "\"media_replay\":%llu,\"rtp_ssrcs\":%u,"
                "\"first_media_ms\":%llu,\"first_pt\":%u,"
                "\"first_ssrc\":%u,\"first_seq\":%u,"
                "\"sctp_armed\":%d,\"sctp_up\":%d,\"sctp_ms\":%llu,"
@@ -9222,7 +9384,8 @@ hb_duty:
                "\"twcc_out\":%llu,\"rr_out\":%llu,\"pli_out\":%llu,"
                "\"rtcp_send_err\":%llu,\"first_rtcp_in_ms\":%llu,"
                "\"first_rtcp_out_ms\":%llu,\"video_in\":%llu,"
-               "\"first_video_ms\":%llu,\"first_video_pt\":%u}\n",
+               "\"first_video_ms\":%llu,\"first_video_pt\":%u,"
+               "\"srtcp_ctxs\":%u,\"rr_lsr_ok\":%llu}\n",
                as.sent, as.cand_sent, as.cert_src ? as.cert_src : "?",
                as.local_ip, as.local_port,
                as.acks_in, cands, as.stun_in, as.dtls_in, as.other_in,
@@ -9238,7 +9401,8 @@ hb_duty:
                as.dtls_armed, as.dtls_ready, as.dtls_ready_ms,
                as.dtls_fail_rc, as.srtp_profile, as.srtp_derived,
                as.media_in, as.media_ok, as.media_authfail,
-               as.media_other, as.first_media_ms, as.first_pt,
+               as.media_other, as.media_replay, as.srtp_slots,
+               as.first_media_ms, as.first_pt,
                as.first_ssrc, as.first_seq,
                as.sctp_armed, as.sctp_up, as.sctp_up_ms,
                as.dc_opened, as.dc_acked, as.peer_opened,
@@ -9247,7 +9411,8 @@ hb_duty:
                as.srtcp_derived, as.rtcp_ok, as.rtcp_out,
                as.twcc_out, as.rr_out, as.pli_out, as.rtcp_send_err,
                as.first_rtcp_ok_ms, as.first_rtcp_out_ms,
-               as.video_in, as.first_video_ms, as.first_video_pt);
+               as.video_in, as.first_video_ms, as.first_video_pt,
+               as.srtcp_ctxs, as.rr_lsr_ok);
         fflush(stdout);
     }
     fflush(stdout);
