@@ -6765,3 +6765,226 @@ flight's whole evidence set is `logs\runB2a\<draw>\` (`console.log`,
 to `karnyjohnny/karnynow-logs`. `--session-seconds` is just a ceiling —
 the probe ends itself at `stop_reason:"webrtc_answer_done"` after the
 45 s window. The oracle above is unchanged.
+
+## 66. Slice 5d (B-TRACK): runB2a is READ END TO END — the answer contract is VALIDATED IN PRODUCTION (3 acks, the server's trickle candidate 67 ms after our answer, 17 s of healthy heartbeats) and the 17-second kill is explained to the millisecond: the seat is ICE-LITE, we sent ZERO UDP, so no NAT mapping ever existed and `video.timeoutLengthMs:15000` fired — B2.5 ships the outbound half of ICE (`kn_sock_stun_buildn` + `kn_sock_udp_recvfrom` + `kn_sdp_candidate_parse` + the probe's check/answer tick) and the runB2b card: punch the hole, watch the seat answer, and see our own public mapping in XOR-MAPPED-ADDRESS
+
+### 66.1 The runB2a flight, measured (draw 1, 2026-11-03 01:22 UTC, Endfield, `--cm-profile=browser --webrtc-answer=45`)
+
+The first B2 flight with the slice-5c launcher (folder `runB2a`, pushed to
+`karnyjohnny/karnynow-logs` @ `81e3dc2`). Every number below is from
+`console.log` / `wire_r1.txt` (146 records, decoded record-by-record with
+`tools/wiretap/parse_wire_dump.py`), not inference:
+
+- **Queue + seat:** position 14 → 0 in ~75 s; seat
+  `80-250-98-36.cloudmatchbeta.nvidiagrid.net:443`, resourcePath `/nvst/`;
+  our peer id `peer-3246755197`; **CM `clientIp` = `151.248.35.173`** (our
+  public address as CloudMatch sees it — the value B2.5's XOR-MAPPED must
+  reproduce).
+- **Offer:** 3122 B classic SDP, 4 m-lines, server ICE ufrag `9adb3d56`,
+  pwd `7b783141-…-b7610ba7cf13`, `setup:actpass`, `a=ice-lite`,
+  `a=ice-options:trickle`, m-line ports are the **47998 dummy** with
+  `c=IN IP4 0.0.0.0` (same shape as the runB3 fixture). The offer's
+  `nvstSdp` carries the timers that decide the flight:
+  `video.timeoutLengthMs:15000`, `video.pingBackTimeoutMs:10000`,
+  `recoveryModeTriggerThresholdMs:6000`,
+  `rtcTransportShutdownOnPeerDisconnect:1`, `candidateAttemptTimeoutMs:0`,
+  `pingIntervalBefore/AfterConnectionMs:500`, `filterLocalIp:1`,
+  `serverBundlePort:47999`, `clientBundlePort:49006`, `rtcpOnSctp:1`,
+  `nativeRtcOnBundlePort:1`.
+- **Our answer:** 1422 B, oracle-exact against §65.4 (BUNDLE 0 1 2 3,
+  ufrag `m0DD`, H264 96+97 recvonly, opus 111, datachannel sctp-port
+  5000, mic rejected) + 3710 B nvstSdp with the matching identity
+  triplet; envelope `from:2 to:1 ackid:2`; then our host candidate
+  `candidate:1 1 udp 2122260223 192.168.100.11 50400 typ host` (mid "0",
+  ackid 3).
+- **The server's verdict on the contract: ACCEPTED.** `acks_in:3` (every
+  frame acked), and **67 ms after the answer** the server trickled its
+  candidate: `candidate:1467310487 1 udp 1677721855 80.250.98.36 5004
+  typ srflx raddr invalid rport 0` — a seat that rejected our answer or
+  our ICE credentials does not send its media address. This one line is
+  the whole B2 question answered YES.
+- **The silence:** `stun_in:0`, `dtls_in:0`, `other_in:0` — the server
+  sent **no UDP at all**, and we (by B2's design) sent none either.
+  Signaling stayed healthy: server `{"hb":…}` every ~2.05 s, our hb
+  every 5 s (`hb_sent:11`), one server WS PING answered with a PONG,
+  no error frame, no BYE.
+- **The kill:** at **answer + 17.02 s** the WS read returned `rc:-2`
+  (`KN_WS_ERR_IO` — TCP/TLS closed by the server); we sent the masked
+  CLOSE, `DELETE /v2/session` → 200, `stop_reason:"webrtc_answer_done"`.
+  The `exit_code:1` with `E_SESSION_NOT_READY` in app.log is BY DESIGN
+  for probe flights (the session never reaches ready) — not a bug.
+
+### 66.2 Root cause — ice-lite waits for US, and its patience is exactly 15 s
+
+RFC 8445 §8: a **lite** agent never initiates connectivity checks on a
+fresh pair — it only answers, and it only starts consent checks once a
+pair is valid. The seat is ice-lite (offer flag, measured). Two facts
+complete the circuit:
+
+1. Our only advertised candidate was the **LAN** address
+   `192.168.100.11:50400`, and we sent **zero UDP**. Behind a NAT that
+   means no mapping exists on the router — even a server willing to
+   check us would have nowhere to send.
+2. The nvstSdp's `video.timeoutLengthMs:15000` with
+   `rtcTransportShutdownOnPeerDisconnect:1`: media-plane connect timer
+   15 s + ~2 s of teardown/handshake slack = the **17.02 s** EOF, to the
+   decisecond class. The wire transcript shows no error frame before
+   the EOF — the server simply dropped the transport.
+
+Honest correction to §65.6: that card's oracle ("B2 pass =
+`webrtc_stun_in` with our ufrag") assumed a full-ICE peer that checks
+first. runB2a falsified the oracle, **not** the answer — with ice-lite
+the client must punch first, exactly like Chrome/str0m does (OpenNOW's
+agent sends checks immediately after the answer). B2's real pass signal
+was the acks + the 67 ms trickle, and both arrived.
+
+### 66.3 The B2.5 contract (what slice 5d puts on the wire)
+
+**Destination.** The trickle candidate is authoritative (the m-line
+ports are dummies): on the first parseable `udp`/IPv4/component-1
+candidate the probe **reconnects** the bundle socket to it (runB2a:
+`80.250.98.36:5004`). The reconnect matters twice: `send()` follows the
+connected peer, and the connected-socket kernel filter would otherwise
+**drop** the server's replies from :5004 while the socket sat connected
+to the 47998 dummy. Until a candidate arms, checks go to the m-line
+route (armed at answer time as `dest_typ:"mline"`).
+
+**The check** (a full RFC 8445 Binding Request, built by the new
+`kn_sock_stun_buildn`): USERNAME `"<serverUfrag>:<ourUfrag>"` (runB2a:
+`9adb3d56:m0DD`), PRIORITY `2122260223` (`0x7E7F1EFF` — the exact value
+`kn_sdp_candidate_host` advertises, so check and candidate agree),
+USE-CANDIDATE from the first check (the controlling agent nominates
+aggressively; a lite peer never nominates on its own), ICE-CONTROLLING
+with a per-flight random 64-bit tie-breaker, MESSAGE-INTEGRITY keyed
+with the **server's** password (ICE short-term credentials: the key is
+the recipient's), FINGERPRINT with GFN's `0x5354554E` XOR (the constant
+nvst.rs uses and the live rig validated, runs 9–15).
+
+**Pacing.** First check on the first linger tick (~250 ms after the
+answer), then Ta doubling 500 ms → 4 s cap while unanswered; after the
+first authenticated success, a 5 s consent-refresh cadence.
+
+**Answering the seat.** Every Binding REQUEST that arrives gets a real
+Binding SUCCESS: echoed transaction id, XOR-MAPPED-ADDRESS built from
+the source address we **actually saw** (`kn_sock_udp_recvfrom` — behind
+the NAT that is the mapped source, not the candidate line), MI keyed
+with the server password. The request's own MI is verified with our
+password first and the server's second (probe tolerance: `mi_key` in the
+event says which fit — a mismatch is diagnostic gold, and we answer
+either way).
+
+**Validating the response.** SUCCESS responses must pass
+`kn_sock_stun_inspect` (cookie, exact length, GFN FINGERPRINT) **and**
+`check_integrity` with the server password; then `ice_ok` flips, and the
+response's XOR-MAPPED-ADDRESS is our public mapping (`mapped_ip` must
+equal the CM `clientIp`, `151.248.35.173` for this NAT). Anything that
+looks like STUN but fails validation is counted (`stun_bad`) and its
+head hex-dumped — an RFC-constant FINGERPRINT from the seat would show
+up there, decodable offline.
+
+**Deliberately NOT in 5d** (one variable per flight): no prflx/srflx
+candidate trickled back to the server (ice-lite learns our public
+mapping from the checks themselves — that is the point of the
+XOR-MAPPED exchange), no `clientBundlePort:49006` bind (the seat acked
+our ephemeral 50400 candidate fine — the port number was never the
+problem), no DTLS (slice B3, and the seat only starts it after ICE).
+
+### 66.4 The code (one patch, base `01f8f79` on `poprawki-agenta`)
+
+- `kn_sock.h/.c`: **`kn_sock_stun_buildn`** — the general N-attribute
+  builder (attribute array `{type,val,len}`, same MI/FP mechanics;
+  `build`/`build2` are now thin delegators, every existing golden still
+  byte-exact). New attribute enums `PRIORITY 0x0024`,
+  `ICE_CONTROLLING 0x8029`. **`kn_sock_udp_recvfrom`** — recv + the
+  datagram's source ip/port (nullable outputs, zeroed on timeout;
+  `kn_sock_udp_recv` is the NULL-source wrapper).
+- `kn_sdp.h/.c`: **`kn_sdp_candidate_parse`** — foundation / component
+  (1..256, Chrome's tcp candidates ride 9) / transport / priority / ip
+  (+`ip_be`, 0 for IPv6) / port / typ / tolerated raddr-rport (the
+  seat's literal `raddr invalid rport 0` parses; `rport` non-numeric →
+  0). Accepts the bare and `a=`-prefixed forms.
+- `knvstd_main.c`: `webrtc_answer_state` grows the ICE fields (dest,
+  credential copies, tie-breaker, counters, mapped address, pacing);
+  `sess_webrtc_answer_send` copies both credential pairs, arms the
+  m-line destination and draws the tie-breaker; the trickle-candidate
+  branch parses + reconnects + emits **`webrtc_stun_arm`**; the new
+  **`sess_webrtc_stun_tick`** runs at `hb_duty` after the drain;
+  the drain upgrades to recvfrom, gains the SUCCESS-response branch
+  (**`webrtc_stun_resp`**, one-shot **`webrtc_stun_ice_ok`**) and
+  answers requests (**`webrtc_stun_in`** gains `mi`/`mi_key`/
+  `answered`/`src`/`reply_bytes`/`head`); `webrtc_answer_summary`
+  gains `dest`/`dest_typ`/`stun_out`/`stun_resp_in`/`stun_answered`/
+  `stun_bad`/`first_resp_ms`/`ice_ok`/`mapped_ip`/`mapped_port`.
+  B1/B2 behavior when the flag is absent: unchanged.
+
+### 66.5 Test canon for 5d
+
+`test_knsock` **124/0** (+22): the `buildn` golden is a full 96-byte ICE
+check (USERNAME+PRIORITY+USE-CANDIDATE+ICE-CONTROLLING+MI+FP) generated
+by the independent Python reference **after** it reproduced the three
+existing goldens byte-exact; `build2 == buildn` parity; the five
+argument rejections; the 52-byte zero-attribute degenerate; and the
+recvfrom battery (loopback source ip/port exact, timeout zeroing, the
+wrapper, a connected socket reporting its pinned peer). `test_knsdp`
+**100/0** (+16): the two REAL runB2a candidate lines verbatim, the
+`candidate_host` round-trip, `a=` form with numeric raddr/rport, the
+tcp/component-9 shape with ignored extensions, IPv6 (`ip_be == 0`), and
+nine rejections. Native battery **NATIVE TESTS PASS** (26 gates, zero
+FAIL); `cross_check.sh` **CROSS-CHECK PASS** — run IN THE SANDBOX this
+time (mingw-w64 12.2.0 installed), zero warnings under `-Werror` on
+both arches; the paranoid knvstd leg clean; launcher battery 168/0
+(no launcher change). `check_summary_skeleton.py` stays operator-side
+(the skeleton-113 contract is untouched — 5d adds event lines and
+probe-summary fields only).
+
+### 66.6 runB2b flight card (probe, NOT a keeper attempt)
+
+Params (the launcher's params box already opens with them):
+`--cm-profile=browser --webrtc-answer=45 --session-queue-timeout=1500`.
+Log folder `runB2b`, draw 1 first; push `logs\runB2b\1\` to
+`karnyjohnny/karnynow-logs`. Rig rebuild REQUIRED (T10 first: expect
+ALL PASS with the grown knsock/knsdp counts).
+
+**PASS oracle (all of):**
+1. `webrtc_stun_arm` with `dest:"80.250.98.<x>:5004"`-shape address,
+   `typ:"srflx"`, within ~0.5 s of `webrtc_answer_sent` (the candidate
+   trickles ~67 ms after the answer).
+2. `webrtc_stun_out` n ≥ 1, `bytes` ≈ 90–110, first within ~0.5 s of
+   the arm.
+3. `webrtc_stun_resp` with `inspect:1`, `mi:1`, and `first_resp_ms`
+   **< 2000** (a real RTT to the seat is tens of ms).
+4. `webrtc_stun_ice_ok`, and summary `mapped_ip` == the CM `clientIp`
+   of THIS flight (public address — the NAT round-trip proof),
+   `ice_ok:1`, `stun_bad:0`.
+5. **The WS survives past 17 s**: no `ws_recv rc:-2` before ~45 s,
+   `linger_ms` ≈ 45000, server hbs keep arriving at ~2 s cadence past
+   the old kill point.
+6. Bonus (not required for pass): `stun_in`/`stun_answered` > 0 — the
+   seat's own consent checks at us, with `mi_key:"ours"` proving the
+   credential direction.
+
+**FAIL branches (read the events in this order):**
+- `stun_out` > 0 but `stun_resp_in:0` at 45 s → our UDP is not
+  reaching the seat (router/CGNAT) or the seat ignores checks. The
+  wire dump shows our datagrams leaving; next single variable: bind
+  the bundle socket to `clientBundlePort:49006` (the 5b-deferred card
+  comes back), then an explicit srflx candidate trickled from the
+  mapped address.
+- `stun_resp` with `mi:0` → the credential direction is not the
+  recipient's-password rule; `mi_key` on any `stun_in` says which key
+  the seat itself uses — mirror it (one-line change).
+- `stun_resp` with `inspect:0` (or STUN-looking heads inside
+  `webrtc_udp_in`) → the seat signs FINGERPRINT with the RFC constant;
+  the dumped head hex proves it; add the dual-constant tolerance.
+- `ice_ok:1` but the WS still dies at ~17 s → the seat's timer waits
+  for DTLS/connected, not ICE: go straight to B3 (DTLS-SRTP, server
+  actpass + our setup:active ⇒ WE send the ClientHello), or it wants
+  an explicit srflx candidate — decide from whether `stun_in` (its
+  own checks at us) appeared after ice_ok.
+- `dtls_in` > 0 at any point → the seat trusts the exchange and wants
+  DTLS: heads hex-dumped, B3 fast-tracked.
+
+**B2.5 pass = `webrtc_stun_ice_ok` + a public `mapped_ip` + a WS alive
+at 45 s.** That is a hole punched through the NAT with the seat's own
+blessing — everything B3 (DTLS-SRTP + media) needs on the other end of
+a live, mutually-validated socket pair.

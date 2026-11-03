@@ -394,6 +394,97 @@ static void test_candidate_and_errors(void)
     }
 }
 
+/* Slice 5d: the ICE candidate parser — the runB2a trickle line (the
+ * seat's literal "raddr invalid rport 0" tolerance), Chrome shapes,
+ * tcp/IPv6 edges and the reject battery. */
+static void test_candidate_parse(void)
+{
+    kn_sdp_candidate c;
+    char buf[128];
+
+    /* the REAL runB2a server candidate (karnynow-logs runB2a/1,
+     * +67 ms after our answer) — the authoritative media destination */
+    CHECK(kn_sdp_candidate_parse(
+              "candidate:1467310487 1 udp 1677721855 80.250.98.36 5004 "
+              "typ srflx raddr invalid rport 0", &c) == KN_SDP_OK,
+          "runB2a srflx candidate parses");
+    CHECK(strcmp(c.foundation, "1467310487") == 0 && c.component == 1 &&
+          strcmp(c.transport, "udp") == 0 && c.priority == 1677721855ull &&
+          strcmp(c.ip, "80.250.98.36") == 0 &&
+          c.ip_be == ((80u << 24) | (250u << 16) | (98u << 8) | 36u) &&
+          c.port == 5004u && strcmp(c.typ, "srflx") == 0,
+          "runB2a candidate fields exact (ip_be network-order)");
+    CHECK(strcmp(c.raddr, "invalid") == 0 && c.rport == 0,
+          "the seat's literal \"raddr invalid rport 0\" is tolerated");
+
+    /* our own candidate_host output round-trips */
+    CHECK(kn_sdp_candidate_host("192.168.100.11", 50400, buf, sizeof buf)
+              == KN_SDP_OK &&
+          kn_sdp_candidate_parse(buf, &c) == KN_SDP_OK &&
+          c.component == 1 && strcmp(c.transport, "udp") == 0 &&
+          c.priority == 2122260223ull && c.port == 50400u &&
+          strcmp(c.typ, "host") == 0 && c.raddr[0] == '\0',
+          "candidate_host output round-trips through the parser");
+
+    /* the SDP-attribute form + a real raddr/rport pair */
+    CHECK(kn_sdp_candidate_parse(
+              "a=candidate:2 1 udp 100 1.2.3.4 5000 typ srflx "
+              "raddr 192.168.1.5 rport 5000", &c) == KN_SDP_OK &&
+          strcmp(c.foundation, "2") == 0 &&
+          strcmp(c.raddr, "192.168.1.5") == 0 && c.rport == 5000u,
+          "a= prefix and a numeric raddr/rport");
+
+    /* Chrome's tcp shape (component 9) + ignored extensions */
+    CHECK(kn_sdp_candidate_parse(
+              "candidate:1 9 tcp 1518214911 192.168.1.5 9 typ host "
+              "tcptype active generation 0 network-id 1", &c) == KN_SDP_OK &&
+          c.component == 9 && strcmp(c.transport, "tcp") == 0 &&
+          c.priority == 1518214911ull && strcmp(c.typ, "host") == 0 &&
+          c.raddr[0] == '\0',
+          "tcp candidate (component 9) + unknown extensions ignored");
+
+    /* IPv6 parses but stays ip_be == 0 (kn_sock is IPv4-only) */
+    CHECK(kn_sdp_candidate_parse(
+              "candidate:1 1 udp 2122260223 2001:db8::1 5004 typ host",
+              &c) == KN_SDP_OK &&
+          strcmp(c.ip, "2001:db8::1") == 0 && c.ip_be == 0u &&
+          c.port == 5004u,
+          "IPv6 host: fields parse, ip_be stays 0");
+
+    /* the reject battery */
+    CHECK(kn_sdp_candidate_parse(NULL, &c) == KN_SDP_ERR_ARGS &&
+          kn_sdp_candidate_parse("candidate:1 1 udp 1 1.2.3.4 5 typ host",
+                                 NULL) == KN_SDP_ERR_ARGS,
+          "ERR_ARGS on NULL");
+    CHECK(kn_sdp_candidate_parse("1 1 udp 100 1.2.3.4 5000 typ host", &c)
+              == KN_SDP_ERR_PARSE,
+          "missing candidate: prefix");
+    CHECK(kn_sdp_candidate_parse("candidate:", &c) == KN_SDP_ERR_PARSE,
+          "empty candidate");
+    CHECK(kn_sdp_candidate_parse("candidate:1 1 udp", &c) == KN_SDP_ERR_PARSE,
+          "too few tokens");
+    CHECK(kn_sdp_candidate_parse(
+              "candidate:1 1 udp 100 1.2.3.4 5000 host", &c)
+              == KN_SDP_ERR_PARSE,
+          "missing the typ keyword");
+    CHECK(kn_sdp_candidate_parse(
+              "candidate:1 1 udp -5 1.2.3.4 5000 typ host", &c)
+              == KN_SDP_ERR_PARSE,
+          "negative priority rejected");
+    CHECK(kn_sdp_candidate_parse(
+              "candidate:1 1 udp 100 1.2.3.4 0 typ host", &c)
+              == KN_SDP_ERR_PARSE,
+          "port 0 rejected");
+    CHECK(kn_sdp_candidate_parse(
+              "candidate:1 1 udp 100 1.2.3.4 70000 typ host", &c)
+              == KN_SDP_ERR_PARSE,
+          "port 70000 rejected");
+    CHECK(kn_sdp_candidate_parse(
+              "candidate:1 0 udp 100 1.2.3.4 5000 typ host", &c)
+              == KN_SDP_ERR_PARSE,
+          "component 0 rejected");
+}
+
 int main(void)
 {
     test_parse_runb3();
@@ -401,5 +492,6 @@ int main(void)
     test_answer_rules();
     test_nvst();
     test_candidate_and_errors();
+    test_candidate_parse();
     return kn_test_summary("test_knsdp");
 }

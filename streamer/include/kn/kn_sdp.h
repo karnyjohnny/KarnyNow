@@ -32,6 +32,7 @@
 #define KN_SDP_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -138,6 +139,32 @@ int kn_sdp_nvst_build(const kn_sdp_answer_cfg *cfg,
  * the F37 ANNOUNCE flew (kn_rtsp.c) and Chrome's host priority. */
 int kn_sdp_candidate_host(const char *ip, unsigned port,
                           char *out, size_t outsz);
+
+/* Slice 5d (B2.5): parse an ICE candidate line — the server's trickle
+ * candidate is the AUTHORITATIVE media destination for the outbound
+ * connectivity checks (the runB2a capture: the offer's m-line ports are
+ * placeholders and the real address arrives 67 ms after our answer as
+ * "candidate:1467310487 1 udp 1677721855 80.250.98.36 5004 typ srflx
+ * raddr invalid rport 0"). Tolerant of the trailing extension tokens
+ * (raddr/rport/tcptype/generation/ufrag — and of the seat's literal
+ * "raddr invalid rport 0"), strict on the seven mandatory fields.
+ * Accepts the bare "candidate:..." form and the SDP "a=candidate:..."
+ * form. IPv6 hosts parse into ip[] but leave ip_be == 0 (kn_sock is
+ * IPv4-only, stage 2). */
+typedef struct kn_sdp_candidate {
+    char     foundation[32];
+    unsigned component;             /* 1-based; RFC 8445 §5.1 */
+    char     transport[8];          /* "udp" | "tcp" */
+    unsigned long long priority;
+    char     ip[64];                /* verbatim token (v4 or v6) */
+    uint32_t ip_be;                 /* network-order IPv4; 0 = not v4 */
+    unsigned port;
+    char     typ[16];               /* host | srflx | prflx | relay */
+    char     raddr[64];             /* "" when absent/garbage-tolerated */
+    unsigned rport;
+} kn_sdp_candidate;
+
+int kn_sdp_candidate_parse(const char *line, kn_sdp_candidate *out);
 
 #ifdef __cplusplus
 }

@@ -7046,6 +7046,30 @@ typedef struct {
     unsigned long long stun_in, dtls_in, other_in, acks_in;
     unsigned long long first_stun_ms;   /* 0 = none seen */
     uint64_t     t0;              /* answer-sent timestamp */
+    /* Slice 5d (B2.5) — the ICE hole punch. runB2a's verdict: the
+     * answer contract is right (acks + a 67 ms trickle candidate + 17 s
+     * of healthy hb) but the seat is ice-lite and NEVER checks a peer
+     * that sent zero UDP — its video.timeoutLengthMs:15000 fired and
+     * the WS closed at answer+17.02 s. The fix is the outbound half of
+     * ICE: authenticated connectivity checks to the trickle candidate
+     * (the offer's m-line ports are placeholders — runB2a connected to
+     * the 47998 fallback), plus answering the server's own checks.
+     * dest_* is the authoritative destination; the socket is RECONNECTED
+     * when the candidate arms it (the connected-peer kernel filter
+     * would otherwise drop the server's replies from :5004). */
+    uint32_t     dest_ip;         /* network order; 0 = unarmed */
+    uint16_t     dest_port;
+    char         dest_typ[16];    /* "mline" | "host" | "srflx" | ... */
+    char         our_ufrag[24], our_pwd[32];      /* our ICE creds */
+    char         srv_ufrag[64], srv_pwd[128];     /* the offer's */
+    uint8_t      tiebreak[8];     /* ICE-CONTROLLING role tie-breaker */
+    unsigned long long stun_out, stun_resp_in, stun_answered, stun_bad;
+    unsigned long long first_resp_ms;   /* 0 = none (rel. to t0) */
+    uint32_t     mapped_ip;       /* the server's view of us (XOR-MAPPED) */
+    uint16_t     mapped_port;
+    int          ice_ok;          /* >= 1 authenticated success resp */
+    uint64_t     next_stun_ms;    /* 0 = nothing scheduled */
+    unsigned     stun_gap_ms;     /* 500 → x2 → 4000 cap (RFC 8445 Ta) */
 } webrtc_answer_state;
 
 /* Resolve the seat host to a numeric IPv4 for the UDP route: the CM
@@ -7160,6 +7184,21 @@ static int sess_webrtc_answer_send(kn_ws_client *wsc,
                  la[0], la[1], la[2], la[3]);
         as->local_port = kn_sock_udp_port(&as->sock);
     }
+    /* Slice 5d: the ICE material — credential copies (the tick/drain
+     * stay self-contained), the default destination (the m-line route;
+     * the offer's ports are placeholders, so the trickle candidate will
+     * upgrade this), and the ICE-CONTROLLING tie-breaker (RFC 8445:
+     * random 64 bits, constant for the session). */
+    snprintf(as->our_ufrag, sizeof as->our_ufrag, "%s", ufrag);
+    snprintf(as->our_pwd, sizeof as->our_pwd, "%s", pwd);
+    snprintf(as->srv_ufrag, sizeof as->srv_ufrag, "%s", off.ice_ufrag);
+    snprintf(as->srv_pwd, sizeof as->srv_pwd, "%s", off.ice_pwd);
+    as->dest_ip = mip;
+    as->dest_port = mport;
+    snprintf(as->dest_typ, sizeof as->dest_typ, "mline");
+    if (kn_ws_rand(as->tiebreak, sizeof as->tiebreak) != 0)
+        memset(as->tiebreak, 0x5D, sizeof as->tiebreak);
+    as->stun_gap_ms = 500u;
     memset(&cfg, 0, sizeof cfg);
     cfg.local_ip = "0.0.0.0";       /* the answer's c= line: the browser
                                        sends 0.0.0.0 with trickle ICE;
@@ -7240,6 +7279,7 @@ static int sess_webrtc_answer_send(kn_ws_client *wsc,
     }
     as->sent = 1;
     as->t0 = kn_sock_now_ms();
+    as->next_stun_ms = as->t0;   /* slice 5d: punch from the first tick */
     printf("{\"mode\":\"session\",\"event\":\"webrtc_answer_sent\","
            "\"answer_bytes\":%llu,\"nvst_bytes\":%llu,\"cert\":\"%s\","
            "\"ufrag_len\":%d,\"pwd_len\":%d,\"fp_len\":%d,"
@@ -7287,13 +7327,108 @@ static int sess_webrtc_answer_send(kn_ws_client *wsc,
     return 0;
 }
 
+/* Dotted-quad text for a network-order u32 (slice 5d event fields). */
+static void sess_dot4(uint32_t ip_be, char out[16])
+{
+    const uint8_t *b = (const uint8_t *)&ip_be;
+    snprintf(out, 16, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+}
+
+/* Slice 5d: one ICE connectivity-check duty cycle. Pacing: the first
+ * check leaves on the first tick after the answer, then Ta doubles
+ * 500 ms -> 4 s while unanswered (RFC 8445's 500 ms floor for one
+ * flow); after the first authenticated success the cadence becomes a
+ * 5 s consent-freshness refresh. The check is a full RFC 8445 Binding
+ * Request: USERNAME "serverUfrag:ourUfrag", PRIORITY (the same
+ * 2122260223 our host candidate advertised), USE-CANDIDATE (the
+ * controlling agent nominates from the first check — the ice-lite seat
+ * never nominates on its own), ICE-CONTROLLING tie-breaker,
+ * MESSAGE-INTEGRITY keyed with the SERVER's password, GFN FINGERPRINT.
+ * Destination: the trickle candidate when armed (the socket was
+ * reconnected to it), else the m-line route. */
+static void sess_webrtc_stun_tick(webrtc_answer_state *as)
+{
+    uint8_t pkt[256], tid[12], prib[4];
+    size_t plen = 0, ulen;
+    char user[96], dip[16];
+    uint64_t now;
+    kn_sock_stun_attr at[4];
+    if (!as->active || !as->sock_open) return;
+    if (!as->dest_ip || !as->dest_port) return;
+    if (!as->srv_pwd[0] || !as->our_ufrag[0]) return;  /* no creds: no
+                                                          checks (the
+                                                          offer parse
+                                                          guarantees
+                                                          both) */
+    now = kn_sock_now_ms();
+    if (as->next_stun_ms && now < as->next_stun_ms) return;
+    ulen = (size_t)snprintf(user, sizeof user, "%s:%s",
+                            as->srv_ufrag, as->our_ufrag);
+    if (ulen >= sizeof user) return;        /* credentials do not fit */
+    /* 2122260223 = 0x7E7F1EFF — the exact priority bytes
+     * kn_sdp_candidate_host advertises, so the check and the candidate
+     * agree (the value Chrome's own host candidates carry). */
+    prib[0] = 0x7E; prib[1] = 0x7F; prib[2] = 0x1E; prib[3] = 0xFF;
+    if (kn_ws_rand(tid, sizeof tid) != 0) {
+        unsigned i;
+        for (i = 0; i < 12; ++i)
+            tid[i] = (uint8_t)((as->stun_out + i * 7u + 1u) & 0xFFu);
+    }
+    at[0].type = KN_SOCK_STUN_ATTR_USERNAME;
+    at[0].val = (const uint8_t *)user; at[0].len = ulen;
+    at[1].type = KN_SOCK_STUN_ATTR_PRIORITY;
+    at[1].val = prib; at[1].len = 4u;
+    at[2].type = KN_SOCK_STUN_ATTR_USE_CANDIDATE;
+    at[2].val = NULL; at[2].len = 0u;
+    at[3].type = KN_SOCK_STUN_ATTR_ICE_CONTROLLING;
+    at[3].val = as->tiebreak; at[3].len = 8u;
+    if (kn_sock_stun_buildn(pkt, sizeof pkt, &plen,
+                            KN_SOCK_STUN_BINDING_REQUEST, tid,
+                            (const uint8_t *)as->srv_pwd,
+                            strlen(as->srv_pwd), at, 4u) != KN_SOCK_OK) {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_stun_out\","
+               "\"error\":\"build\"}\n");
+        fflush(stdout);
+        as->next_stun_ms = now + as->stun_gap_ms;
+        return;
+    }
+    sess_dot4(as->dest_ip, dip);
+    if (kn_sock_udp_sendto(&as->sock, as->dest_ip, as->dest_port,
+                           pkt, plen) == KN_SOCK_OK) {
+        ++as->stun_out;
+        as->next_stun_ms = now + (as->ice_ok ? 5000u : as->stun_gap_ms);
+        if (!as->ice_ok && as->stun_gap_ms < 4000u) {
+            as->stun_gap_ms *= 2u;
+            if (as->stun_gap_ms > 4000u) as->stun_gap_ms = 4000u;
+        }
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_stun_out\","
+               "\"n\":%llu,\"bytes\":%llu,\"dest\":\"%s:%u\",\"typ\":\"%s\","
+               "\"ice_ok\":%d,\"t_ms\":%llu,\"gap_ms\":%u}\n",
+               as->stun_out, (unsigned long long)plen, dip,
+               (unsigned)as->dest_port, as->dest_typ, as->ice_ok,
+               as->t0 ? (unsigned long long)(now - as->t0) : 0ull,
+               as->stun_gap_ms);
+        fflush(stdout);
+    } else {
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_stun_out\","
+               "\"error\":\"sendto\",\"dest\":\"%s:%u\"}\n", dip,
+               (unsigned)as->dest_port);
+        fflush(stdout);
+        as->next_stun_ms = now + as->stun_gap_ms;
+    }
+}
+
 /* One UDP datagram classification step for the B2 linger loop: STUN
- * binding requests (the server's ICE checks at us), DTLS records (would
- * mean the server already trusts the exchange), anything else. The
- * first few of each class are hex-dumped; the STUN USERNAME attribute
- * is extracted because its "serverUfrag:ourUfrag" shape is the direct
- * proof the server ACCEPTED our ICE credentials. Nothing is answered
- * (B2 is observation; B3 brings the ICE/DTLS machinery). */
+ * binding requests (the server's ICE checks at us), STUN responses to
+ * our own checks, DTLS records (would mean the server already trusts
+ * the exchange), anything else. Slice 5d upgrades B2's pure
+ * observation: server REQUESTS get a real authenticated Binding
+ * SUCCESS back (XOR-MAPPED = the source we actually saw, so the seat
+ * learns our public mapping), and SUCCESS RESPONSES are validated
+ * (FINGERPRINT + MI keyed with the server password) and flip ice_ok /
+ * the mapped address. The USERNAME attribute is still extracted: its
+ * "ourUfrag:serverUfrag" shape is the direct proof the server ACCEPTED
+ * our ICE credentials. */
 static void sess_webrtc_answer_drain(webrtc_answer_state *as)
 {
     static uint8_t upkt[2048];
@@ -7302,20 +7437,112 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
     for (k = 0; k < 16; ++k) {
         size_t dl = 0;
         int tr = 0;
+        uint32_t src_ip = 0;
+        uint16_t src_port = 0;
         uint64_t now;
-        if (kn_sock_udp_recv(&as->sock, upkt, sizeof upkt, 0, &dl, &tr)
-                != 1 || dl == 0)
+        if (kn_sock_udp_recvfrom(&as->sock, upkt, sizeof upkt, 0, &dl,
+                                 &tr, &src_ip, &src_port) != 1 || dl == 0)
             break;
         now = kn_sock_now_ms();
-        if (dl >= 20 && upkt[0] == 0x00 && upkt[1] == 0x01) {
+        if (dl >= 20 && upkt[0] == 0x01 && upkt[1] == 0x01 &&
+            upkt[4] == 0x21 && upkt[5] == 0x12 && upkt[6] == 0xA4 &&
+            upkt[7] == 0x42) {
+            /* Binding SUCCESS RESPONSE to one of our checks (5d) */
+            uint16_t mt = 0, xport = 0;
+            uint8_t tid[12];
+            char user[64], mip[16], sip[16];
+            size_t ulen = 0;
+            uint32_t xip = 0;
+            int insp, mi_ok;
+            ++as->stun_resp_in;
+            if (!as->first_resp_ms)
+                as->first_resp_ms =
+                    (unsigned long long)(now - (uint64_t)as->t0);
+            insp = kn_sock_stun_inspect(upkt, dl, &mt, tid, user,
+                                        sizeof user, &ulen, &xip, &xport);
+            mi_ok = (as->srv_pwd[0] &&
+                     kn_sock_stun_check_integrity(
+                         upkt, dl, (const uint8_t *)as->srv_pwd,
+                         strlen(as->srv_pwd)) == 1) ? 1 : 0;
+            if (insp && mi_ok) {
+                if (!as->ice_ok) {
+                    as->ice_ok = 1;
+                    printf("{\"mode\":\"session\",\"event\":"
+                           "\"webrtc_stun_ice_ok\",\"t_ms\":%llu}\n",
+                           as->first_resp_ms);
+                    fflush(stdout);
+                }
+                if (xip) { as->mapped_ip = xip; as->mapped_port = xport; }
+            } else {
+                ++as->stun_bad;
+            }
+            if (as->stun_resp_in <= 3) {
+                sess_dot4(xip, mip);
+                sess_dot4(src_ip, sip);
+                printf("{\"mode\":\"session\",\"event\":\"webrtc_stun_resp\","
+                       "\"n\":%llu,\"len\":%llu,\"inspect\":%d,\"mi\":%d,"
+                       "\"mapped\":\"%s:%u\",\"src\":\"%s:%u\","
+                       "\"first_ms\":%llu}\n",
+                       as->stun_resp_in, (unsigned long long)dl, insp,
+                       mi_ok, xip ? mip : "-", xport, sip,
+                       (unsigned)src_port, as->first_resp_ms);
+                fflush(stdout);
+            }
+        } else if (dl >= 20 && upkt[0] == 0x00 && upkt[1] == 0x01) {
             /* STUN Binding request */
+            uint8_t tid[12], rp[128], xam[8];
+            size_t rlen = 0;
+            uint32_t xip;
+            uint16_t xport;
+            char mi_key[8];
+            int mi_ok;
             ++as->stun_in;
             if (!as->first_stun_ms)
                 as->first_stun_ms =
                     (unsigned long long)(now - (uint64_t)as->t0);
-            if (as->stun_in <= 3) {
-                size_t off = 20;
-                char user[256] = "";
+            memcpy(tid, upkt + 8, 12);
+            /* the request is keyed with OUR password (ICE short-term
+             * credentials: key = the recipient's). Probe tolerance: the
+             * server's password is tried too and the event says which
+             * fit — a mismatch is diagnostic gold, not a dead end, and
+             * we answer either way (our reply is keyed with the
+             * server's password, which is what the seat validates). */
+            mi_ok = 0;
+            snprintf(mi_key, sizeof mi_key, "none");
+            if (as->our_pwd[0] &&
+                kn_sock_stun_check_integrity(
+                    upkt, dl, (const uint8_t *)as->our_pwd,
+                    strlen(as->our_pwd)) == 1) {
+                mi_ok = 1;
+                snprintf(mi_key, sizeof mi_key, "ours");
+            } else if (as->srv_pwd[0] &&
+                       kn_sock_stun_check_integrity(
+                           upkt, dl, (const uint8_t *)as->srv_pwd,
+                           strlen(as->srv_pwd)) == 1) {
+                mi_ok = 1;
+                snprintf(mi_key, sizeof mi_key, "server");
+            }
+            if (!mi_ok) ++as->stun_bad;
+            xip = src_ip;
+            xport = src_port;
+            if (!xip) { xip = as->dest_ip; xport = as->dest_port; }
+            if (xip && xport &&
+                kn_sock_stun_xor_addr_v4(xip, xport, xam) == KN_SOCK_OK &&
+                kn_sock_stun_build2(rp, sizeof rp, &rlen,
+                                    KN_SOCK_STUN_BINDING_SUCCESS, tid,
+                                    (const uint8_t *)as->srv_pwd,
+                                    strlen(as->srv_pwd),
+                                    KN_SOCK_STUN_ATTR_XOR_MAPPED_ADDRESS,
+                                    xam, 8u, 0, NULL, 0) == KN_SOCK_OK &&
+                kn_sock_udp_sendto(&as->sock, xip, xport, rp, rlen)
+                    == KN_SOCK_OK) {
+                ++as->stun_answered;
+            } else {
+                rlen = 0;
+            }
+            if (as->stun_in <= 3 || (rlen == 0 && as->stun_in <= 8)) {
+                size_t off = 20, i, hn;
+                char user[256] = "", hx[81], sip[16];
                 while (off + 4 <= dl) {
                     unsigned t = ((unsigned)upkt[off] << 8) | upkt[off + 1];
                     unsigned l = ((unsigned)upkt[off + 2] << 8) |
@@ -7327,11 +7554,20 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
                     }
                     off += 4u + l + ((4u - (l & 3u)) & 3u);
                 }
+                hn = dl < 40 ? dl : 40;
+                for (i = 0; i < hn; ++i)
+                    snprintf(hx + i * 2, 3, "%02x", upkt[i]);
+                hx[hn * 2 < sizeof hx ? hn * 2 : sizeof hx - 1] = '\0';
+                sess_dot4(src_ip, sip);
                 printf("{\"mode\":\"session\",\"event\":\"webrtc_stun_in\","
                        "\"n\":%llu,\"len\":%llu,\"username\":\"%.120s\","
-                       "\"first_ms\":%llu}\n", as->stun_in,
-                       (unsigned long long)dl, user,
-                       as->first_stun_ms);
+                       "\"first_ms\":%llu,\"mi\":%d,\"mi_key\":\"%s\","
+                       "\"answered\":%llu,\"src\":\"%s:%u\","
+                       "\"reply_bytes\":%llu,\"head\":\"%s\"}\n",
+                       as->stun_in, (unsigned long long)dl, user,
+                       as->first_stun_ms, mi_ok, mi_key, as->stun_answered,
+                       sip, (unsigned)src_port,
+                       (unsigned long long)rlen, hx);
                 fflush(stdout);
             }
         } else if (dl >= 13 && upkt[0] >= 0x14 && upkt[0] <= 0x17 &&
@@ -7666,6 +7902,59 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
                                    "\"webrtc_candidate\",\"n\":%llu,"
                                    "\"candidate\":\"%s\"}\n", cands, ce);
                             fflush(stdout);
+                            /* Slice 5d: the first parseable UDP/IPv4
+                             * component-1 candidate ARMS the STUN
+                             * destination — and reconnects the socket
+                             * to it (the runB2a seat sends a single
+                             * srflx candidate 67 ms after the answer;
+                             * the offer's m-line port is a placeholder
+                             * and the connected-socket kernel filter
+                             * would drop replies from the candidate's
+                             * port). Later candidates may re-arm until
+                             * ice_ok flips. */
+                            if (as.active && as.sock_open && !as.ice_ok) {
+                                kn_sdp_candidate sc;
+                                if (kn_sdp_candidate_parse(cv, &sc)
+                                        == KN_SDP_OK &&
+                                    sc.component == 1 && sc.ip_be &&
+                                    sc.port > 0 && sc.port <= 65535u &&
+                                    strcmp(sc.transport, "udp") == 0) {
+                                    if (kn_sock_udp_connect(&as.sock,
+                                            sc.ip_be, (uint16_t)sc.port)
+                                            == KN_SOCK_OK) {
+                                        char dip[16];
+                                        as.dest_ip = sc.ip_be;
+                                        as.dest_port = (uint16_t)sc.port;
+                                        snprintf(as.dest_typ,
+                                                 sizeof as.dest_typ,
+                                                 "%.15s", sc.typ);
+                                        as.next_stun_ms =
+                                            kn_sock_now_ms();
+                                        sess_dot4(as.dest_ip, dip);
+                                        printf("{\"mode\":\"session\","
+                                               "\"event\":"
+                                               "\"webrtc_stun_arm\","
+                                               "\"dest\":\"%s:%u\","
+                                               "\"typ\":\"%s\","
+                                               "\"priority\":%llu,"
+                                               "\"foundation\":\"%.31s\"}"
+                                               "\n", dip,
+                                               (unsigned)as.dest_port,
+                                               as.dest_typ,
+                                               sc.priority,
+                                               sc.foundation);
+                                        fflush(stdout);
+                                    } else {
+                                        printf("{\"mode\":\"session\","
+                                               "\"event\":"
+                                               "\"webrtc_stun_arm\","
+                                               "\"error\":\"connect\","
+                                               "\"port\":%u}\n",
+                                               sc.port);
+                                        fflush(stdout);
+                                    }
+                                }
+                            }
                         }
                         continue;
                     }
@@ -7683,6 +7972,7 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
         }
 hb_duty:
         sess_webrtc_answer_drain(&as);      /* slice 5b: the UDP watch */
+        sess_webrtc_stun_tick(&as);         /* slice 5d: the ICE punch */
         if (kn_sock_now_ms() - hb_at >= 5000u) {
             if (kn_ws_send_text(&wsc, "{\"hb\":1}", 8) == KN_WS_OK)
                 ++hb_sent;
@@ -7707,23 +7997,39 @@ hb_duty:
            (unsigned long long)(kn_sock_now_ms() - t0),
            g_knv_stop ? 1 : 0);
     if (answer_s > 0) {
-        /* the B2 verdict line: did the server take the answer? The
-         * pass shape (RTSP §65.6): answer_sent=1, acks_in >= 1,
-         * server_cands > 0 within ~2 s, stun_in > 0 (ICE checks at us,
-         * USERNAME "serverUfrag:ourUfrag"), no error/bye frames. */
+        /* The verdict line. Slice 5b pass shape (RTSP §65.6):
+         * answer_sent=1, acks_in >= 1, server_cands > 0 within ~2 s, no
+         * error/bye frames. Slice 5d adds the ICE half (RTSP §66):
+         * stun_out > 0, first_resp_ms < ~2000, ice_ok=1, mapped_ip =
+         * the CM clientIp (a public address — proof the seat sees us
+         * through the NAT), stun_answered > 0 when the seat checks us
+         * back, and the WS ALIVE past the old 17 s timeout kill. */
+        char dip[16] = "-", mip[16] = "-";
+        if (as.dest_ip) sess_dot4(as.dest_ip, dip);
+        if (as.mapped_ip) sess_dot4(as.mapped_ip, mip);
         printf("{\"mode\":\"session\",\"event\":\"webrtc_answer_summary\","
                "\"answer_sent\":%d,\"cand_sent\":%d,\"cert\":\"%s\","
                "\"local_ip\":\"%s\",\"local_port\":%u,"
                "\"acks_in\":%llu,\"server_cands\":%llu,"
                "\"stun_in\":%llu,\"dtls_in\":%llu,\"other_in\":%llu,"
-               "\"first_stun_ms\":%llu,\"linger_ms\":%llu,\"stop\":%d}\n",
+               "\"first_stun_ms\":%llu,\"linger_ms\":%llu,\"stop\":%d,"
+               "\"dest\":\"%s:%u\",\"dest_typ\":\"%s\","
+               "\"stun_out\":%llu,\"stun_resp_in\":%llu,"
+               "\"stun_answered\":%llu,\"stun_bad\":%llu,"
+               "\"first_resp_ms\":%llu,\"ice_ok\":%d,"
+               "\"mapped_ip\":\"%s\",\"mapped_port\":%u}\n",
                as.sent, as.cand_sent, as.cert_src ? as.cert_src : "?",
                as.local_ip, as.local_port,
                as.acks_in, cands, as.stun_in, as.dtls_in, as.other_in,
                as.first_stun_ms,
                (unsigned long long)(as.t0 ? kn_sock_now_ms() -
                                      (uint64_t)as.t0 : 0ull),
-               g_knv_stop ? 1 : 0);
+               g_knv_stop ? 1 : 0,
+               dip, (unsigned)as.dest_port,
+               as.dest_typ[0] ? as.dest_typ : "-",
+               as.stun_out, as.stun_resp_in, as.stun_answered,
+               as.stun_bad, as.first_resp_ms, as.ice_ok,
+               mip, (unsigned)as.mapped_port);
         fflush(stdout);
     }
     fflush(stdout);

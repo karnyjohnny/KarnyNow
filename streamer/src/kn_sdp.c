@@ -558,3 +558,125 @@ int kn_sdp_candidate_host(const char *ip, unsigned port,
     if (n < 0 || (size_t)n >= outsz) return KN_SDP_ERR_BIG;
     return KN_SDP_OK;
 }
+
+/* ------------------------------------------------- candidate parse (5d) */
+
+/* Dotted-quad to a network-order u32 without pulling in kn_sock (this
+ * module stays dependency-free): 1 on success. */
+static int sdp_ipv4_be(const char *s, uint32_t *out)
+{
+    uint32_t v = 0;
+    int i, oct = 0, dig = 0;
+    if (!s || !out) return 0;
+    for (i = 0; i < 4; ++i) {
+        oct = 0; dig = 0;
+        while (*s >= '0' && *s <= '9' && dig < 3) {
+            oct = oct * 10 + (*s - '0');
+            ++s; ++dig;
+        }
+        if (!dig || oct > 255) return 0;
+        v = (v << 8) | (uint32_t)oct;
+        if (i < 3) {
+            if (*s != '.') return 0;
+            ++s;
+        }
+    }
+    if (*s) return 0;                      /* trailing garbage */
+    *out = v;
+    return 1;
+}
+
+/* strtoull with an exact-shape check: the token must be all digits and
+ * non-empty (no sign, no whitespace, no locale surprises). */
+static int sdp_num(const char *tok, unsigned long long *out)
+{
+    unsigned long long v = 0;
+    const char *p = tok;
+    if (!p || !*p) return 0;
+    for (; *p; ++p) {
+        if (*p < '0' || *p > '9') return 0;
+        v = v * 10ull + (unsigned long long)(*p - '0');
+    }
+    *out = v;
+    return 1;
+}
+
+int kn_sdp_candidate_parse(const char *line, kn_sdp_candidate *out)
+{
+    char buf[512];
+    char *tok, *save = NULL;
+    unsigned long long v;
+    size_t n;
+    if (!line || !out) return KN_SDP_ERR_ARGS;
+    memset(out, 0, sizeof *out);
+    {   /* skip leading blanks + an optional "a=" SDP prefix */
+        const char *p = line;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+        if (p[0] == 'a' && p[1] == '=') p += 2;
+        if (strncmp(p, "candidate:", 10) != 0) return KN_SDP_ERR_PARSE;
+        p += 10;
+        n = strlen(p);
+        if (n == 0 || n >= sizeof buf) return KN_SDP_ERR_PARSE;
+        memcpy(buf, p, n + 1);
+        /* the foundation rides on the same token as the prefix */
+        tok = buf;
+        while (*tok && *tok != ' ' && *tok != '\t' && *tok != '\r' &&
+               *tok != '\n')
+            ++tok;
+        if (*tok) { *tok++ = '\0'; save = tok; }
+        else save = NULL;
+        if (!buf[0]) return KN_SDP_ERR_PARSE;
+        n = strlen(buf);
+        if (n >= sizeof out->foundation) return KN_SDP_ERR_PARSE;
+        memcpy(out->foundation, buf, n + 1);   /* RFC 8445: <= 32 chars */
+    }
+    {   /* whitespace-split the remainder; strtok-style, in place */
+        char *rest = save;
+        char *t[16];
+        int nt = 0, i;
+        const char *ws = " \t\r\n";
+        while (rest && nt < 16) {
+            while (*rest && strchr(ws, *rest)) ++rest;
+            if (!*rest) break;
+            t[nt++] = rest;
+            while (*rest && !strchr(ws, *rest)) ++rest;
+            if (*rest) *rest++ = '\0';
+        }
+        /* mandatory: component transport priority ip port typ type */
+        if (nt < 7) return KN_SDP_ERR_PARSE;
+        if (!sdp_num(t[0], &v) || v == 0 || v > 256ull)
+            return KN_SDP_ERR_PARSE;   /* RFC 8445: 1..256 (Chrome's
+                                        * tcp candidates ride 9) */
+        out->component = (unsigned)v;
+        if (strlen(t[1]) >= sizeof out->transport) return KN_SDP_ERR_PARSE;
+        memcpy(out->transport, t[1], strlen(t[1]) + 1);
+        if (!sdp_num(t[2], &v)) return KN_SDP_ERR_PARSE;
+        out->priority = v;
+        snprintf(out->ip, sizeof out->ip, "%.63s", t[3]);
+        if (!sdp_num(t[4], &v) || v == 0 || v > 65535ull)
+            return KN_SDP_ERR_PARSE;
+        out->port = (unsigned)v;
+        if (strcmp(t[5], "typ") != 0) return KN_SDP_ERR_PARSE;
+        if (strlen(t[6]) >= sizeof out->typ || !t[6][0])
+            return KN_SDP_ERR_PARSE;
+        memcpy(out->typ, t[6], strlen(t[6]) + 1);
+        (void)sdp_ipv4_be(out->ip, &out->ip_be);   /* 0 on non-v4: ok */
+        /* tolerated extensions: raddr/rport keep their verbatim token
+         * (the runB2a seat literally sends "raddr invalid rport 0");
+         * everything else (tcptype/generation/network-id/ufrag...) is
+         * ignored. */
+        for (i = 7; i + 1 < nt; ++i) {
+            if (strcmp(t[i], "raddr") == 0) {
+                snprintf(out->raddr, sizeof out->raddr, "%.63s",
+                         t[i + 1]);
+                ++i;
+            } else if (strcmp(t[i], "rport") == 0) {
+                unsigned long long rp = 0;
+                if (sdp_num(t[i + 1], &rp) && rp <= 65535ull)
+                    out->rport = (unsigned)rp;
+                ++i;
+            }
+        }
+    }
+    return KN_SDP_OK;
+}
