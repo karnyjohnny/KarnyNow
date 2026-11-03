@@ -10,6 +10,7 @@ echo SSLKEYLOGFILE=%KEYS%
 set CHROME=
 if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set CHROME=%ProgramFiles%\Google\Chrome\Application\chrome.exe
 if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" set CHROME=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe
+if exist "C:\Programy\Chrome\App\Chrome-bin\chrome.exe" set CHROME=C:\Programy\Chrome\App\Chrome-bin\chrome.exe
 if "%CHROME%"=="" (
     echo ERROR: chrome.exe not found — use capture_ref_edge.bat instead.
     exit /b 1
