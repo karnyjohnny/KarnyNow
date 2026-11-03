@@ -7105,11 +7105,12 @@ typedef struct {
      * no video flows until we answer — so the probe RESPONDS
      * (kn_sctp_open_server = bind+listen on 5000; poll's accept IS
      * the server-side COMM_UP) instead of racing its own INIT. On
-     * up we open the WebRTC profile — OpenNOW transport_input.rs's
+     * up we open the WebRTC profile — OpenNOW webrtc/input.rs's
      * THREE channels (not the native eight): stats_channel,
-     * input_channel_v1, input_channel_partially_reliable — with ODD
-     * sids (RFC 8832 §5.1: the association responder is the DCEP
-     * server). Inbound OPENs get ACKed and their labels logged (what
+     * input_channel_v1, input_channel_partially_reliable — with EVEN
+     * sids 0/2/4 (slice 5k; runB4b draw 4 falsified the RFC 8832
+     * parity assumption — see the profile table's comment). Inbound
+     * OPENs get ACKed and their labels logged (what
      * the seat opens is an open runB3a question); the reference's
      * input-readiness gate is the server's [0x0e,…] handshake on
      * input_channel_v1 — detected and versioned here. One variable:
@@ -7119,8 +7120,15 @@ typedef struct {
      * seat side went silent — but five post-ready DTLS records
      * arrived (T1 cadence class) and 5g's tick had stopped polling
      * at ready, so they were never decrypted (the starvation fix is
-     * slice 5j; the role-flip question — initiator, even sids — is
-     * PARKED until runB4b says what those records were). */
+     * slice 5j). runB4b draw 4 CLOSED both open questions: with 5j
+     * the association came up (sctp_up ms:514, established:1,
+     * polls:180 — the post-ready records were the seat's
+     * CCS+Finished+SCTP traffic, hypothesis A; the role-flip branch
+     * is dead) and the seat's channel set + JSON control messages
+     * (videoStreamProgressEvent/gameSessionHdrMode/customMessage on
+     * control_channel) were measured — OpenNOW's WebRTC path ignores
+     * all of them, so the remaining video gate is our channel
+     * visibility (the sid collision, fixed in 5k). */
     kn_sctp     *sctp;
     int          sctp_armed;        /* kn_sctp_open_server succeeded */
     int          sctp_noarm_logged;
@@ -7636,20 +7644,33 @@ static void sess_webrtc_dtls_tick(webrtc_answer_state *as)
 }
 
 /* Slice 5i (B4): the WebRTC datachannel profile — OpenNOW
- * transport_input.rs InputChannels::create()'s THREE channels in the
+ * webrtc/input.rs InputChannels::create()'s THREE channels in the
  * reference's creation order (stats, reliable input, partial input),
  * NOT the native eight-channel NVST profile (that one belongs to the
- * Mjolnir/RTSP path). Sid parity per RFC 8832 §5.1: runB3a measured
- * the seat INITiating the association, so we are the DCEP server and
- * use ODD stream ids. Reliability mapping is str0m's (same rule the
- * native profile in kn_sctp.c documents): ordered+reliable →
- * RELIABLE, MaxPacketLifetime{300} → TIMED/300 unordered,
- * MaxRetransmits{0} → REXMIT/0 unordered; priority 0 + empty protocol
- * string, exactly as kn_sctp_open_channels emits. */
+ * Mjolnir/RTSP path). Slice 5k: EVEN sids 0/2/4 — runB4b draw 4
+ * falsified the RFC 8832 §5.1 parity assumption 5i shipped (odd
+ * 1/3/5 because the seat INITs): the seat opened ITS channels on
+ * ODD sids (control_channel=1, remote_trace_channel=3) and silently
+ * ignored our colliding OPENs on 1/3 — only sid 5 was acked
+ * (dc_acked:1), so the seat never saw an input_channel_v1 and never
+ * sent the input handshake (hs_seen:0). GFN's parity follows the
+ * DTLS role, not the SCTP INIT role: the ground-truth browser dump
+ * (webrtc_internals, real streaming session) shows the client's
+ * channels on EVEN sids — input_channel_v1=0,
+ * input_channel_partially_reliable=2, cursor_channel=4,
+ * stats_channel=6 — while the seat keeps the odd ones; OpenNOW's
+ * str0m auto-assigns evens in creation order (stats=0, v1=2,
+ * partial=4) and streams fine, which also proves the seat maps
+ * channels by LABEL, not by a fixed sid↔label binding (cursor_channel
+ * is absent from OpenNOW and not needed). Reliability mapping is
+ * str0m's (same rule the native profile in kn_sctp.c documents):
+ * ordered+reliable → RELIABLE, MaxPacketLifetime{300} → TIMED/300
+ * unordered, MaxRetransmits{0} → REXMIT/0 unordered; priority 0 +
+ * empty protocol string, exactly as kn_sctp_open_channels emits. */
 static const kn_sctp_channel_def sess_webrtc_channels[3] = {
-    { 1, 1, KN_SCTP_DCEP_REXMIT,   0, "stats_channel" },
-    { 3, 0, KN_SCTP_DCEP_RELIABLE, 0, "input_channel_v1" },
-    { 5, 1, KN_SCTP_DCEP_TIMED,  300,
+    { 0, 1, KN_SCTP_DCEP_REXMIT,   0, "stats_channel" },
+    { 2, 0, KN_SCTP_DCEP_RELIABLE, 0, "input_channel_v1" },
+    { 4, 1, KN_SCTP_DCEP_TIMED,  300,
       "input_channel_partially_reliable" },
 };
 
@@ -7713,6 +7734,20 @@ static void sess_webrtc_sctp_msg(void *ctx, uint16_t sid, uint16_t ssn,
         }
         if (data[0] == KN_SCTP_DCEP_MSG_ACK) {
             ++as->dc_acked;
+            if (as->dc_acked <= 3) {
+                /* 5k: per-ack sid evidence — RFC 8832 §5.2 sends the
+                 * ACK on the OPEN's stream, so the callback's sid
+                 * names WHICH of our channels the seat accepted.
+                 * runB4b draw 4's dc_acked:1 was aggregate-only (the
+                 * sid-5-only reading came from the collision
+                 * arithmetic, not from a log line). */
+                printf("{\"mode\":\"session\",\"event\":\"webrtc_dc_ack\","
+                       "\"sid\":%u,\"n\":%u,\"t_ms\":%llu}\n",
+                       (unsigned)sid, as->dc_acked,
+                       as->t0 ? (unsigned long long)(kn_sock_now_ms() -
+                            (uint64_t)as->t0) : 0ull);
+                fflush(stdout);
+            }
             if (as->dc_acked == as->dc_opened && as->dc_opened > 0) {
                 printf("{\"mode\":\"session\",\"event\":\"webrtc_dc_open\","
                        "\"opened\":%u,\"acked\":%u,\"peer_opened\":%u,"

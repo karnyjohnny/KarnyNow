@@ -705,6 +705,56 @@ static void test_cm_network(void)
                     1000, fake_now, NULL, g_rxb, sizeof g_rxb, g_body,
                     sizeof g_body, &status, &s);
     CHECK(rc == KN_HTTP_OK && status == 503, "503 passes through as status");
+
+    /* Slice 5k (runB4b draws 1-3): a non-200 WITH a JSON body must
+     * still surface the cloud-side reason. The stale-token flights got
+     * HTTP 500 whose body carried requestStatus.statusDescription
+     * "INTERNAL_ERROR_STATUS 8A910003" + unifiedErrorCode + a real
+     * sessionId skeleton, yet the caller printed desc:""
+     * cloud_status:0 because cm_round returned before extraction.
+     * Fixture = the draw-1 attempt-1 body verbatim (trimmed to the
+     * fields the mirror reads). The empty-body 503 above stays
+     * extraction-free (jsonbuf[0] guard). */
+    {
+        static const char k_500[] =
+            "{\"session\":{\"sessionControlInfo\":{\"protocol\":0,"
+            "\"appLevelProtocol\":5,\"ip\":null,\"resourcePath\":"
+            "\"/v2/session/58149d2c-708d-456f-bb2d-a7a2a36bfa3d\","
+            "\"usage\":10,\"port\":443},\"connectionInfo\":null,"
+            "\"errorCode\":1,\"sessionId\":"
+            "\"58149d2c-708d-456f-bb2d-a7a2a36bfa3d\",\"seatSetupInfo\":"
+            "{\"queuePosition\":0,\"seatSetupStep\":0,\"seatSetupEta\":0},"
+            "\"status\":0},\"requestStatus\":{\"countryCode\":null,"
+            "\"unifiedErrorCode\":-1970208765,\"requestId\":"
+            "\"7ee65789-dd82-4f23-b838-993310b85e8c\",\"serverId\":"
+            "\"NP-WAW-01\",\"statusDescription\":"
+            "\"INTERNAL_ERROR_STATUS 8A910003\",\"statusCode\":4},"
+            "\"otherUserSessions\":[]}";
+        char framed[HIO_CAP / 2];
+        hio_reset(&h);
+        memset(&s, 0, sizeof s);
+        snprintf(framed, sizeof framed,
+                 "HTTP/1.1 500 Internal Server Error\r\n"
+                 "Content-Type: application/json\r\nContent-Length: %lu"
+                 "\r\n\r\n%s", (unsigned long)strlen(k_500), k_500);
+        hio_queue(&h, framed);
+        status = 0;
+        rc = kn_cm_create(hio_io(&h), KN_CM_DEFAULT_BASE_HOST, "/", &st,
+                          1000, fake_now, NULL, g_rxb, sizeof g_rxb,
+                          g_body, sizeof g_body, &status, &s);
+        CHECK(rc == KN_HTTP_OK && status == 500,
+              "5k: the 500 still passes through as http_status");
+        CHECK(s.req_status_code == 4, "5k: requestStatus.statusCode mirrored");
+        CHECK(s.unified_error == -1970208765LL,
+              "5k: unifiedErrorCode mirrored (negative, signed)");
+        CHECK(strcmp(s.req_status_desc, "INTERNAL_ERROR_STATUS 8A910003") == 0,
+              "5k: statusDescription surfaces for the caller's desc field");
+        CHECK(s.error_code == 1 && s.status == 0 && !s.ready && !s.resumable,
+              "5k: session skeleton fields mirrored, nothing claims ready");
+        CHECK(strcmp(s.session_id,
+                     "58149d2c-708d-456f-bb2d-a7a2a36bfa3d") == 0,
+              "5k: the allocated sessionId survives for evidence");
+    }
 }
 
 /* ------------------------------------------- learned control-host gate */

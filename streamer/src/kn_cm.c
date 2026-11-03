@@ -803,7 +803,23 @@ static int cm_round(kn_http_io io, const char *method, const char *host,
     memset(auth, 0, sizeof auth);
     if (rc != KN_HTTP_OK) return rc;
     if (http_status) *http_status = resp.status;
-    if (resp.status != 200) return KN_HTTP_OK;    /* caller inspects */
+    if (resp.status != 200) {
+        /* Slice 5k (runB4b draws 1-3): a non-200 body still carries the
+         * cloud-side reason — the stale-token 500s embedded
+         * requestStatus.statusDescription "INTERNAL_ERROR_STATUS
+         * 8A910003" + statusCode 4 + unifiedErrorCode 0x8A910003 +
+         * serverId, yet cm_round returned before extraction and the
+         * caller's error line printed desc:"" cloud_status:0 (the
+         * diagnosis needed wire-dump forensics instead of one console
+         * read). kn_cm_extract_session fills requestStatus/status/
+         * errorCode BEFORE its hard sessionId gate, so a rejected
+         * payload still carries diagnostics; its -1 (no sessionId in a
+         * skeleton body) is expected here and deliberately ignored.
+         * Error path only — the 200 flow below is untouched. */
+        if (out && jsonbuf && jsonbuf[0] && !resp.truncated)
+            (void)kn_cm_extract_session(jsonbuf, out);
+        return KN_HTTP_OK;    /* caller inspects */
+    }
     if (!out) return KN_HTTP_OK;   /* DELETE: the body is not inspected */
     if (resp.truncated) return KN_HTTP_ERR_BIG;
     return kn_cm_extract_session(jsonbuf, out) == 0 ? KN_HTTP_OK

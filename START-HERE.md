@@ -858,8 +858,8 @@ tiny-AES-c, crypto-algorithms-sha1, usrsctp, mbedTLS 3.6.0 (+framework).
 ## 4. What to do next (in order)
 
 > **FROZEN — NATIVE ERA.** The plan below was the native track's.
-> The B-track's "what to do next" is **§44.2** (currently: the B4
-> SCTP datachannel slice).
+> The B-track's "what to do next" is **§44.2** (currently: fly +
+> read **runB4c** after the 5k even-sid fix — card: RTSP §73.6).
 
 > The operator asked for **very simple, step-by-step** instructions —
 > this section is written to be followed literally, one step at a time.
@@ -2128,7 +2128,7 @@ Two oracle corrections, both measured: `mapped_ip` came back **`10.222.254.7:620
 ## 43. Slice 5g (B-TRACK): **B3 SHIPS — the probe now speaks DTLS-SRTP.** The answer's real `kn_cert` is KEPT as the handshake identity (the R3-B "announcing one and handshaking another would be a lie" rule), the offer's sha-256 fingerprint becomes the pin (bounded memcpy — the paranoid leg's `-Wformat-truncation=2` rejected the naive copy, and an oversize pin degrades to the honest `no_remote_fp` refusal instead of a truncated lie), and a NEW `sess_webrtc_dtls_tick` runs on EVERY hb_duty pass (separate from the paced STUN tick because mbedTLS's retransmit timers live inside `kn_dtls_poll`): arm on the first REAL inbound STUN (the nvst :8196 rule — runB2c delivered 261), one poll per pass, and on `KN_DTLS_READY` the EXTRACTOR-dtls_srtp export (server-write halves km+16/km+46 — the native-proven set) derives a `kn_rx_srtp_session` for profile 0x0001 / tag 10, keys scrubbed from the stack. The drain injects every classified DTLS record (0x14..0x17+0xFE — stricter than the module's own peek window, RTP-proof) and grew the media branch: post-ready 0x80-shaped datagrams get their head hex captured PRE-decryption (the wire bytes are the evidence), then in-place `kn_rx_srtp_unprotect` — `media_ok` (first pt/ssrc/seq latched), `media_authfail`, or `media_other`+detail; pre-ready RTP falls to `other_in` honestly. Summary grows 14 B3 fields; events: `webrtc_dtls_arm/ready/fail`, `webrtc_srtp_arm`, `webrtc_media`. Gates: NATIVE TESTS PASS, CROSS-CHECK PASS both arches zero warnings (paranoid included), **cmake with the REAL mbedTLS backend → ctest 29/29, test_kndtls real battery 39/0, test_kncert 10/0**, launcher 168/0; no new unit tests by design — pure integration of three rig-proven APIs, and the seat is the only honest test environment. **runB3a card (RTSP §69.4): T10 rebuild ALL PASS → draw 1, `--cm-profile=browser --webrtc-answer=45 --session-queue-timeout=1500`; PASS = arm armed:1 → ready pin_matched:1 verify:0 srtp_prof:1 → srtp derived:1 → ≥1 `webrtc_media` urc:0 with an offer PT and media_authfail:0 — all inside the still-full 45 s WS window (runB2c's floor intact).** One variable: the handshake up + the first authenticated media bytes. Depacketization (kn_rx_video) is B3.5, SCTP+input is B4.
 ## 44. Slice 5h (B-TRACK HANDOFF — READ THIS FIRST): **runB3a is a CLEAN PASS — DTLS up in 481 ms, SRTP keys proven live (2306 authenticated packets, ZERO auth failures), audio flowing, and the seat asked for the SCTP datachannel at ready+0 ms while video stayed dark. B4 = answer the INIT.** This section is the authoritative you-are-here for any agent continuing the B-track; §3/§4 above are frozen native-era record.
 
-### 44.1 You are here (2026-11-03, slice 5h)
+### 44.1 You are here (2026-11-03, slice 5k)
 
 - **The project pivoted at slice 5a** (§37, RTSP §64): the native NVST
   track's bisect closed inconclusive-because-universal (every build
@@ -2146,17 +2146,28 @@ Two oracle corrections, both measured: `mapped_ip` came back **`10.222.254.7:620
   5g B3 code (DTLS-SRTP wired into the probe) → 5h runB3a PASS +
   this handoff audit → 5i B4 code: the SCTP datachannel responder
   (§45, RTSP §71) → runB4a read: gate did not fire — OUR post-ready
-  DTLS starvation (RTSP §72) → **5j the servicing fix (SHIPPED —
-  §46)** → **NEXT: fly + read runB4b** (card: RTSP §72.6 — it
-  discriminates COOKIE-ECHO-starved (A) from vestigial-INIT (B); on
-  B the role flip to initiator is the next variable) → then B5 from
-  the readout (video depacketization if PT 96 flows; the
-  peer-channel/heartbeat dialect if not), input → the goal: **G2' —
-  a 60-minute keeper on the browser path.**
+  DTLS starvation (RTSP §72) → 5j the servicing fix (§46) →
+  runB4b READ (§47, RTSP §73): draws 1-3 died at the CM door on a
+  STALE TOKEN (HTTP 500 `INTERNAL_ERROR_STATUS 8A910003`; the
+  operator's 30-min web-client control between draws ruled out
+  ban/account/network; a fresh token fixed it); draw 4 VERIFIED 5j
+  (`polls:180`, post-ready heads = CCS+Finished+app data ⇒
+  hypothesis A, **`sctp_up ms:514`, established:1**, floor intact,
+  role-flip branch DEAD) and exposed the next fault: the seat owns
+  ODD sids (control_channel=1, remote_trace_channel=3) — our
+  RFC-8832 odd 1/3/5 collided (`dc_acked:1`, `hs_seen:0`, video
+  dark) → **5k the even-sid fix 0/2/4 + per-ack evidence + CM
+  non-200 error-body extraction (SHIPPED — §47)** → **NEXT: fly +
+  read runB4c** (card: RTSP §73.6 — gate `dc_acked:3`; scoring
+  `hs_seen`? video PT 96?; the pre-named next variable if video
+  stays dark is RTCP RR+PLI/FIR feedback) → then B5
+  (depacketization + input) → the goal: **G2' — a 60-minute keeper
+  on the browser path.**
 - **Branch state:** work happens on **`poprawki-agenta`**
   (`github.com/karnyjohnny/KarnyNow`). Chain: 5a `5e837c8` → 5b
   `e722462` → 5c `01f8f79` → 5d `a1e32af` → 5e `327bb87` → 5f
-  `a7ab5a3` → 5g `c7617de` → 5h = this round's docs-only patch.
+  `a7ab5a3` → 5g `c7617de` → 5h `299095c` → 5i `d9696ba` → 5j
+  `e819a31` → 5k = this round's patch (0009, base `e819a31`).
   **`main` stays frozen at slice 4s (`1fa7820`)** — the native track's
   last known-good; do not merge into it.
 - **runB3a in one paragraph** (full readout: RTSP §70): seat
@@ -2185,25 +2196,67 @@ Two oracle corrections, both measured: `mapped_ip` came back **`10.222.254.7:620
   servicing fix shipped (poll forever + post-ready head budget); the
   role stays RESPONDER — the initiator flip is the pre-named next
   branch IF runB4b proves the seat's INIT vestigial. Next flight:
-  runB4b (card: RTSP §72.6).**
+  runB4b (card: RTSP §72.6).** **UPDATE 3 (slice 5k, §47): runB4b
+  flew FIVE draws. Draws 1-3: NO-READ — every `cm_create` got HTTP
+  500 with a rich JSON body (`INTERNAL_ERROR_STATUS 8A910003`,
+  unifiedErrorCode 0x8A910003, serverId NP-WAW-01) that our client
+  threw away (`desc:""`); root cause = a STALE TOKEN (a
+  byte-identical request had 200'd 4 h earlier; the operator's
+  30-min official-web-client session between draws 2 and 3 ruled
+  out ban/account/network; a fresh token fixed it instantly). Draw
+  4 VERIFIED 5j: `polls:180` (vs runB4a's 3), the post-ready heads
+  named the five-record mystery — CCS + Finished + live app data ⇒
+  hypothesis A, the responder design was right, the initiator flip
+  is DEAD; `sctp_up ms:514`, `established:1`, floor intact
+  (`media_ok:2223`, `authfail:0`, linger 45 s). The scoring readout
+  found the next single fault: the seat opened `control_channel`
+  (sid 1) + `remote_trace_channel` (sid 3) FIRST and our odd sids
+  1/3/5 collided — the seat silently ignored 1/3 and acked only
+  sid 5 (`dc_acked:1`) ⇒ it never saw an `input_channel_v1` ⇒
+  `hs_seen:0` ⇒ video dark (audio-only media arithmetic). Ground
+  truth: the browser webrtc_internals dump shows the CLIENT's
+  channels on EVEN sids (input_v1=0, partial=2, cursor=4, stats=6)
+  and OpenNOW/str0m works with stats=0/v1=2/partial=4 ⇒ GFN parity
+  follows the DTLS role (client=even) and the seat maps channels
+  BY LABEL; cursor_channel is unneeded, the seat's control JSON
+  (videoStreamProgressEvent/gameSessionHdrMode/customMessage) is
+  provably ignorable (absent from all of OpenNOW), the handshake
+  needs no client reply, and OpenNOW's only media-plane watchdog
+  is rate-limited RTCP PLI/FIR when video is dark. 5k ships: even
+  sids 0/2/4 (the one flight variable) + `webrtc_dc_ack` per-ack
+  sid lines + kn_cm non-200 body extraction (unit-tested with the
+  verbatim draw-1 body; test_kncm 278/0) so a future stale-token
+  flight self-names on the console. Next flight: runB4c (card:
+  RTSP §73.6); PREFLIGHT: verify the launcher shows LOGGED IN —
+  the grey logged-out styling is easy to miss.**
 
 ### 44.2 What to do next (in order)
 
-1. **Fly runB4b** (operator): T10 rebuild first (expect ALL PASS
-   89/0, REAL shapes test_knsctp 35/0 + test_kndtls 39/0), run
-   folder `runB4b`, draw 1, the minimal card. The PASS oracle
-   (unchanged §71.6 gate: armed responder → sctp_up → 3/3 channels
-   → B3 floor → clean exit), the scoring readout (hs_seen? video
-   PT 96?) and the A/B-discriminating branches: **RTSP §72.6**.
-   Push the whole folder to karnynow-logs.
-2. **Read runB4b into RTSP §73** and branch on the evidence:
-   sctp_up:1 → score the readout (video flows → B5 =
-   depacketization `kn_rx_video` + input on `input_channel_v1`;
-   video dark → B5 = the nvst control dialect, with the
-   `webrtc_dc_peer_open` labels + `webrtc_sctp_msg` heads as the
-   design input). sctp_up:0 with 0x16 heads → the role flip
-   (initiator, even sids, `kn_sctp_open`) is the next single
-   variable, pre-named in §71.6/§72.3.
+1. **Fly runB4c** (operator): PREFLIGHT — verify the launcher
+   shows a LOGGED-IN session (draws 1-3 lesson: the grey
+   logged-out styling is easy to miss; a console `cm_create`
+   error with desc `INTERNAL_ERROR_STATUS 8A910003` = stale
+   token → relogin, do NOT burn draws). T10 rebuild first (expect
+   ALL PASS 89/0, REAL shapes test_knsctp 35/0 + test_kndtls
+   39/0), run folder `runB4c`, draw 1, the minimal card
+   (`--cm-profile=browser --webrtc-answer=45
+   --session-queue-timeout=1500`); queue patience — draw 4 waited
+   ~7 min at position 118 in the evening peak. The PASS oracle
+   (armed responder → sctp_up → **dc_acked:3 with three
+   `webrtc_dc_ack` sids 0/2/4** → B3/B4 floor → clean exit), the
+   scoring readout (hs_seen + ver + sid? video PT 96?) and the
+   branches: **RTSP §73.6**. Push the whole folder to
+   karnynow-logs.
+2. **Read runB4c into RTSP §74** and branch on the evidence:
+   dc_acked:3 + hs_seen:1 + video PT 96 → **B5 =
+   depacketization (`kn_rx_video`) + input on
+   `input_channel_v1`** (0x23 framing with the recorded version);
+   dc_acked:3 + hs_seen:1 + video dark → the next single variable
+   = **RTCP receiver feedback (RR + PLI/FIR on the video mid** —
+   OpenNOW's watchdog pattern, RTSP §73.4); dc_acked:3 +
+   hs_seen:0 → read the `sctp_msg` heads (the seat's handshake is
+   gated on something else); dc_acked<3 → the `webrtc_dc_ack`
+   lines name the rejected channel.
 3. Then, in evidence order: input, the media heartbeat, audio
    playback if wanted, and the **G2' 60-minute keeper attempt**.
 
@@ -2302,3 +2355,5 @@ Two oracle corrections, both measured: `mapped_ip` came back **`10.222.254.7:620
   summary counters are the truth.
 ## 45. Slice 5i (B-TRACK): **B4 SHIPS — the probe answers the seat's SCTP INIT.** The role decision comes straight from runB3a's evidence: the seat INITs the association at ready+0 ms, so the probe arms `kn_sctp_open_server` (bind+listen on 5000; poll's accept IS the server-side COMM_UP) instead of racing its own INIT (RFC 4960 collision resolution would have confounded the flight's single variable) — which makes us the DCEP server (RFC 8832 §5.1) with ODD sids, and the establishment transition is watched via `kn_sctp_established()` because the server-mode accept deliberately does not up-call events (kn_sctp.c's own rule; `KN_SCTP_ERR_LOST` from poll covers the down path, logged once with the stats corpse). On up the probe opens **OpenNOW's THREE WebRTC channels** (transport_input.rs `InputChannels::create` — `stats_channel` REXMIT/0 unordered, `input_channel_v1` RELIABLE ordered, `input_channel_partially_reliable` TIMED/300 unordered; priority 0, empty protocol — NOT the native eight-channel Mjolnir profile) on sids 1/3/5; inbound OPENs from the seat are ACKed with their labels logged (which channels the WebRTC seat opens toward us is an open runB3a question — ≤8 events); the rx watch detects the reference's **input handshake** content-first (LE16 526 = `0x0e 0x02` + optional LE16 version, or bare `0x0e`-pair, on any sid — the reference gates input-readiness on exactly this) as `webrtc_input_hs`. Wiring = the native pump pattern verbatim: every pass drains the kn_dtls app ring (`read_app` loop — the ring KEEPS records, so the ready+0 INIT waits for the arm one tick later) → `kn_sctp_inject` → `kn_sctp_poll` (tx flushes through `write_cb` = `kn_dtls_write_app`). Teardown gains `webrtc_sctp_final` + `webrtc_dtls_final` (post-ready `app_records/app_q_dropped/peer_closed` — closing runB3a's blind spot: whether the seat re-INITed or sent more app data was unmeasured) and the borrow order extends: sctp → dtls → cert → sock. Summary grows 11 B4 fields (sctp_armed/up/ms, dc_opened/acked, peer_opened/acked, sctp_msgs_in, hs_seen/ver, first_hs_ms). Events: `webrtc_sctp_arm/_up/_down/_final`, `webrtc_dc_peer_open`, `webrtc_dc_open`, `webrtc_input_hs`, `webrtc_sctp_msg`, `webrtc_dtls_final`. Gates (all THREE real trees staged: vendored aes/sha1 + mbedTLS 3.6.0 + usrsctp c625e219): paranoid ×2 arches clean, NATIVE TESTS PASS, CROSS-CHECK PASS zero warnings both arches **with the kn_sctp real-body leg compiled (no SKIP)**, cmake+ctest **29/29** incl. `test_knsctp` REAL battery **35/0** (AF_CONN loopback association + DCEP round-trip + PR-SCTP) and `test_kndtls` **39/0**, launcher 168/0; no new unit tests by design (integration of a golden-tested module — the DCEP builders are pinned twice already; the seat is the only honest test environment). **runB4a card (RTSP §71.6): T10 rebuild ALL PASS (knsctp REAL 35/0 shape) → draw 1, minimal card; GATE = armed:1 responder → sctp_up ms<3000 → dc_opened:3 + webrtc_dc_open acked:3 → the B3 floor intact → clean exit; SCORING READOUT = hs_seen:1? video PT 96/97 in webrtc_media?** One variable: the datachannel comes up. Patch `0007`, base = the pushed 5h HEAD.
 ## 46. Slice 5j (B-TRACK): **runB4a READ — the datachannel gate did not fire, and the fault was OURS: the probe stopped servicing DTLS after ready.** The flight (seat 80.250.98.38, T10 ALL PASS 89/0 with knsctp REAL 35/0) ran 5i exactly as designed up to the wire: `ice_ok` 1596 ms → DTLS ready in **380 ms** with the seat's 44-byte INIT already in the app ring (`app_records:1` at ready) → `webrtc_sctp_arm armed:1 role:"responder"` at 2010 → our **INIT-ACK went out** (`pkts_out:1`, 356 B, DTLS `records_out` 3→4, `send_errors:0`) → then silence: `sctp_up:0`, `dc_opened:0`. The 5i teardown instrumentation localized the fault in one read: `polls:3` (frozen at the handshake) while `records_in` grew 8→13 — **five post-ready DTLS records sat injected-but-undecrypted**, because 5g's `dtls_tick` gated polling on `!dtls_ready` and the inject queue is processed ONLY inside `kn_dtls_poll` (post-ready poll = idempotent READY + `dtls_drain_app` → app ring). The native pump carries the missing rule verbatim (~:6086: *"keep the established DTLS session serviced"*). The five records' identity is unmeasured (head budget was spent on handshake datagrams) but their cadence fits COOKIE-ECHO + T1 retransmits (1+2+4+8+16 s = 31 s inside the 43 s window) — **hypothesis A: the responder design was right and we starved a live association mid-handshake**; hypothesis B (handshake duplicates, vestigial INIT) stays named. **The fix (one variable): poll every pass** (the ready block keeps its one-shot guard; post-ready negatives can only be latched write-path fatals — the fail branch stays honest) **+ post-ready `webrtc_dtls_in` heads to global n≤24** (first byte 0x16 vs 0x17 names the class in runB4b). **The role stays RESPONDER** — the initiator flip (even sids, `kn_sctp_open`, RFC 4960 §5.2.1 collision handling) activates only if runB4b proves B. The floor held perfectly meanwhile: audio `media_ok:2313 / authfail:0` (second clean flight of the km+16/km+46 keys), `other_in:0` (no pre-ready race this time), `linger_ms:45092`, mapped 10.222.254.4 (4th private-netns seat), `stun_in:6` answered 6. Gates: paranoid ×2 clean, NATIVE TESTS PASS, CROSS-CHECK PASS both arches (kn_sctp real-body leg compiled), cmake+ctest **29/29** (knsctp REAL 35/0, kndtls REAL 39/0), launcher 168/0; ledger rule added beside 5e's: **an integration slice inherits the FULL service contract of the modules it wires, not just the half that runs before the first success.** runB4b card + A/B-discriminating branches: RTSP §72.6. Patch `0008`, base `d9696ba` (the pushed 5i).
+
+## 47. Slice 5k (B-TRACK): **runB4b READ — draws 1-3 never left the CM door (a STALE TOKEN buys HTTP 500 `INTERNAL_ERROR_STATUS 8A910003`, and our client printed `desc:""` over a body that named the failure), draw 4 (fresh token) VERIFIED the 5j starvation fix — `sctp_up:1`, hypothesis A, role-flip DEAD — and exposed the next single fault: GFN's datachannel parity is DTLS-role-based (client=EVEN), not RFC-8832 INIT-role-based; our odd sids collided with the seat's own channels.** Five draws flew on one build (T10 ALL PASS 89/0, 15:30:55 local). Draws 1-3 (14:48-15:28 UTC): 15/15 `POST /v2/session` attempts → HTTP 500, every body a session skeleton (`sessionId`+`resourcePath` allocated, then the backend failed) with `requestStatus{statusCode:4, unifiedErrorCode:-1970208765=0x8A910003, statusDescription:"INTERNAL_ERROR_STATUS 8A910003", serverId:"NP-WAW-01"}` and `otherUserSessions:[]`; the request was byte-identical (wire-diff) to runB4a's 200'd create except the random SubSessionId/traceparent — the one changed variable was the Authorization material, confirmed by the operator's control (30 min of official-web-client gameplay between draws 2 and 3 — account, network, CM all fine) and by draw 4 succeeding instantly after a relogin. **Client-side gap this exposed:** `cm_round` returned before `kn_cm_extract_session` on non-200, so the console error carried `desc:"" cloud_status:0` while the answer sat in the body — diagnosis needed wire-dump forensics instead of one log line. Draw 4 (seat 185.136.71.135:5004, queue 118→0 in ~7 min, empty VAST → ad_cancel 200): `dtls_ready ms:374` → `sctp_arm armed:1 responder t_ms:2274` → **post-ready heads did exactly what 5j built them for**: n=9 `0x14` CCS, n=10 `0x16` Finished, n=11+ `0x17` app data — runB4a's five unprocessed records were the seat's handshake tail + live SCTP traffic (hypothesis A of §72.2; the initiator-flip branch is DEAD and must never be activated) → **`sctp_up ms:514`**, `established:1 assoc_state:1 pkts_in:17 pkts_out:14 sends:5 send_errors:0`, `polls:180` (vs 3 — the cleanest 5j proof), floor intact (`media_ok:2223 authfail:0 other_in:6` (the benign pre-ready-RTP class) `linger_ms:45201`). **The scoring readout found the next fault:** the seat opened `control_channel`(sid 1, RELIABLE) + `remote_trace_channel`(sid 3, RELIABLE) and sent 5 JSON strings on control_channel (`videoStreamProgressEvent`×2, `gameSessionHdrMode`, `customMessage`×2 — ppi 51); our 5i profile (odd sids 1/3/5 per RFC 8832 §5.1, "responder=DCEP server") **collided on 1/3** — the seat silently ignored both (no NACK; msgs_in arithmetic 8 = 2 OPEN + 1 ACK + 5 JSON) and acked only sid 5 ⇒ `dc_acked:1`, the seat never saw an `input_channel_v1` ⇒ `hs_seen:0` ⇒ video dark (media arithmetic: 2805 pkts ≈ audio-only; PT 96 would add ~90/s). Ground truth resolved the parity rule three ways: the **browser webrtc_internals dump** (real session 2026-11-02) shows the client's channels on EVEN sids — `input_channel_v1`=0, `input_channel_partially_reliable`=2, `cursor_channel`=4, `stats_channel`=6 — with the seat holding odd (control=1); **OpenNOW** (`webrtc/input.rs`) creates stats→v1→partial with NO explicit ids and str0m auto-assigns evens 0/2/4 — a DIFFERENT sid↔label mapping than the browser's, and it streams ⇒ **the seat maps channels BY LABEL**; and OpenNOW's WebRTC path **ignores the seat's control JSON entirely** (the message names appear nowhere in the repo), sends **nothing** at handshake time (it only RECORDS the seat's `0x0e`-prefix version), keeps `stats_channel` silent, and runs one media-plane watchdog: rate-limited **RTCP PLI/FIR** when video frames are absent (`webrtc/mod.rs:830`). **5k ships one flight variable + two evidence paths:** (1) `sess_webrtc_channels` sids 1/3/5→**0/2/4** (creation order + reliability mapping untouched, OpenNOW-exact); (2) `webrtc_dc_ack {sid,n,t_ms}` per-ack lines (first 3 — the ACK travels on the OPEN's stream, RFC 8832 §5.2, so the sid names the accepted channel); (3) `cm_round` extracts the requestStatus mirror from non-200 JSON bodies (guarded by `jsonbuf[0]` — the empty-body 503 path and its test are untouched), unit-tested with the **verbatim draw-1 body** (`test_kncm` 278/0, 7 new checks). NOT in 5k: RTCP feedback, input frames, control replies, cursor_channel (each a pre-named next variable, evidence-decided — RTSP §73.4/§73.6). **runB4c card (§73.6): PREFLIGHT = launcher LOGGED IN** (the grey logged-out styling is easy to miss — that's what burned draws 1-3); gate = armed → sctp_up → **dc_acked:3 + three dc_ack sids {0,2,4}** → floor → clean exit; scoring = `hs_seen:1` (ver/sid — expect sid 2) + video PT 96?; branches: video flows → B5 depacketization+input; video dark + hs_seen → RTCP RR+PLI/FIR is the next variable; hs_seen:0 → read the msg heads; dc_acked<3 → the dc_ack lines name the reject. Gates (three real trees staged): paranoid ×2 clean, NATIVE TESTS PASS (kncm 278/0), CROSS-CHECK PASS zero warnings (kn_sctp real-body leg), cmake+ctest **29/29** (knsctp REAL 35/0, kndtls REAL 39/0, kncert 10/0), launcher 168/0. Ledger addition: **when a flight fails ABOVE the layer under test, fix the failed layer's observability first — the 500's body named the failure on day one; our log line didn't.** Evidence: karnynow-logs @ `d9ddd33` (runB4b/1-5 + T10 pair) archived to `priv-logs/runB4b`. Patch `0009`, base `e819a31` (the pushed 5j).
