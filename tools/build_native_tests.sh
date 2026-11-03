@@ -37,6 +37,7 @@ KNCORE="streamer/src/knlog.c streamer/src/knring.c streamer/src/knfec.c \
     streamer/src/kn_freeze.c \
     streamer/src/kn_bw.c \
     streamer/src/kn_ogg.c streamer/src/kn_arx.c streamer/src/kn_opus.c \
+    streamer/src/kn_twcc.c \
     third_party/tiny-aes-c/aes.c third_party/crypto-algorithms-sha1/sha1.c"
 $CC $CFLAGS $KNCORE streamer/tests/test_knlog.c -o build/test_knlog -pthread -lm $OPUS_LIBS
 $CC $CFLAGS $KNCORE streamer/tests/test_knring.c -o build/test_knring -pthread -lm $OPUS_LIBS
@@ -75,6 +76,10 @@ $CC $CFLAGS streamer/src/kn_sdp.c streamer/src/kn_sock.c \
     third_party/crypto-algorithms-sha1/sha1.c \
     streamer/tests/test_knsdp.c -o build/test_knsdp
 $CC $CFLAGS streamer/src/kn_rtsp.c streamer/tests/test_knrtsp.c -o build/test_knrtsp
+# slice 5l: TWCC register + report builder — pure logic (no sockets, no
+# vendor crypto), so the leg is the two files and nothing else.
+$CC $CFLAGS streamer/src/kn_twcc.c \
+    streamer/tests/test_kntwcc.c -o build/test_kntwcc
 $CC $CFLAGS streamer/src/kn_wire.c streamer/src/kn_sock.c \
     streamer/src/kn_sha1.c third_party/crypto-algorithms-sha1/sha1.c \
     streamer/tests/test_knwire.c -o build/test_knwire -pthread
@@ -231,6 +236,10 @@ echo "== run test_knsdp (B-track 5b: offer parse + answer/nvstSdp goldens) =="
 rc29=0
 ./build/test_knsdp || rc29=$?
 
+echo "== run test_kntwcc (B-track 5l: TWCC register + report goldens) =="
+rc30=0
+./build/test_kntwcc || rc30=$?
+
 echo "== knvstd smoke: --list-selftests + --selftest=fec.vectors =="
 rc9=0
 ./build/knvstd --list-selftests > logs/knvstd_list.json || rc9=$?
@@ -272,11 +281,11 @@ if [ $rc1 -eq 0 ] && [ $rc2 -eq 0 ] && [ $rc3 -eq 0 ] && [ $rc4 -eq 0 ] && \
    [ $rc19 -eq 0 ] && [ $rc20 -eq 0 ] && [ $rc21 -eq 0 ] && \
    [ $rc22 -eq 0 ] && [ $rc23 -eq 0 ] && [ $rc24 -eq 0 ] && \
    [ $rc25 -eq 0 ] && [ $rc26 -eq 0 ] && [ $rc27 -eq 0 ] && \
-   [ $rc28 -eq 0 ] && [ $rc29 -eq 0 ] && \
+   [ $rc28 -eq 0 ] && [ $rc29 -eq 0 ] && [ $rc30 -eq 0 ] && \
    [ $rc_opus -eq 0 ]; then
     echo "NATIVE TESTS PASS"
 else
-    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19 knsctp=$rc20 kninput=$rc21 knbw=$rc22 knogg=$rc23 knarx=$rc24 kndrawpath=$rc25 knfreeze=$rc26 knd3d=$rc27 knwire=$rc28 knsdp=$rc29 knopus=$rc_opus)"
+    echo "NATIVE TESTS FAIL (rc knlog=$rc1 knring=$rc2 jsonl=$rc3 knfec=$rc4 knsrtp=$rc5 kndiag=$rc6 zip=$rc7 knselftest=$rc8 knvstd=$rc9 json=$rc10 ffmpeghdr=$rcff kngs=$rc11 knaudio=$rc12 knrx=$rc13 knsock=$rc14 knws=$rc15 knrtsp=$rc16 kncm=$rc17 kncert=$rc18 kndtls=$rc19 knsctp=$rc20 kninput=$rc21 knbw=$rc22 knogg=$rc23 knarx=$rc24 kndrawpath=$rc25 knfreeze=$rc26 knd3d=$rc27 knwire=$rc28 knsdp=$rc29 kntwcc=$rc30 knopus=$rc_opus)"
     exit 1
 fi
 

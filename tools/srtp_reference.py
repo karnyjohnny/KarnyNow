@@ -22,6 +22,18 @@ KDF/IV semantics mirror nvst.rs @ a49b124 (local copy: artifacts/nvst-extract/):
   srtcp_gcm_iv          2929-2939   (RFC 7714 §9.2)
   labels                88-95       (0x00/0x01/0x02 SRTP, 0x03/0x05 SRTCP)
 
+SRTCP-over-CM semantics (phase 2b, slice 5l) mirror str0m rtp/srtp.rs:
+  labels                14-20       (0x03/0x04/0x05 — nvst is GCM-only for
+                                     SRTCP and never derives label 0x04)
+  protect_rtcp          464-508     (CM branch: 8-octet plaintext prefix,
+                                     E||index BE32, tag over everything)
+  unprotect_rtcp        562-620     (tag FIRST, E=0 tolerated)
+  rtp_iv                crypto/srtp.rs:~220 (BE64 index at [6..14) — for a
+                                     31-bit SRTCP index byte-identical to
+                                     RFC 3711 §4.1.1 (i*2^16) at [10..14))
+Self-check proves the IV two ways (RFC integer formula + str0m byte literal)
+and round-trips every golden before emitting.
+
 Usage:  python3 tools/srtp_reference.py
 Emits:  streamer/src/knsrtp_kat_vectors.h
 """
@@ -441,6 +453,210 @@ def self_check_p2():
     return v
 
 
+# ------------------------------------------------- phase 2b: SRTCP over CM
+# Provenance: RFC 3711 §4.1.1 (IV = (k_s*2^16) XOR (SSRC*2^64) XOR (i*2^16),
+# i = the 31-bit SRTCP index; k_e/k_s replaced by the SRTCP session pair) and
+# §3.4/§4.2.1 (first 8 octets plaintext; tag over the whole packet INCLUDING
+# the E||index field, NO roc). Cross-checked line-by-line against str0m
+# rtp/srtp.rs:464-620 (protect_rtcp/unprotect_rtcp CM branch, labels 0x03 /
+# 0x04 / 0x05 at rtp/srtp.rs:18-20) — str0m builds the same IV by calling
+# rtp_iv(salt14, ssrc, srtcp_index as u64): for a 31-bit index the BE64 XOR
+# at bytes [6..14) is byte-identical to BE32 at [10..14).
+
+def srtcp_cm_iv(session_salt14, ssrc, srtcp_index):
+    """RFC 3711 §4.1.1, byte-level form (== str0m rtp_iv for index < 2^31)."""
+    assert 0 <= srtcp_index < (1 << 31), "SRTCP index is 31-bit"
+    iv = bytearray(16)
+    iv[:14] = session_salt14                  # k_s * 2^16
+    for i in range(4):
+        iv[4 + i] ^= (ssrc >> (24 - 8 * i)) & 0xFF          # SSRC * 2^64
+    for i in range(4):
+        iv[10 + i] ^= (srtcp_index >> (24 - 8 * i)) & 0xFF  # i * 2^16
+    return bytes(iv)
+
+
+def srtcp_cm_keystream(enc_key, iv, nbytes):
+    return b"".join(cm_keystream_block(enc_key, iv, i)
+                    for i in range((nbytes + 15) // 16))[:nbytes]
+
+
+def srtcp_cm_protect(plain, srtcp_index, enc_key, auth_key, salt, tag_len=10,
+                     encrypt=True):
+    """str0m rtp/srtp.rs:464-508 protect_rtcp, CM branch.
+
+    encrypt=False builds the E=0 (plaintext-but-authenticated) variant that
+    str0m unprotect_rtcp tolerates (rtp/srtp.rs:598-601) — no real sender
+    produces it, but the C unprotect must handle it identically."""
+    assert len(plain) >= 12, "real RTCP packets are >= 12 octets (PLI floor)"
+    ssrc = int.from_bytes(plain[4:8], "big")
+    if encrypt:
+        iv = srtcp_cm_iv(salt, ssrc, srtcp_index)
+        ks = srtcp_cm_keystream(enc_key, iv, len(plain) - 8)
+        body = plain[:8] + bytes(a ^ b for a, b in zip(plain[8:], ks))
+    else:
+        body = bytes(plain)
+    e_and_si = ((0x80000000 if encrypt else 0) | srtcp_index).to_bytes(4, "big")
+    body += e_and_si
+    tag = pyhmac.new(auth_key, body, hashlib.sha1).digest()[:tag_len]
+    return body + tag
+
+
+def srtcp_cm_unprotect(protected, enc_key, auth_key, salt, tag_len=10):
+    """str0m rtp/srtp.rs:562-620 unprotect_rtcp, CM branch. Returns
+    (plain, srtcp_index, e) or None on AuthenticationFailed. Tag first,
+    decrypt only when E=1 — the C implementation must match this order."""
+    if len(protected) < 8 + 4 + tag_len:
+        return None
+    hmac_start = len(protected) - tag_len
+    tag = pyhmac.new(auth_key, protected[:hmac_start], hashlib.sha1).digest()
+    if tag[:tag_len] != protected[hmac_start:]:
+        return None
+    idx_start = hmac_start - 4
+    e_and_si = int.from_bytes(protected[idx_start:hmac_start], "big")
+    e = (e_and_si >> 31) & 1
+    srtcp_index = e_and_si & 0x7FFFFFFF
+    plain = protected[:idx_start]
+    if e:
+        ssrc = int.from_bytes(plain[4:8], "big")
+        iv = srtcp_cm_iv(salt, ssrc, srtcp_index)
+        ks = srtcp_cm_keystream(enc_key, iv, len(plain) - 8)
+        plain = plain[:8] + bytes(a ^ b for a, b in zip(plain[8:], ks))
+    return (plain, srtcp_index, e)
+
+
+def srtcp_plains():
+    """Realistic probe-shaped RTCP packets (crypto is content-agnostic, but
+    goldens should look like the wire). Sender SSRC = the probe's
+    SESS_RTCP_SENDER_SSRC 0x4F4E4F57 ("ONOW")."""
+    sender = 0x4F4E4F57
+
+    # 32B Receiver Report: RC=1, PT 201, media ssrc 1 (audio), ext_seq
+    # 0x910, jitter 40, LSR/DLSR from a remembered SR.
+    rr = bytearray(32)
+    rr[0], rr[1] = 0x81, 0xC9
+    rr[2:4] = (7).to_bytes(2, "big")
+    rr[4:8] = sender.to_bytes(4, "big")
+    rr[8:12] = (1).to_bytes(4, "big")
+    rr[13:16] = (0).to_bytes(3, "big")          # frac_lost 0, cum_lost 0
+    rr[16:20] = (0x910).to_bytes(4, "big")
+    rr[20:24] = (40).to_bytes(4, "big")
+    rr[24:28] = (0x11223344).to_bytes(4, "big")
+    rr[28:32] = (0x1234).to_bytes(4, "big")
+
+    # 12B PLI: FMT=1, PT 206, media ssrc 2 (video).
+    pli = bytes([0x81, 0xCE, 0x00, 0x02]) + sender.to_bytes(4, "big") + \
+        (2).to_bytes(4, "big")
+
+    # 32B TWCC feedback (draft-holmer-rmcat-transport-wide-cc-extensions-01):
+    # FMT=15, PT 205, P-bit set, media ssrc 2, base_seq 1, count 9,
+    # ref_time 1, fb_count 0, one Run-Length chunk (9 received), nine small
+    # deltas (+1 ms quantized), 1 pad byte.
+    tw = bytearray(32)
+    tw[0], tw[1] = 0xAF, 0xCD
+    tw[2:4] = (7).to_bytes(2, "big")
+    tw[4:8] = sender.to_bytes(4, "big")
+    tw[8:12] = (2).to_bytes(4, "big")
+    tw[12:14] = (1).to_bytes(2, "big")           # base_seq
+    tw[14:16] = (9).to_bytes(2, "big")           # packet status count
+    tw[16:19] = (1).to_bytes(3, "big")           # reference time (24-bit)
+    tw[19] = 0                                    # fb packet count
+    tw[20:22] = (0x0009).to_bytes(2, "big")      # Run Length: 9x received
+    tw[22:31] = bytes([0x04] * 9)                # small deltas (+1ms)
+    tw[31] = 1                                    # RFC 3550 pad count
+
+    assert len(bytes(rr)) == 32 and len(pli) == 12 and len(bytes(tw)) == 32
+    return bytes(rr), pli, bytes(tw)
+
+
+def srtcp_vectors():
+    """SRTCP-CM protect/unprotect goldens from the RFC 3711 B.3 master."""
+    master = H("E1F97A0D3E018BE0D64FA32C06DE4139")
+    salt = H("0EC675AD498AFEEBB6960B3AABE6")
+    renc = kdf128(master, salt, 0x03, 16)
+    rsalt = kdf128(master, salt, 0x05, 14)
+    rauth = kdf128(master, salt, 0x04, 20)
+    rr, pli, tw = srtcp_plains()
+
+    # (name, plain, index, tag_len, encrypt)
+    specs = [
+        ("rr32",   rr,  1,          10, True),
+        ("pli12",  pli, 2,          10, True),
+        ("twcc32", tw,  0,          10, True),
+        ("maxidx", rr,  0x7FFFFFFF, 10, True),   # E||idx = FF FF FF FF
+        ("tag4",   pli, 3,           4, True),   # HMAC_SHA1_32 branch
+        ("e0",     tw,  5,          10, False),  # plaintext-but-authenticated
+    ]
+    cases = []
+    for name, plain, index, tag_len, enc in specs:
+        protected = srtcp_cm_protect(plain, index, renc, rauth, rsalt,
+                                     tag_len, enc)
+        cases.append(dict(name=name, plain=plain, index=index,
+                          tag_len=tag_len, e=1 if enc else 0,
+                          protected=protected))
+    return dict(renc=renc, rsalt=rsalt, rauth=rauth, cases=cases)
+
+
+def self_check_srtcp():
+    v = srtcp_vectors()
+    renc, rsalt, rauth = v["renc"], v["rsalt"], v["rauth"]
+
+    # the enc key / salt must equal the already-emitted phase-1 goldens
+    # (same KDF, labels 0x03 / 0x05 — emit() re-derives from the B.3 master)
+    master = H("E1F97A0D3E018BE0D64FA32C06DE4139")
+    salt = H("0EC675AD498AFEEBB6960B3AABE6")
+    assert renc == kdf128(master, salt, 0x03, 16)
+    assert rsalt == kdf128(master, salt, 0x05, 14)
+    assert rauth == kdf128(master, salt, 0x04, 20)
+
+    for c in v["cases"]:
+        plain, protected = c["plain"], c["protected"]
+        index, tag_len = c["index"], c["tag_len"]
+        ssrc = int.from_bytes(plain[4:8], "big")
+
+        # (1) RFC 3711 §4.1.1 formula as 128-bit INTEGER arithmetic — an
+        # independent formulation of the byte-level builder above.
+        iv_bytes = srtcp_cm_iv(rsalt, ssrc, index)
+        iv_int = ((int.from_bytes(rsalt, "big") << 16) ^
+                  (ssrc << 64) ^ (index << 16))
+        assert iv_bytes == iv_int.to_bytes(16, "big"), "IV formula: %s" % c["name"]
+
+        # (2) str0m rtp_iv literal: BE64(index as u64) XORed at bytes
+        # [6..14), ssrc COPIED at [4..8), salt XORed over [0..14).
+        siv = bytearray(16)
+        siv[4:8] = ssrc.to_bytes(4, "big")
+        be64 = index.to_bytes(8, "big")
+        for i in range(8):
+            siv[i + 6] ^= be64[i]
+        for i in range(14):
+            siv[i] ^= rsalt[i]
+        assert bytes(siv) == iv_bytes, "str0m rtp_iv: %s" % c["name"]
+
+        # (3) structural invariants: 8-octet plaintext prefix (E=1 only),
+        # exact lengths, E bit placement.
+        if c["e"]:
+            assert protected[:8] == plain[:8], "prefix: %s" % c["name"]
+        assert len(protected) == len(plain) + 4 + tag_len
+        e_and_si = int.from_bytes(protected[-4 - tag_len:-tag_len], "big")
+        assert e_and_si == ((0x80000000 if c["e"] else 0) | index)
+
+        # (4) round trip through the python unprotect mirror; and a
+        # one-bit tag corruption must fail (sha1_hmac oracle).
+        rt = srtcp_cm_unprotect(protected, renc, rauth, rsalt, tag_len)
+        assert rt == (plain, index, c["e"]), "round trip: %s" % c["name"]
+        bad = bytearray(protected)
+        bad[-1] ^= 0x01
+        assert srtcp_cm_unprotect(bytes(bad), renc, rauth, rsalt,
+                                  tag_len) is None, "bad tag: %s" % c["name"]
+
+    # IV golden input sanity (emitted alongside the existing IV builders)
+    iv = srtcp_cm_iv(bytes(range(14)), 0xDEADBEEF, 0x09ABCDEF)
+    assert len(iv) == 16 and iv[14:] == bytes(2)
+
+    print("self-check srtcp OK (%d cases: RFC integer formula, str0m rtp_iv, "
+          "round trips, corruption rejects)" % len(v["cases"]))
+    return v
+
+
 # ----------------------------------------------------------------- emit
 
 def c_arr(name, data, per_line=16):
@@ -450,7 +666,7 @@ def c_arr(name, data, per_line=16):
     return "static const unsigned char %s[%d] = {\n%s\n};" % (name, len(data), "\n".join(rows))
 
 
-def emit(master, salt, b2_key, b2_off, b2, auth94, p2):
+def emit(master, salt, b2_key, b2_off, b2, auth94, p2, sc):
     P = []
     P.append("""/* knsrtp_kat_vectors.h -- GENERATED FILE, do not edit by hand.
  * Generator: python3 tools/srtp_reference.py   (run from the repo root)
@@ -608,6 +824,62 @@ def emit(master, salt, b2_key, b2_off, b2, auth94, p2):
     P.append("static const unsigned char k_kat_replay_check_rc[%d] = { %s };"
              % (len(ops), ", ".join(str(o[3]) for o in ops)))
 
+    # ---------------- phase 2b: SRTCP over AES-CM + HMAC-SHA1 ----------------
+    P.append("""/* ===== phase 2b: SRTCP-CM (slice 5l) =====
+
+ * RFC 3711 §4.1.1/§3.4/§4.2.1 SRTCP goldens; str0m rtp/srtp.rs:464-620
+ * cross-checked (labels 0x03/0x04/0x05, tag over packet INCLUDING E||index,
+ * NO roc, tag verified before decryption, E=0 tolerated on unprotect).
+ * Session material derives from the same B.3 master as everything above:
+ *   renc  = k_kat_srtcp_key  (label 0x03, 16B)
+ *   rsalt = k_kat_srtcp_salt (label 0x05, 14B)
+ *   rauth = k_kat_srtcp_auth (label 0x04, 20B)  <-- NEW, str0m-only golden
+ * Case table (K_KAT_SRTCP_NCASES), per case i:
+ *   plain    = blob[plain_off[i] .. +plain_len[i]]
+ *   expected = blob[prot_off[i]  .. +total_len[i]]   (E=1 unless e[i]==0)
+ *   protect(plain, index[i], tag_len[i]) == expected
+ *   unprotect(expected) == (plain, index[i], e[i])
+ * Cases: rr32 (RC=1 RR, sender 4f4e4f57, idx 1), pli12 (idx 2), twcc32
+ * (draft-holmer feedback, idx 0), maxidx (idx 0x7fffffff -> E||i = FFFFFFFF),
+ * tag4 (HMAC_SHA1_32 branch), e0 (E=0 plaintext-but-authenticated). */
+#define K_KAT_SRTCP_NCASES %d""" % len(sc["cases"]))
+    P.append(c_arr("k_kat_srtcp_auth", sc["rauth"]))
+    blob = b""
+    plain_off, prot_off, plain_len, total_len, index_a, taglen_a, e_a, names = \
+        [], [], [], [], [], [], [], []
+    for c in sc["cases"]:
+        plain_off.append(len(blob)); plain_len.append(len(c["plain"]))
+        blob += c["plain"]
+        prot_off.append(len(blob)); total_len.append(len(c["protected"]))
+        blob += c["protected"]
+        index_a.append(c["index"]); taglen_a.append(c["tag_len"])
+        e_a.append(c["e"]); names.append(c["name"])
+    P.append(c_arr("k_kat_srtcp_blob", blob, 24))
+    P.append("/* case order: %s */" % ", ".join(names))
+    n = len(sc["cases"])
+    P.append("static const unsigned short k_kat_srtcp_plain_off[%d] = { %s };"
+             % (n, ", ".join(str(x) for x in plain_off)))
+    P.append("static const unsigned short k_kat_srtcp_plain_len[%d] = { %s };"
+             % (n, ", ".join(str(x) for x in plain_len)))
+    P.append("static const unsigned short k_kat_srtcp_prot_off[%d] = { %s };"
+             % (n, ", ".join(str(x) for x in prot_off)))
+    P.append("static const unsigned short k_kat_srtcp_total_len[%d] = { %s };"
+             % (n, ", ".join(str(x) for x in total_len)))
+    P.append("static const unsigned int k_kat_srtcp_index[%d] = { %s };"
+             % (n, ", ".join("0x%xu" % x for x in index_a)))
+    P.append("static const unsigned char k_kat_srtcp_tag_len[%d] = { %s };"
+             % (n, ", ".join(str(x) for x in taglen_a)))
+    P.append("static const unsigned char k_kat_srtcp_e[%d] = { %s };"
+             % (n, ", ".join(str(x) for x in e_a)))
+
+    # SRTCP CM IV golden (joins the existing IV-builder goldens; same
+    # salt14 = 00..0d and ssrc = deadbeef, index = 0x09abcdef (31-bit safe))
+    P.append("""/* SRTCP AES-CM IV (RFC 3711 §4.1.1: (k_s*2^16)^(SSRC*2^64)^(i*2^16)).
+ * Inputs: salt14 = 00..0d, ssrc = 0xdeadbeef, index = 0x09abcdef. */
+#define K_KAT_IV_SRTCP_CM_INDEX 0x09abcdefu""")
+    P.append(c_arr("k_kat_iv_srtcp_cm",
+                   srtcp_cm_iv(bytes(range(14)), 0xDEADBEEF, 0x09ABCDEF)))
+
     P.append("\n#endif /* KN_SRTP_KAT_VECTORS_H */")
     text = "\n\n".join(P) + "\n"
     text = text.encode("ascii", "replace").decode("ascii")
@@ -620,7 +892,8 @@ def emit(master, salt, b2_key, b2_off, b2, auth94, p2):
 def main():
     master, salt, b2_key, b2_off, b2, auth94 = self_check()
     p2 = self_check_p2()
-    emit(master, salt, b2_key, b2_off, b2, auth94, p2)
+    sc = self_check_srtcp()
+    emit(master, salt, b2_key, b2_off, b2, auth94, p2, sc)
     return 0
 
 

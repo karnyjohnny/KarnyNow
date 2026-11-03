@@ -37,6 +37,11 @@ extern "C" {
 #define KN_SRTP_LABEL_AUTH_KEY    0x01u  /* RFC 3711 authentication key           */
 #define KN_SRTP_LABEL_SALT        0x02u  /* GFN_SRTP_SALT_LABEL  — video (Mjolnir) */
 #define KN_SRTCP_LABEL_KEY        0x03u  /* GFN_SRTCP_KEY_LABEL                   */
+#define KN_SRTCP_LABEL_AUTH       0x04u  /* RFC 3711 §4.3.1 SRTCP authentication
+                                          * key — DISTINCT from the SRTP auth key
+                                          * (str0m LABEL_RTCP_AUTHENTICATION_KEY;
+                                          * nvst never needed it: its SRTCP is
+                                          * GCM-only, and GCM has no HMAC)       */
 #define KN_SRTCP_LABEL_SALT       0x05u  /* GFN_SRTCP_SALT_LABEL                  */
 
 #define KN_SRTP_MAX_SALT_LEN 14   /* 14 for AES-CM profiles, 12 for GCM (nvst.rs:1586-1640) */
@@ -188,6 +193,72 @@ int kn_srtp_replay_check(const kn_srtp_replay *w, uint64_t index);
  * in-window branch assumes it; out-of-window late commits are ignored
  * defensively rather than crashing — the reference .expect()s here). */
 void kn_srtp_replay_commit(kn_srtp_replay *w, uint64_t index);
+
+/* ======================= phase 2b: SRTCP over CM =========================
+ * B-track slice 5l: the WebRTC seat speaks DTLS-SRTP with profile 0x0001
+ * (SRTP_AES128_CM_HMAC_SHA1_80) — so its RTCP arrives as SRTCP-CM and OUR
+ * receiver feedback (TWCC/RR/PLI) must go out the same way. nvst never
+ * needed this (native SRTCP is GCM-only; its RR rides the rtcp1 SCTP
+ * channel), which is why the phase-2 note above said "no SRTCP-CM code is
+ * needed" — that was true for the native track and false for the browser
+ * track. Ground truth for EVERY byte here is str0m (the stack OpenNOW
+ * streams through against real GFN seats), cross-checked against RFC 3711:
+ *   - IV (§4.1.2 i*2^16): salt(14) at [0..14]; ^= ssrc_be32 at [4..8];
+ *     ^= srtcp_index_be32 at [10..14]      (str0m crypto/srtp.rs
+ *     aes_128_cm_sha1_80::rtp_iv(salt, ssrc, srtcp_index as u64) — the u64
+ *     BE form lands the 31-bit index in the low 4 bytes, i.e. [10..14];
+ *     the bit algebra of RFC 3711 §4.1.2 gives the same positions)
+ *   - plaintext region = the first 8 bytes (V/P/RC/PT/length + sender
+ *     SSRC); encrypted region = packet bytes [8..plain_len)  (§3.4)
+ *   - E-bit || 31-bit index appended AFTER encryption, big-endian, E
+ *     always 1 for encrypted                                (§3.4)
+ *   - tag = first tag_len bytes of HMAC-SHA1(auth_key20, packet bytes
+ *     INCLUDING the E/index field) — NO roc suffix (that is SRTP-only;
+ *     str0m aes_128_cm_sha1_80::rtcp_hmac)
+ *   - session material: KDF labels 0x03 (cipher key), 0x04 (auth key —
+ *     NOT the SRTP 0x01), 0x05 (cipher salt), per direction
+ *   - srtcp_index starts at 0 and increments by 1 modulo 2^31 per packet
+ *     sent (§3.4); the receiver applies the same kn_srtp_replay window to
+ *     the received index (caller's job — this layer is stateless)
+ * ======================================================================== */
+
+/* SRTCP AES-CM IV (str0m rtp_iv with the 31-bit index as u64): out[16]. */
+void kn_srtcp_iv(const uint8_t session_salt[14], uint32_t ssrc,
+                 uint32_t srtcp_index, uint8_t out[16]);
+
+/* SRTCP MAC: full 20-byte HMAC-SHA1 over packet[0..auth_len) — the whole
+ * packet including the trailing E/index field, NO roc. tag = mac[0..tag_len).
+ * Returns 0, -1 on invalid args (tag_len must be 4 or 10). */
+int kn_srtcp_auth_tag(const uint8_t auth_key[20],
+                      const uint8_t *packet, size_t auth_len,
+                      size_t tag_len, uint8_t mac_out[20]);
+
+/* In-place SRTCP protect for AES_CM_128_HMAC_SHA1_{32,80}. `packet` holds
+ * the plain RTCP packet (plain_len >= 12; the sender SSRC at [4..8] feeds
+ * the IV) and the buffer must have room for plain_len + 4 + tag_len bytes.
+ * Encrypts [8..plain_len), appends E||index (E=1) then the tag.
+ * *out_total = plain_len + 4 + tag_len. Returns 0, -1 on invalid args. */
+int kn_srtcp_protect_cm(uint8_t *packet, size_t plain_len,
+                        uint32_t srtcp_index,
+                        const uint8_t enc_key[16],
+                        const uint8_t auth_key[20],
+                        const uint8_t session_salt[14], size_t tag_len,
+                        size_t *out_total);
+
+/* In-place SRTCP unprotect: `packet` holds total_len = 8 + ct + 4 + tag_len
+ * bytes. Verifies the tag FIRST (over everything but the tag; on failure
+ * nothing is decrypted — 1 is returned), then reads E||index and decrypts
+ * [8..total_len-4-tag_len). *out_plain_len = total_len - 4 - tag_len,
+ * *out_index = the 31-bit index, *out_e = the E bit (0/1; 0 = the sender
+ * chose plaintext — still authenticated, str0m tolerates both).
+ * Returns 0 ok, 1 AuthenticationFailed, -1 invalid args / too short.
+ * Replay checking is the CALLER's job (kn_srtp_replay over *out_index). */
+int kn_srtcp_unprotect_cm(uint8_t *packet, size_t total_len,
+                          const uint8_t enc_key[16],
+                          const uint8_t auth_key[20],
+                          const uint8_t session_salt[14], size_t tag_len,
+                          uint32_t *out_index, int *out_e,
+                          size_t *out_plain_len);
 
 /* ============================ phase 3 ====================================
  * 256-bit profiles + AES-GCM — the ACTIVE Mjolnir policy is AEAD GCM with

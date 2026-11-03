@@ -55,6 +55,7 @@
 #include "kn/kn_selftest.h"
 #include "kn/kn_sha1.h"
 #include "kn/kn_sock.h"
+#include "kn/kn_twcc.h"   /* B-track slice 5l: transport-wide-cc feedback */
 #include "kn/kn_ws.h"
 #include "kn/knlog.h"
 #include "kn/knring.h"
@@ -7027,6 +7028,95 @@ static size_t sess_json_esc(char *dst, size_t dstsz,
     return o;
 }
 
+/* Slice 5l (B4.5): per-ssrc RFC 3550 A.3 receiver statistics — the
+ * probe-local half of the RTCP feedback plane (the wire bytes come from
+ * kn_rx_rtcp_rr / kn_twcc_build / kn_srtcp_protect_cm, all unit-tested;
+ * these helpers only feed them honest numbers). One slot per observed
+ * media ssrc (GFN offers ssrc 1 audio, 2 video, 3 rtx, 4 fec — four
+ * slots exactly). Constants are RFC 3550 A.3 verbatim (RTP_DROPOUT
+ * 3000, RTP_MISORDER 100, RTP_SEQ_MOD 65536); jitter accumulates in
+ * 1/16 timestamp units, the report divides by 16. */
+#define SESS_RR_MAX_SSRC   4
+#define SESS_RTP_DROPOUT   3000u
+#define SESS_RTP_MISORDER  100u
+#define SESS_RTP_SEQ_MOD   65536u
+
+typedef struct {
+    uint32_t ssrc;
+    int      used;
+    int      started;         /* first packet seen (init_seq done) */
+    int      do_rr;           /* first PT is the offer's opus/h264 PT
+                                * (media ssrcs get RRs; rtx/fec ssrcs are
+                                * counted but not reported — str0m RRs
+                                * its media streams, not the repair ones) */
+    uint32_t clock;           /* 48000 audio / 90000 video class */
+    unsigned base_seq, bad_seq, max_seq, cycles;
+    uint64_t received, expected_prior, received_prior;
+    uint32_t transit, jitter;
+    uint64_t next_rr_ms;      /* pacing: audio 5 s / video 1 s (str0m) */
+} sess_rr_stats;
+
+static void sess_rr_init_seq(sess_rr_stats *s, unsigned seq)
+{
+    s->base_seq = seq;
+    s->max_seq = seq;
+    s->bad_seq = SESS_RTP_SEQ_MOD + 1u;   /* so seq == bad_seq is false */
+    s->cycles = 0;
+    s->received = 0;
+    s->expected_prior = 0;
+    s->received_prior = 0;
+    s->transit = 0;
+    s->jitter = 0;
+}
+
+/* RFC 3550 A.3 update_seq verbatim: 1 = valid (count + jitter),
+ * 0 = the packet made a huge jump and is held as bad_seq. */
+static int sess_rr_update_seq(sess_rr_stats *s, unsigned seq)
+{
+    unsigned udelta = (seq - s->max_seq) & 0xFFFFu;
+    if (udelta < SESS_RTP_DROPOUT) {
+        if (seq < s->max_seq) s->cycles += SESS_RTP_SEQ_MOD;
+        s->max_seq = seq;
+    } else if (udelta <= SESS_RTP_SEQ_MOD - SESS_RTP_MISORDER) {
+        if (seq == s->bad_seq) {
+            sess_rr_init_seq(s, seq);     /* two sequential: restart */
+        } else {
+            s->bad_seq = (seq + 1u) & 0xFFFFu;
+            return 0;
+        }
+    } else {
+        sess_rr_init_seq(s, seq);         /* impermissible gap: restart */
+    }
+    return 1;
+}
+
+/* First a=ssrc:<N> inside the FIRST m=video section of the raw offer —
+ * the PLI target before any video RTP exists (OpenNOW's keyframe
+ * watchdog aims at the SDP-negotiated video ssrc). kn_sdp_offer does
+ * not carry ssrc lines and this is the only consumer, so the probe
+ * scans the text itself (isdigit-guarded: a=ssrc-group must not
+ * match). 0 = not found (PLI then honestly never fires). */
+static uint32_t sess_offer_video_ssrc(const char *sdp)
+{
+    const char *p;
+    if (!sdp) return 0;
+    p = strstr(sdp, "m=video");
+    if (!p) return 0;
+    {
+        const char *sec_end = strstr(p + 7, "\nm=");
+        const char *q = p;
+        if (!sec_end) sec_end = p + strlen(p);
+        while ((q = strstr(q, "a=ssrc:")) != NULL && q < sec_end) {
+            if (q[7] >= '0' && q[7] <= '9') {
+                unsigned long v = strtoul(q + 7, NULL, 10);
+                if (v > 0ul && v <= 0xFFFFFFFFul) return (uint32_t)v;
+            }
+            q += 7;
+        }
+    }
+    return 0;
+}
+
 /* B-track slice 5b (RTSP §65.5): the post-answer observation state.
  * The probe owns one of these; sess_webrtc_answer_send() opens the UDP
  * bundle socket and sends the answer + nvstSdp + host candidate, then
@@ -7141,6 +7231,46 @@ typedef struct {
     int          hs_seen;                  /* the [0x0e,…] input handshake */
     unsigned     hs_ver;
     unsigned long long first_hs_ms;
+    /* Slice 5l (B4.5): the RTCP feedback plane — runB5a's read: the
+     * control plane is UP (hs_seen:1 ver:3 sid:2, dc_ack {0,2,4}) but
+     * video stays dark, and the three-way ground truth (OpenNOW
+     * webrtc/mod.rs + str0m session.rs + browser parity) names the
+     * gate: the seat's encoder paces on RECEIVER FEEDBACK — TWCC every
+     * 50 ms, RRs (video 1 s / audio 5 s, LSR/DLSR from the seat's SRs),
+     * and a pre-video keyframe request. The 601 media_other packets are
+     * inbound SRTCP (RFC 5761 demux: PT byte 192..223) — decrypted and
+     * classified here for the first time. SRTCP session material: the
+     * DTLS-SRTP EXTRACTOR halves through the label 0x03/0x04/0x05 KDF
+     * (str0m Derived::aes_128_cm_sha1_80 — note label 0x04, NOT the
+     * SRTP auth label 0x01; nvst never needed it, its SRTCP is GCM-only).
+     * TX = client halves km[0..16)/km[32..46), RX = server halves
+     * km[16..32)/km[46..60) — the same split kn_rx_srtp_session_init
+     * already uses for SRTP. */
+    int          srtcp_derived;
+    uint8_t      srtcp_tx_enc[16], srtcp_tx_auth[20], srtcp_tx_salt[14];
+    uint8_t      srtcp_rx_enc[16], srtcp_rx_auth[20], srtcp_rx_salt[14];
+    uint32_t     srtcp_tx_index;           /* next index; +1 mod 2^31 */
+    kn_srtp_replay srtcp_replay;           /* inbound SRTCP window */
+    unsigned long long rtcp_in, rtcp_ok, rtcp_authfail, rtcp_bad,
+                       rtcp_replayed;
+    unsigned long long sr_in, rr_in, fb_in, psfb_in, other_rtcp_in;
+    unsigned long long first_rtcp_ok_ms;
+    /* last SR per sender ssrc (LSR/DLSR source, RFC 3550 §6.4.1) */
+    uint32_t     sr_ssrc[SESS_RR_MAX_SSRC];
+    uint32_t     sr_ntp_msw[SESS_RR_MAX_SSRC], sr_ntp_lsw[SESS_RR_MAX_SSRC];
+    uint64_t     sr_local_us[SESS_RR_MAX_SSRC];
+    int          sr_valid[SESS_RR_MAX_SSRC];
+    sess_rr_stats rr[SESS_RR_MAX_SSRC];
+    unsigned     pt_audio, pt_video;       /* the offer's opus / H264 PTs */
+    uint32_t     video_ssrc_hint;          /* PLI target (offer scan) */
+    kn_twcc      twcc;
+    uint64_t     next_twcc_ms, next_pli_ms;
+    unsigned long long rtcp_out, twcc_out, rr_out, pli_out, rtcp_send_err;
+    unsigned long long first_rtcp_out_ms;
+    unsigned long long video_in;           /* PT 96..107 packets */
+    unsigned long long first_video_ms;
+    unsigned     first_video_pt, first_video_seq;
+    uint32_t     first_video_ssrc;
 } webrtc_answer_state;
 
 /* Resolve the seat host to a numeric IPv4 for the UDP route: the CM
@@ -7205,6 +7335,22 @@ static int sess_webrtc_answer_send(kn_ws_client *wsc,
                "\"error\":\"offer_parse\",\"rc\":%d}\n", rc);
         fflush(stdout);
         return -1;
+    }
+    /* Slice 5l: the feedback plane's three offer facts — the opus PT
+     * (audio-class RR cadence), the H264 PT (video-class RR cadence;
+     * rtx/fec ssrcs are counted but not RR'd) and the first a=ssrc of
+     * the m=video section (the PLI target before any video exists). */
+    {
+        int mi;
+        as->video_ssrc_hint = sess_offer_video_ssrc(offer_sdp);
+        for (mi = 0; mi < off.n_media; ++mi) {
+            if (!as->pt_audio && off.m[mi].opus_pt > 0 &&
+                strcmp(off.m[mi].kind, "audio") == 0)
+                as->pt_audio = (unsigned)off.m[mi].opus_pt;
+            if (!as->pt_video && off.m[mi].h264_pt > 0 &&
+                strcmp(off.m[mi].kind, "video") == 0)
+                as->pt_video = (unsigned)off.m[mi].h264_pt;
+        }
     }
     sess_local_identity(ufrag, sizeof ufrag, pwd, sizeof pwd,
                         fp, sizeof fp);
@@ -7618,11 +7764,50 @@ static void sess_webrtc_dtls_tick(webrtc_answer_state *as)
                         KN_RX_SRTP_CM128_HMAC_SHA1,
                         km + 16, 16, km + 46, 14, 10) == KN_RX_OK)
                     as->srtp_derived = 1;
+                /* Slice 5l: the SRTCP session pairs, both directions —
+                 * labels 0x03 (enc) / 0x04 (auth, 20B) / 0x05 (salt),
+                 * str0m Derived::aes_128_cm_sha1_80. TX rides the
+                 * CLIENT halves km[0..16)/km[32..46), RX the server
+                 * halves km+16/km+46 (the same split the SRTP receive
+                 * session above uses). All six derivations must
+                 * succeed or the plane stays honestly disarmed. */
+                if (as->srtp_derived) {
+                    int ok = 1;
+                    ok &= kn_srtp_kdf128(km, km + 32, 14,
+                            KN_SRTCP_LABEL_KEY, as->srtcp_tx_enc, 16) == 0;
+                    ok &= kn_srtp_kdf128(km, km + 32, 14,
+                            KN_SRTCP_LABEL_AUTH, as->srtcp_tx_auth, 20) == 0;
+                    ok &= kn_srtp_kdf128(km, km + 32, 14,
+                            KN_SRTCP_LABEL_SALT, as->srtcp_tx_salt, 14) == 0;
+                    ok &= kn_srtp_kdf128(km + 16, km + 46, 14,
+                            KN_SRTCP_LABEL_KEY, as->srtcp_rx_enc, 16) == 0;
+                    ok &= kn_srtp_kdf128(km + 16, km + 46, 14,
+                            KN_SRTCP_LABEL_AUTH, as->srtcp_rx_auth, 20) == 0;
+                    ok &= kn_srtp_kdf128(km + 16, km + 46, 14,
+                            KN_SRTCP_LABEL_SALT, as->srtcp_rx_salt, 14) == 0;
+                    if (ok) {
+                        as->srtcp_derived = 1;
+                        as->srtcp_tx_index = 0;   /* RFC 3711: zero before
+                                                     the first packet */
+                        kn_srtp_replay_init(&as->srtcp_replay);
+                        kn_twcc_init(&as->twcc);
+                        as->next_twcc_ms = 0;     /* fire on first tick */
+                        as->next_pli_ms = 0;
+                    }
+                }
             }
             memset(km, 0, sizeof km);       /* scrub (§7) */
             printf("{\"mode\":\"session\",\"event\":\"webrtc_srtp_arm\","
-                   "\"derived\":%d,\"profile\":%u}\n",
-                   as->srtp_derived, as->srtp_profile);
+                   "\"derived\":%d,\"srtcp\":%d,\"profile\":%u}\n",
+                   as->srtp_derived, as->srtcp_derived, as->srtp_profile);
+            fflush(stdout);
+            printf("{\"mode\":\"session\",\"event\":\"webrtc_rtcp_arm\","
+                   "\"armed\":%d,\"video_ssrc_hint\":%u,"
+                   "\"pt_audio\":%u,\"pt_video\":%u,\"t_ms\":%llu}\n",
+                   as->srtcp_derived, as->video_ssrc_hint,
+                   as->pt_audio, as->pt_video,
+                   as->t0 ? (unsigned long long)(kn_sock_now_ms() -
+                        (uint64_t)as->t0) : 0ull);
             fflush(stdout);
         } else if (drc < 0) {
             kn_dtls_stats ds;
@@ -7874,6 +8059,345 @@ static void sess_webrtc_sctp_tick(webrtc_answer_state *as)
     }
 }
 
+/* ===================== slice 5l (B4.5): the RTCP feedback plane ==========
+ * runB5a's read: control plane UP (hs_seen:1 ver:3 sid:2, dc_ack {0,2,4}),
+ * video dark, and 601 opaque media_other packets (~14/s) on the wire. The
+ * three-way ground truth (OpenNOW webrtc/mod.rs:830 keyframe watchdog +
+ * str0m session.rs feedback cadences + the browser dump) says the seat's
+ * encoder paces on RECEIVER FEEDBACK: TWCC every ~50 ms, RRs (video 1 s /
+ * audio 5 s with real LSR/DLSR once the seat's SRs are seen) and a
+ * keyframe request until video publishes. This block adds: SRTCP in
+ * (RFC 5761 demux + decrypt + compound walk + SR NTP cache), the feedback
+ * builders (kn_twcc / kn_rx_rtcp_rr / kn_rx_rtcp_pli -> kn_srtcp_protect_cm
+ * -> one reduced-size datagram each; the seat's offer carries a=rtcp-rsize
+ * and str0m sends no SDES, so single-packet RTCP is the reference shape),
+ * and the pacing tick the hb_duty calls every pass.
+ * ======================================================================== */
+
+/* One RTCP packet -> SRTCP protect (TX material, index +1 mod 2^31 per
+ * RFC 3711 p.15 — str0m protect_rtcp) -> one UDP datagram on the
+ * validated pair. kind: 0 = twcc, 1 = rr, 2 = pli. The buffer must hold
+ * len + 14 bytes (E||index + tag are appended in place). */
+static void sess_webrtc_rtcp_send(webrtc_answer_state *as, uint8_t *pkt,
+                                  size_t len, int kind)
+{
+    static const char *const kn_names[3] = { "twcc", "rr", "pli" };
+    size_t total = 0;
+    uint32_t index;
+
+    if (!as->srtcp_derived || len < 12) { ++as->rtcp_send_err; return; }
+    index = as->srtcp_tx_index;
+    if (kn_srtcp_protect_cm(pkt, len, index, as->srtcp_tx_enc,
+                            as->srtcp_tx_auth, as->srtcp_tx_salt,
+                            KN_SRTP_TAG_LEN_80, &total) != 0) {
+        ++as->rtcp_send_err;
+        return;
+    }
+    as->srtcp_tx_index = (index + 1u) & 0x7FFFFFFFu;
+    if (kn_sock_udp_sendto(&as->sock, as->dest_ip, as->dest_port,
+                           pkt, total) != KN_SOCK_OK) {
+        ++as->rtcp_send_err;
+        return;
+    }
+    ++as->rtcp_out;
+    if (kind == 0) ++as->twcc_out;
+    else if (kind == 1) ++as->rr_out;
+    else ++as->pli_out;
+    if (!as->first_rtcp_out_ms)
+        as->first_rtcp_out_ms = as->t0
+            ? (unsigned long long)(kn_sock_now_ms() - (uint64_t)as->t0)
+            : 0ull;
+    if (as->rtcp_out <= 8) {
+        char hx[41];
+        size_t i, hn = total < 20 ? total : 20;
+        for (i = 0; i < hn; ++i)
+            snprintf(hx + i * 2, 3, "%02x", pkt[i]);
+        hx[hn * 2 < sizeof hx ? hn * 2 : sizeof hx - 1] = '\0';
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_rtcp_out\","
+               "\"n\":%llu,\"kind\":\"%s\",\"index\":%u,\"len\":%llu,"
+               "\"t_ms\":%llu,\"head\":\"%s\"}\n",
+               as->rtcp_out, kn_names[kind & 3], index,
+               (unsigned long long)total,
+               as->t0 ? (unsigned long long)(kn_sock_now_ms() -
+                    (uint64_t)as->t0) : 0ull, hx);
+        fflush(stdout);
+    }
+}
+
+/* Inbound SRTCP: unprotect (tag FIRST — str0m unprotect_rtcp order),
+ * replay-check the 31-bit index, then walk the compound packet
+ * (RFC 3550 §6.4.1). SR senders' NTP timestamps land in the LSR/DLSR
+ * cache; the PT classes are counted (runB5a's 601 media_other packets
+ * finally get names). Evidence: the first 6 decrypted datagrams. */
+static void sess_webrtc_srtcp_in(webrtc_answer_state *as, uint8_t *pkt,
+                                 size_t dl, uint64_t now_ms)
+{
+    uint32_t index = 0;
+    int e = 0, rc;
+    size_t plain = 0, off;
+    unsigned pkt_n = 0;
+    char pts[48];
+    size_t ptso = 0;
+    uint64_t now_us;
+
+    ++as->rtcp_in;
+    if (!as->srtcp_derived) return;        /* counted, disarmed */
+    rc = kn_srtcp_unprotect_cm(pkt, dl, as->srtcp_rx_enc, as->srtcp_rx_auth,
+                               as->srtcp_rx_salt, KN_SRTP_TAG_LEN_80,
+                               &index, &e, &plain);
+    if (rc == 1) { ++as->rtcp_authfail; return; }
+    if (rc != 0) { ++as->rtcp_bad; return; }
+    if (kn_srtp_replay_check(&as->srtcp_replay, (uint64_t)index) != 0) {
+        ++as->rtcp_replayed;
+        return;
+    }
+    kn_srtp_replay_commit(&as->srtcp_replay, (uint64_t)index);
+    ++as->rtcp_ok;
+    if (!as->first_rtcp_ok_ms)
+        as->first_rtcp_ok_ms = as->t0
+            ? (unsigned long long)(now_ms - (uint64_t)as->t0) : 0ull;
+    now_us = kn_sock_now_us();
+    pts[0] = '\0';
+    for (off = 0; off + 4 <= plain && pkt_n < 8; ++pkt_n) {
+        unsigned pt = pkt[off + 1];
+        size_t blen = (((size_t)pkt[off + 2] << 8 | pkt[off + 3]) + 1u) * 4u;
+        if ((pkt[off] & 0xC0) != 0x80 || blen < 4u || off + blen > plain)
+            break;                          /* malformed compound: stop */
+        switch (pt) {
+        case 200u:                          /* SR: cache NTP for LSR/DLSR */
+            if (blen >= 20u) {
+                uint32_t ssrc = ((uint32_t)pkt[off + 4] << 24) |
+                                ((uint32_t)pkt[off + 5] << 16) |
+                                ((uint32_t)pkt[off + 6] << 8) |
+                                (uint32_t)pkt[off + 7];
+                int si, free_i = -1;
+                for (si = 0; si < SESS_RR_MAX_SSRC; ++si) {
+                    if (as->sr_valid[si] && as->sr_ssrc[si] == ssrc) break;
+                    if (!as->sr_valid[si] && free_i < 0) free_i = si;
+                }
+                if (si == SESS_RR_MAX_SSRC) si = free_i;
+                if (si >= 0) {
+                    as->sr_valid[si] = 1;
+                    as->sr_ssrc[si] = ssrc;
+                    as->sr_ntp_msw[si] = ((uint32_t)pkt[off + 8] << 24) |
+                                         ((uint32_t)pkt[off + 9] << 16) |
+                                         ((uint32_t)pkt[off + 10] << 8) |
+                                         (uint32_t)pkt[off + 11];
+                    as->sr_ntp_lsw[si] = ((uint32_t)pkt[off + 12] << 24) |
+                                         ((uint32_t)pkt[off + 13] << 16) |
+                                         ((uint32_t)pkt[off + 14] << 8) |
+                                         (uint32_t)pkt[off + 15];
+                    as->sr_local_us[si] = now_us;
+                }
+            }
+            ++as->sr_in;
+            break;
+        case 201u: ++as->rr_in; break;      /* RR (about our streams) */
+        case 205u: ++as->fb_in; break;      /* RTPFB: TWCC/NACK/TMMBR */
+        case 206u: ++as->psfb_in; break;    /* PSFB: PLI/FIR/AFB */
+        default:   ++as->other_rtcp_in; break;  /* SDES/BYE/APP/XR */
+        }
+        if (ptso + 6 < sizeof pts) {
+            int w = snprintf(pts + ptso, sizeof pts - ptso, "%s%u",
+                             ptso ? "," : "", pt);
+            if (w > 0 && (size_t)w < sizeof pts - ptso)
+                ptso += (size_t)w;
+        }
+        off += blen;
+    }
+    if (as->rtcp_ok <= 6) {
+        char hx[65];
+        size_t i, hn = plain < 32 ? plain : 32;
+        for (i = 0; i < hn; ++i)
+            snprintf(hx + i * 2, 3, "%02x", pkt[i]);
+        hx[hn * 2 < sizeof hx ? hn * 2 : sizeof hx - 1] = '\0';
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_rtcp_in\","
+               "\"n\":%llu,\"index\":%u,\"e\":%d,\"plain\":%llu,"
+               "\"pkts\":\"%.46s\",\"t_ms\":%llu,\"head\":\"%s\"}\n",
+               as->rtcp_ok, index, e, (unsigned long long)plain, pts,
+               as->t0 ? (unsigned long long)(now_ms - (uint64_t)as->t0)
+                      : 0ull, hx);
+        fflush(stdout);
+    }
+}
+
+/* Feed one authenticated RTP packet into its ssrc's A.3 stats slot.
+ * Clock class from the FIRST PT seen: the offer's opus PT -> 48 kHz,
+ * everything else (H264/rtx/fec) -> 90 kHz. do_rr marks the media
+ * ssrcs (first PT == the offer's opus/H264 PT) — rtx/fec ssrcs are
+ * counted but never RR'd (str0m reports its media streams). */
+static void sess_rr_observe(webrtc_answer_state *as, uint32_t ssrc,
+                            unsigned pt, unsigned seq, uint64_t arrival_us)
+{
+    sess_rr_stats *s = NULL;
+    int i, free_i = -1;
+
+    for (i = 0; i < SESS_RR_MAX_SSRC; ++i) {
+        if (as->rr[i].used && as->rr[i].ssrc == ssrc) { s = &as->rr[i]; break; }
+        if (!as->rr[i].used && free_i < 0) free_i = i;
+    }
+    if (!s) {
+        if (free_i < 0) return;             /* table full: ignore */
+        s = &as->rr[free_i];
+        memset(s, 0, sizeof *s);
+        s->used = 1;
+        s->ssrc = ssrc;
+        s->clock = (as->pt_audio && pt == as->pt_audio) ? 48000u : 90000u;
+        s->do_rr = (as->pt_audio && pt == as->pt_audio) ||
+                   (as->pt_video && pt == as->pt_video);
+        s->bad_seq = SESS_RTP_SEQ_MOD + 1u;
+        s->next_rr_ms = kn_sock_now_ms();   /* first RR on the next tick */
+    }
+    if (!s->started) {
+        sess_rr_init_seq(s, seq);
+        s->started = 1;
+        s->bad_seq = (seq + 1u) & 0xFFFFu;
+        s->received = 1;
+        s->transit = (uint32_t)(arrival_us * (uint64_t)s->clock /
+                                1000000ull);
+        return;
+    }
+    if (sess_rr_update_seq(s, seq)) {
+        uint32_t transit = (uint32_t)(arrival_us * (uint64_t)s->clock /
+                                      1000000ull);
+        int32_t d = (int32_t)(transit - s->transit);
+        s->transit = transit;
+        if (d < 0) d = -d;
+        /* RFC 3550 A.8: jitter += d - ((jitter + 8) >> 4) */
+        s->jitter = (uint32_t)((int32_t)s->jitter + d -
+                               (((int32_t)s->jitter + 8) >> 4));
+        ++s->received;
+    }
+}
+
+/* Extract the transport-wide-cc sequence (one-byte header extension,
+ * id 3 / L=1 — runB5a's heads: bede0001 31 xx yy) from a DECRYPTED RTP
+ * packet and register the receipt. Two-byte-form extensions (0x100n)
+ * are not offered by the seat and are ignored. */
+static void sess_rtp_twcc_extract(webrtc_answer_state *as,
+                                  const uint8_t *pkt, size_t plain_len,
+                                  uint64_t arrival_us)
+{
+    unsigned cc;
+    size_t xoff, xend, e;
+    uint16_t prof, xlen;
+
+    if (plain_len < 12 || !(pkt[0] & 0x10)) return;      /* no X bit */
+    cc = pkt[0] & 0x0Fu;
+    xoff = 12u + 4u * (size_t)cc;
+    if (plain_len < xoff + 4u) return;
+    prof = (uint16_t)(((uint16_t)pkt[xoff] << 8) | pkt[xoff + 1]);
+    if (prof != 0xBEDEu) return;                          /* one-byte only */
+    xlen = (uint16_t)((((uint16_t)pkt[xoff + 2] << 8) | pkt[xoff + 3]) * 4u);
+    xend = xoff + 4u + (size_t)xlen;
+    if (xend > plain_len) xend = plain_len;
+    for (e = xoff + 4u; e < xend; ) {
+        unsigned id, l;
+        if (pkt[e] == 0) { ++e; continue; }               /* padding */
+        id = (unsigned)(pkt[e] >> 4);
+        l = (unsigned)(pkt[e] & 0x0Fu) + 1u;
+        if (id == 15u) break;                             /* reserved */
+        if (e + 1u + l > xend) break;
+        if (id == 3u && l >= 2u) {                        /* transport-cc */
+            uint16_t tseq = (uint16_t)(((uint16_t)pkt[e + 1] << 8) |
+                                       pkt[e + 2]);
+            kn_twcc_record(&as->twcc, tseq, arrival_us);
+            return;
+        }
+        e += 1u + l;
+    }
+}
+
+/* The periodic sender, called from hb_duty every pass once armed:
+ *   TWCC  50 ms  (nvst QOS_REPORT_INTERVAL :19 / str0m's default
+ *                 feedback interval; media ssrc = the first remote
+ *                 ssrc seen — str0m fills the first remote media ssrc)
+ *   RR    1 s video-class / 5 s audio-class (str0m cadences), with
+ *                 LSR/DLSR post-patched from the SR cache
+ *   PLI   1 s until the first video packet (OpenNOW webrtc/mod.rs:830
+ *                 keyframe watchdog — the probe's browser-parity choice)
+ * Pacing uses the file's now-vs-next idiom (int64 difference), so a
+ * tick that overruns fires immediately and re-arms. */
+static void sess_webrtc_rtcp_tick(webrtc_answer_state *as)
+{
+    static uint8_t buf[1232];        /* <= 1200 report + 4 E/i + 10 tag */
+    uint64_t now, now_us;
+    int i;
+
+    if (!as->active || !as->srtcp_derived || !as->dtls_ready ||
+        !as->dest_ip)
+        return;
+    now = kn_sock_now_ms();
+    now_us = kn_sock_now_us();
+
+    if ((int64_t)(now - as->next_twcc_ms) >= 0) {
+        as->next_twcc_ms = now + SESS_QOS_INTERVAL_MS;
+        if (as->first_ssrc && kn_twcc_has_unreported(&as->twcc)) {
+            size_t n = kn_twcc_build(&as->twcc, SESS_RTCP_SENDER_SSRC,
+                                     as->first_ssrc, buf, 1200);
+            if (n) sess_webrtc_rtcp_send(as, buf, n, 0);
+        }
+    }
+
+    for (i = 0; i < SESS_RR_MAX_SSRC; ++i) {
+        sess_rr_stats *s = &as->rr[i];
+        uint64_t iv;
+        if (!s->used || !s->started || !s->do_rr) continue;
+        iv = (s->clock == 48000u) ? 5000ull : 1000ull;
+        if ((int64_t)(now - s->next_rr_ms) < 0) continue;
+        s->next_rr_ms = now + iv;
+        {
+            /* RFC 3550 A.3 report block math */
+            uint32_t ext_max = s->cycles + s->max_seq;
+            uint32_t expected = ext_max - s->base_seq + 1u;
+            uint32_t expected_iv = expected - (uint32_t)s->expected_prior;
+            uint64_t received_iv;
+            int32_t cum;
+            unsigned frac = 0;
+            int si;
+            s->expected_prior = expected;
+            received_iv = s->received - s->received_prior;
+            s->received_prior = s->received;
+            cum = (int32_t)(int64_t)(expected - (uint32_t)s->received);
+            if (expected_iv > 0u && (uint64_t)expected_iv > received_iv)
+                frac = 255u * (expected_iv - (uint32_t)received_iv) /
+                       expected_iv;
+            kn_rx_rtcp_rr(SESS_RTCP_SENDER_SSRC, s->ssrc,
+                          (uint8_t)(frac & 0xFFu), cum, ext_max,
+                          s->jitter >> 4, buf);
+            /* LSR/DLSR: kn_rx_rtcp_rr writes zeros (nvst's RTCP rode
+             * SCTP with no NTP exchange); WE see the seat's SRs, so
+             * post-patch the RFC 3550 §6.4.1 values: LSR = the middle
+             * 32 bits of the last SR's NTP timestamp, DLSR = its age
+             * in 1/65536 s. Absent an SR both stay 0 (legal). */
+            for (si = 0; si < SESS_RR_MAX_SSRC; ++si)
+                if (as->sr_valid[si] && as->sr_ssrc[si] == s->ssrc) break;
+            if (si < SESS_RR_MAX_SSRC && now_us > as->sr_local_us[si]) {
+                uint32_t lsr = ((as->sr_ntp_msw[si] & 0xFFFFu) << 16) |
+                               (as->sr_ntp_lsw[si] >> 16);
+                uint32_t dlsr = (uint32_t)((now_us - as->sr_local_us[si]) *
+                                           65536ull / 1000000ull);
+                buf[24] = (uint8_t)(lsr >> 24);
+                buf[25] = (uint8_t)(lsr >> 16);
+                buf[26] = (uint8_t)(lsr >> 8);
+                buf[27] = (uint8_t)lsr;
+                buf[28] = (uint8_t)(dlsr >> 24);
+                buf[29] = (uint8_t)(dlsr >> 16);
+                buf[30] = (uint8_t)(dlsr >> 8);
+                buf[31] = (uint8_t)dlsr;
+            }
+            sess_webrtc_rtcp_send(as, buf, 32, 1);
+        }
+    }
+
+    if (!as->video_in && as->video_ssrc_hint &&
+        (int64_t)(now - as->next_pli_ms) >= 0) {
+        as->next_pli_ms = now + SESS_RR_INTERVAL_MS;
+        kn_rx_rtcp_pli(SESS_RTCP_SENDER_SSRC, as->video_ssrc_hint, buf);
+        sess_webrtc_rtcp_send(as, buf, 12, 2);
+    }
+}
+
 /* One UDP datagram classification step for the B2 linger loop: STUN
  * binding requests (the server's ICE checks at us), STUN responses to
  * our own checks, DTLS records (would mean the server already trusts
@@ -8027,6 +8551,17 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
                 fflush(stdout);
             }
         } else if (as->dtls_ready && dl >= 12 &&
+                   (upkt[0] & 0xC0) == 0x80 &&
+                   upkt[1] >= 192 && upkt[1] <= 223) {
+            /* Slice 5l: RFC 5761 demux — V=2 and the second byte in the
+             * RTCP PT range (192..223: 200 SR, 201 RR, 205 RTPFB,
+             * 206 PSFB) => inbound SRTCP. The offer's RTP PTs
+             * (63 red / 96..111 video+audio) never land in that range,
+             * so the ambiguity RFC 5761 §4 warns about does not exist
+             * in this session. runB5a's 601 media_other packets (~14/s)
+             * were these — opaque until now. */
+            sess_webrtc_srtcp_in(as, upkt, dl, now);
+        } else if (as->dtls_ready && dl >= 12 &&
                    (upkt[0] & 0xC0) == 0x80) {
             /* Slice 5g (B3): SRTP/SRTCP on the validated pair. The
              * receive session came from EXTRACTOR-dtls_srtp;
@@ -8059,6 +8594,33 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
                     as->first_pt = rtp.pt;
                     as->first_ssrc = rtp.ssrc;
                     as->first_seq = rtp.seq;
+                }
+                /* Slice 5l: the feedback plane's three inputs. Video
+                 * class = the offer's dynamic video PT range (96..107:
+                 * H264/rtx/flexfec/AV1/H265 — audio is 63/111, far
+                 * outside); the first video packet is the slice's
+                 * scoring readout and gets its own event line. */
+                if (rtp.pt >= 96u && rtp.pt <= 107u) {
+                    ++as->video_in;
+                    if (!as->first_video_ms) {
+                        as->first_video_ms = as->t0
+                            ? (unsigned long long)(now - (uint64_t)as->t0)
+                            : 0ull;
+                        as->first_video_pt = rtp.pt;
+                        as->first_video_seq = rtp.seq;
+                        as->first_video_ssrc = rtp.ssrc;
+                        printf("{\"mode\":\"session\",\"event\":"
+                               "\"webrtc_video_first\",\"pt\":%u,"
+                               "\"ssrc\":%u,\"seq\":%u,\"t_ms\":%llu}\n",
+                               rtp.pt, rtp.ssrc, rtp.seq,
+                               as->first_video_ms);
+                        fflush(stdout);
+                    }
+                }
+                {
+                    uint64_t now_us = kn_sock_now_us();
+                    sess_rr_observe(as, rtp.ssrc, rtp.pt, rtp.seq, now_us);
+                    sess_rtp_twcc_extract(as, upkt, plain, now_us);
                 }
             } else if (urc == KN_RX_DROP_AUTH_FAILED) {
                 ++as->media_authfail;
@@ -8233,7 +8795,12 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
     while (!g_knv_stop && kn_sock_now_ms() < deadline) {
         int op = 0, jrc;
         size_t len = 0;
-        jrc = kn_ws_recv_msg(&wsc, 250, &op, &len);
+        /* Slice 5l: once SRTCP is armed the duty loop paces the RTCP
+         * feedback plane (TWCC wants a ~50 ms cadence), so the recv
+         * timeout tightens 250 -> 25 ms. Pre-arm the 250 ms measured
+         * right (hb cadence, nothing tight to do). */
+        jrc = kn_ws_recv_msg(&wsc, as.srtcp_derived ? 25u : 250u,
+                             &op, &len);
         if (jrc == KN_WS_ERR_TIMEOUT) {
             /* resumable — fall through to the heartbeat duty */
         } else if (jrc == KN_WS_ERR_CLOSED) {
@@ -8499,6 +9066,10 @@ hb_duty:
         sess_webrtc_sctp_tick(&as);         /* slice 5i: B4 datachannel —
                                              * arms on dtls_ready, drains
                                              * the app ring every pass */
+        sess_webrtc_rtcp_tick(&as);         /* slice 5l: B4.5 feedback —
+                                             * TWCC 50ms / RR 1s+5s /
+                                             * PLI 1s pre-video, armed on
+                                             * srtcp_derived */
         if (kn_sock_now_ms() - hb_at >= 5000u) {
             if (kn_ws_send_text(&wsc, "{\"hb\":1}", 8) == KN_WS_OK)
                 ++hb_sent;
@@ -8531,6 +9102,34 @@ hb_duty:
         fflush(stdout);
         kn_sctp_close(as.sctp);
         as.sctp = NULL;
+    }
+    {   /* slice 5l: the RTCP feedback plane's evidence line — the
+         * counters the verdict summary does not carry (in-side PT
+         * classes, replay/auth rejects, the TWCC register's health).
+         * Printed unconditionally: srtcp:0 with zeroes IS the honest
+         * readout when the plane never armed. */
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_rtcp_final\","
+               "\"srtcp\":%d,\"in\":%llu,\"ok\":%llu,\"authfail\":%llu,"
+               "\"bad\":%llu,\"replayed\":%llu,\"sr\":%llu,\"rr\":%llu,"
+               "\"fb\":%llu,\"psfb\":%llu,\"other\":%llu,"
+               "\"first_in_ms\":%llu,\"out\":%llu,\"twcc_out\":%llu,"
+               "\"rr_out\":%llu,\"pli_out\":%llu,\"send_err\":%llu,"
+               "\"first_out_ms\":%llu,\"twcc_rec\":%llu,"
+               "\"twcc_dup\":%llu,\"twcc_late\":%llu,\"twcc_old\":%llu,"
+               "\"twcc_evict\":%llu,\"twcc_trunc\":%llu,"
+               "\"twcc_reports\":%lu,\"video_in\":%llu,"
+               "\"first_video_ms\":%llu}\n",
+               as.srtcp_derived, as.rtcp_in, as.rtcp_ok, as.rtcp_authfail,
+               as.rtcp_bad, as.rtcp_replayed, as.sr_in, as.rr_in,
+               as.fb_in, as.psfb_in, as.other_rtcp_in,
+               as.first_rtcp_ok_ms, as.rtcp_out, as.twcc_out,
+               as.rr_out, as.pli_out, as.rtcp_send_err,
+               as.first_rtcp_out_ms, as.twcc.recorded,
+               as.twcc.dup_ignored, as.twcc.late_dropped,
+               as.twcc.old_time_dropped, as.twcc.evicted,
+               as.twcc.reports_truncated, as.twcc.generated_reports,
+               as.video_in, as.first_video_ms);
+        fflush(stdout);
     }
     if (as.dtls) {                          /* slice 5g: the DTLS object
                                              * borrows sock+cert, so it
@@ -8618,7 +9217,12 @@ hb_duty:
                "\"sctp_armed\":%d,\"sctp_up\":%d,\"sctp_ms\":%llu,"
                "\"dc_opened\":%u,\"dc_acked\":%u,\"peer_opened\":%u,"
                "\"peer_acked\":%u,\"sctp_msgs_in\":%llu,\"hs_seen\":%d,"
-               "\"hs_ver\":%u,\"first_hs_ms\":%llu}\n",
+               "\"hs_ver\":%u,\"first_hs_ms\":%llu,"
+               "\"srtcp\":%d,\"rtcp_ok\":%llu,\"rtcp_out\":%llu,"
+               "\"twcc_out\":%llu,\"rr_out\":%llu,\"pli_out\":%llu,"
+               "\"rtcp_send_err\":%llu,\"first_rtcp_in_ms\":%llu,"
+               "\"first_rtcp_out_ms\":%llu,\"video_in\":%llu,"
+               "\"first_video_ms\":%llu,\"first_video_pt\":%u}\n",
                as.sent, as.cand_sent, as.cert_src ? as.cert_src : "?",
                as.local_ip, as.local_port,
                as.acks_in, cands, as.stun_in, as.dtls_in, as.other_in,
@@ -8639,7 +9243,11 @@ hb_duty:
                as.sctp_armed, as.sctp_up, as.sctp_up_ms,
                as.dc_opened, as.dc_acked, as.peer_opened,
                as.peer_acked, as.sctp_msgs_in, as.hs_seen,
-               as.hs_ver, as.first_hs_ms);
+               as.hs_ver, as.first_hs_ms,
+               as.srtcp_derived, as.rtcp_ok, as.rtcp_out,
+               as.twcc_out, as.rr_out, as.pli_out, as.rtcp_send_err,
+               as.first_rtcp_ok_ms, as.first_rtcp_out_ms,
+               as.video_in, as.first_video_ms, as.first_video_pt);
         fflush(stdout);
     }
     fflush(stdout);

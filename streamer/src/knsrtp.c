@@ -328,6 +328,108 @@ void kn_srtp_replay_commit(kn_srtp_replay *w, uint64_t index)
     }
 }
 
+/* ======================= phase 2b: SRTCP over CM =========================
+ * Contract + provenance in knsrtp.h (str0m crypto/srtp.rs ground truth).
+ * ======================================================================== */
+
+void kn_srtcp_iv(const uint8_t session_salt[14], uint32_t ssrc,
+                 uint32_t srtcp_index, uint8_t out[16])
+{
+    if (!session_salt || !out) return;
+    memset(out, 0, 16);
+    memcpy(out, session_salt, 14);          /* k_s * 2^16 */
+    xor_be32(out + 4, ssrc);                /* SSRC * 2^64   -> [4..8)  */
+    xor_be32(out + 10, srtcp_index);        /* i * 2^16      -> [10..14) */
+}
+
+int kn_srtcp_auth_tag(const uint8_t auth_key[20],
+                      const uint8_t *packet, size_t auth_len,
+                      size_t tag_len, uint8_t mac_out[20])
+{
+    kn_hmac_sha1_ctx ctx;
+    if (!auth_key || !mac_out || !tag_len_valid(tag_len)) return -1;
+    if (!packet && auth_len) return -1;
+    /* MAC input = the whole packet INCLUDING the E/index field, NO roc
+     * (str0m rtcp_hmac: sha1_hmac(key, [buf[0..hmac_index]])). */
+    kn_hmac_sha1_init(&ctx, auth_key, 20);
+    kn_hmac_sha1_update(&ctx, packet, auth_len);
+    kn_hmac_sha1_final(&ctx, mac_out);
+    return 0;
+}
+
+int kn_srtcp_protect_cm(uint8_t *packet, size_t plain_len,
+                        uint32_t srtcp_index,
+                        const uint8_t enc_key[16],
+                        const uint8_t auth_key[20],
+                        const uint8_t session_salt[14], size_t tag_len,
+                        size_t *out_total)
+{
+    uint8_t iv[16], mac[20], ei[4];
+    uint32_t ssrc;
+    if (!packet || !enc_key || !auth_key || !session_salt || !out_total)
+        return -1;
+    if (!tag_len_valid(tag_len)) return -1;
+    if (plain_len < 12u) return -1;         /* header+ssrc+length word min */
+    if (srtcp_index & 0x80000000u) return -1;   /* 31-bit index only */
+
+    ssrc = ((uint32_t)packet[4] << 24) | ((uint32_t)packet[5] << 16) |
+           ((uint32_t)packet[6] << 8) | (uint32_t)packet[7];
+    kn_srtcp_iv(session_salt, ssrc, srtcp_index, iv);
+    /* [0..8) stays plaintext (V/P/RC/PT/length + sender SSRC, §3.4) */
+    kn_srtp_aes_cm_keystream_xor(enc_key, iv, 0, packet + 8, plain_len - 8u);
+    ei[0] = (uint8_t)(0x80u | (srtcp_index >> 24));   /* E = 1 (encrypted) */
+    ei[1] = (uint8_t)(srtcp_index >> 16);
+    ei[2] = (uint8_t)(srtcp_index >> 8);
+    ei[3] = (uint8_t)srtcp_index;
+    memcpy(packet + plain_len, ei, 4);
+    if (kn_srtcp_auth_tag(auth_key, packet, plain_len + 4u, tag_len,
+                          mac) != 0)
+        return -1;
+    memcpy(packet + plain_len + 4u, mac, tag_len);
+    *out_total = plain_len + 4u + tag_len;
+    return 0;
+}
+
+int kn_srtcp_unprotect_cm(uint8_t *packet, size_t total_len,
+                          const uint8_t enc_key[16],
+                          const uint8_t auth_key[20],
+                          const uint8_t session_salt[14], size_t tag_len,
+                          uint32_t *out_index, int *out_e,
+                          size_t *out_plain_len)
+{
+    uint8_t iv[16], mac[20];
+    uint32_t ssrc, ei, index;
+    size_t auth_len, plain_len;
+    if (!packet || !enc_key || !auth_key || !session_salt ||
+        !out_index || !out_e || !out_plain_len)
+        return -1;
+    if (!tag_len_valid(tag_len)) return -1;
+    if (total_len < 8u + 4u + tag_len) return -1;
+    auth_len = total_len - tag_len;
+    /* verify FIRST over everything but the tag — on failure nothing is
+     * decrypted and the payload stays garbage (the nvst/str0m order) */
+    if (kn_srtcp_auth_tag(auth_key, packet, auth_len, tag_len, mac) != 0)
+        return -1;
+    if (!kn_ct_memeq(mac, packet + auth_len, tag_len)) return 1;
+    ei = ((uint32_t)packet[auth_len - 4u] << 24) |
+         ((uint32_t)packet[auth_len - 3u] << 16) |
+         ((uint32_t)packet[auth_len - 2u] << 8) |
+         (uint32_t)packet[auth_len - 1u];
+    index = ei & 0x7FFFFFFFu;
+    *out_e = (ei & 0x80000000u) ? 1 : 0;
+    *out_index = index;
+    plain_len = auth_len - 4u;
+    *out_plain_len = plain_len;
+    if (*out_e) {
+        ssrc = ((uint32_t)packet[4] << 24) | ((uint32_t)packet[5] << 16) |
+               ((uint32_t)packet[6] << 8) | (uint32_t)packet[7];
+        kn_srtcp_iv(session_salt, ssrc, index, iv);
+        kn_srtp_aes_cm_keystream_xor(enc_key, iv, 0, packet + 8,
+                                     plain_len - 8u);
+    }
+    return 0;
+}
+
 /* ============================ phase 3 ====================================
  * AES-256 CM/KDF + AES-GCM via mbedTLS (see knsrtp.h phase-3 block for
  * provenance). Bare builds: honest NO_BACKEND stubs, zero fake crypto.

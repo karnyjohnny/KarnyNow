@@ -8,6 +8,9 @@
  *     auth key (0x01) across six counter blocks with last-block truncation
  *   - cross-implementation goldens (Python reference, nvst.rs semantics):
  *     20B auth key, SRTCP key (0x03), SRTCP salt (0x05), all three IV builders
+ *   - phase 2b SRTCP-CM (slice 5l): RFC 3711 §4.1.1/§4.2.1 semantics,
+ *     cross-checked against str0m rtp/srtp.rs:464-620 (labels 0x03/0x04/0x05,
+ *     protect/unprotect goldens incl. max index, tag4 and E=0 cases)
  * Runs on Linux host and Win7 target. */
 #include "kn/kn_aes.h"
 #include "kn/kn_sha1.h"
@@ -51,7 +54,7 @@ static void test_b2_keystream(void)
 static void test_b3_kdf(void)
 {
     uint8_t ck[16], cs[14], blk[16], auth[K_KAT_B3_AUTH_KEY_LEN];
-    uint8_t a20[20], skey[16], ssalt[14];
+    uint8_t a20[20], skey[16], ssalt[14], rauth[20];
 
     CHECK(kn_srtp_kdf128(k_kat_b3_master, k_kat_b3_salt, 14,
                          KN_SRTP_LABEL_CIPHER_KEY, ck, 16) == 0 &&
@@ -86,6 +89,10 @@ static void test_b3_kdf(void)
                          KN_SRTCP_LABEL_SALT, ssalt, 14) == 0 &&
           memcmp(ssalt, k_kat_srtcp_salt, 14) == 0,
           "SRTCP salt (label 0x05, cross-impl)");
+    CHECK(kn_srtp_kdf128(k_kat_b3_master, k_kat_b3_salt, 14,
+                         KN_SRTCP_LABEL_AUTH, rauth, 20) == 0 &&
+          memcmp(rauth, k_kat_srtcp_auth, 20) == 0,
+          "SRTCP auth key (label 0x04, str0m-only cross-impl)");
 
     /* 12-byte salt path (GCM profiles derive from 12B master salt) */
     CHECK(kn_srtp_kdf128(k_kat_b3_master, k_kat_b3_salt, 12,
@@ -127,6 +134,18 @@ static void test_iv_builders(void)
 
     kn_srtcp_gcm_iv(k_kat_iv_salt12, K_KAT_IV_SSRC, K_KAT_SRTCP_INDEX, sg);
     CHECK(memcmp(sg, k_kat_iv_srtcp_gcm, 12) == 0, "SRTCP GCM IV (RFC 7714 9.2)");
+
+    /* SRTCP AES-CM IV — RFC 3711 §4.1.1 (k_s*2^16)^(SSRC*2^64)^(i*2^16) */
+    kn_srtcp_iv(k_kat_iv_salt14, K_KAT_IV_SSRC, K_KAT_IV_SRTCP_CM_INDEX, iv);
+    CHECK(memcmp(iv, k_kat_iv_srtcp_cm, 16) == 0,
+          "SRTCP CM IV (RFC 3711 4.1.1 / str0m rtp_iv)");
+    memset(z14, 0, sizeof z14);
+    kn_srtcp_iv(z14, 0xAABBCCDDu, 0x01020304u, iv);
+    CHECK(iv[4] == 0xAA && iv[5] == 0xBB && iv[6] == 0xCC && iv[7] == 0xDD,
+          "srtcp IV ssrc placement [4..8)");
+    CHECK(iv[10] == 0x01 && iv[11] == 0x02 && iv[12] == 0x03 && iv[13] == 0x04 &&
+          iv[8] == 0 && iv[9] == 0 && iv[14] == 0 && iv[15] == 0,
+          "srtcp IV 31-bit index placement [10..14)");
 
     /* structural placement with zero salt: ssrc at [4..8), index48 at [8..14) */
     memset(z14, 0, sizeof z14);
@@ -389,6 +408,100 @@ static void test_replay_edges(void)
           "out-of-window commit did not corrupt the window");
 }
 
+/* ---- phase 2b: SRTCP-CM goldens (RFC 3711 §4.1.1/§4.2.1 + str0m rtp/
+ * srtp.rs:464-620 cross-impl; python reference self-checks the IV formula
+ * two independent ways before emitting — see tools/srtp_reference.py) ---- */
+
+static void test_srtcp_cm(void)
+{
+    uint8_t buf[128];
+    int i;
+
+    for (i = 0; i < K_KAT_SRTCP_NCASES; ++i) {
+        const uint8_t *plain = k_kat_srtcp_blob + k_kat_srtcp_plain_off[i];
+        const uint8_t *expect = k_kat_srtcp_blob + k_kat_srtcp_prot_off[i];
+        unsigned plen = k_kat_srtcp_plain_len[i];
+        unsigned tlen = k_kat_srtcp_total_len[i];
+        unsigned tag_len = k_kat_srtcp_tag_len[i];
+        char name[96];
+        int rc, e = -1;
+        uint32_t idx = 0;
+        size_t out_len = 0;
+
+        /* protect: plain -> golden bytes. Case "e0" is SKIPPED by design:
+         * it is the E=0 receive-tolerance golden (str0m unprotect_rtcp
+         * returns the authenticated plaintext without decrypting); no
+         * compliant sender emits E=0, so C protect always sets E=1. */
+        if (k_kat_srtcp_e[i]) {
+            memcpy(buf, plain, plen);
+            rc = kn_srtcp_protect_cm(buf, plen, k_kat_srtcp_index[i],
+                                     k_kat_srtcp_key, k_kat_srtcp_auth,
+                                     k_kat_srtcp_salt, tag_len, &out_len);
+            snprintf(name, sizeof name,
+                     "srtcp protect case %d (plain %u tag %u)", i, plen,
+                     tag_len);
+            CHECK(rc == 0 && out_len == tlen &&
+                  memcmp(buf, expect, tlen) == 0, name);
+        }
+
+        /* unprotect: golden -> plain bytes, index/E/len reported */
+        memcpy(buf, expect, tlen);
+        rc = kn_srtcp_unprotect_cm(buf, tlen, k_kat_srtcp_key,
+                                   k_kat_srtcp_auth, k_kat_srtcp_salt,
+                                   tag_len, &idx, &e, &out_len);
+        snprintf(name, sizeof name, "srtcp unprotect case %d (e=%d)", i,
+                 (int)k_kat_srtcp_e[i]);
+        CHECK(rc == 0 && idx == k_kat_srtcp_index[i] &&
+              e == (int)k_kat_srtcp_e[i] && out_len == plen &&
+              memcmp(buf, plain, plen) == 0, name);
+    }
+
+    /* corruption: tag verified BEFORE decryption (str0m order) — a tag bit
+     * flip and a ciphertext bit flip must both fail with rc == 1 and leave
+     * the payload untouched (garbage-in-garbage-stays; caller scrubs). */
+    {
+        uint32_t idx; int e; size_t plen;
+        memcpy(buf, k_kat_srtcp_blob + k_kat_srtcp_prot_off[0],
+               k_kat_srtcp_total_len[0]);
+        buf[k_kat_srtcp_total_len[0] - 1] ^= 0x01;
+        CHECK(kn_srtcp_unprotect_cm(buf, k_kat_srtcp_total_len[0],
+                                    k_kat_srtcp_key, k_kat_srtcp_auth,
+                                    k_kat_srtcp_salt, 10, &idx, &e,
+                                    &plen) == 1,
+              "srtcp tag corruption -> AuthenticationFailed");
+        memcpy(buf, k_kat_srtcp_blob + k_kat_srtcp_prot_off[0],
+               k_kat_srtcp_total_len[0]);
+        buf[8] ^= 0x01;                         /* first ciphertext octet */
+        CHECK(kn_srtcp_unprotect_cm(buf, k_kat_srtcp_total_len[0],
+                                    k_kat_srtcp_key, k_kat_srtcp_auth,
+                                    k_kat_srtcp_salt, 10, &idx, &e,
+                                    &plen) == 1,
+              "srtcp ciphertext corruption -> AuthenticationFailed");
+    }
+
+    /* argument rejects */
+    {
+        uint32_t idx; int e; size_t plen, total;
+        memcpy(buf, k_kat_srtcp_blob + k_kat_srtcp_plain_off[1], 12);
+        CHECK(kn_srtcp_protect_cm(buf, 8, 1, k_kat_srtcp_key,
+                                  k_kat_srtcp_auth, k_kat_srtcp_salt, 10,
+                                  &total) == -1,
+              "srtcp protect plain_len < 12 -> -1");
+        CHECK(kn_srtcp_protect_cm(buf, 12, 0x80000000u, k_kat_srtcp_key,
+                                  k_kat_srtcp_auth, k_kat_srtcp_salt, 10,
+                                  &total) == -1,
+              "srtcp protect index with E bit set -> -1");
+        CHECK(kn_srtcp_protect_cm(buf, 12, 1, k_kat_srtcp_key,
+                                  k_kat_srtcp_auth, k_kat_srtcp_salt, 6,
+                                  &total) == -1,
+              "srtcp protect invalid tag_len -> -1");
+        CHECK(kn_srtcp_unprotect_cm(buf, 21, k_kat_srtcp_key,
+                                    k_kat_srtcp_auth, k_kat_srtcp_salt,
+                                    10, &idx, &e, &plen) == -1,
+              "srtcp unprotect shorter than 8+4+tag -> -1");
+    }
+}
+
 int main(void)
 {
     test_aes_blocks();
@@ -400,6 +513,7 @@ int main(void)
     test_hmac_kat();
     test_ct_memeq();
     test_p2_protect_unprotect();
+    test_srtcp_cm();
     test_replay_vectors();
     test_replay_edges();
     return kn_test_summary("test_knsrtp");
