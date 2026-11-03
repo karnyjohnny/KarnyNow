@@ -7381,3 +7381,171 @@ Patch `0005-slice-5g-b3-dtls-srtp.patch`, base = the operator's
 pushed 0004 HEAD on `poprawki-agenta`. Next: **runB3a**; then B3.5
 (`kn_rx_video` depacketization — decode the first NALUs, not just
 count them) and B4 (SCTP datachannel + input + media heartbeat).
+
+## 70. Slice 5h (B-TRACK, docs-only): **runB3a is a CLEAN PASS — the first DTLS handshake and the first authenticated media bytes in project history.** All six §69.4 oracle lines held on the first flight of the 5g code: arm at ice_ok+1 ms, handshake in **481 ms** (`pin_matched:1`, `verify:0`, DTLSv1.2, `TLS-ECDHE-ECDSA-WITH-AES-128-GCM-SHA256`), SRTP derived (`profile:1`), and **2306 SRTP-authenticated packets with ZERO auth failures** — the km+16/km+46 server-write halves + tag 10, proven on native audio, are now proven on the B-track against a live seat. The WS lived the full window again (`linger_ms:45078`). And the flight answered the next design question before we had to ask it: **the seat sent an SCTP INIT as app record #1 at ready+0 ms and no video ever arrived — B4 is the datachannel.**
+
+### 70.1 The flight (draw 1, 2026-11-03 ~13:12 local, Endfield, seat `80.250.98.39:5004`, T10 ALL PASS 89/0 with the kndtls REAL battery 39/0)
+
+Queue 71→0 (a real queue this time), ad NO-FILL again (empty
+`<VAST version="4.0"/>` → `VAST_NO_ADS_AFTER_WRAPPER` cancel — the
+B1-class path), seat `conn0_usage:14 alp:5`, WS 101, offer 3122 B /
+105 lines, answer 1421 B + nvstSdp 3710 B, `cert:"real"`, PTs from
+the offer: **video 96, rtx 97, audio 111**. Millisecond timeline
+(t = answer-sent):
+
+| t (ms) | event |
+|---|---|
+| 1 | first check at the 47998 m-line dummy (black-holed, by design) |
+| 372 | trickle candidate `80.250.98.39:5004 srflx` → `webrtc_stun_arm`, socket reconnected |
+| 1626 | authenticated SUCCESS → `ice_ok` (`inspect:1 mi:1`), mapped `10.222.254.5:62548` |
+| 1627 | the seat's 3 checks answered (`mi_key:"ours"`, username `DINe:bfe4c298`) — and `webrtc_dtls_arm armed:1` the SAME millisecond |
+| ~1627 | first inbound DTLS record: 654 B (ServerHello..ServerHelloDone flight; NO HelloVerifyRequest — the seat skipped the cookie exchange) |
+| ~2108 | `webrtc_dtls_ready ms:481` — 3 records out, 8 in; `first_app` = a 44-byte SCTP INIT (below); `webrtc_srtp_arm derived:1` |
+| 2357 | first authenticated media (`urc:0`, pt 111, ssrc 1, seq 9, plain 105) |
+| 3611…44818 | 9 consent refreshes at 5.15 s spacing, all answered |
+| 45078 | linger ends: `webrtc_answer_done` + `cm_cancel 200` (exit 1 = the known probe artifact) |
+
+Summary verdict block: `dtls_armed:1 dtls_ready:1 dtls_ms:481
+dtls_fail_rc:0 srtp_prof:1 srtp_derived:1 media_in:2884 media_ok:2306
+media_authfail:0 media_other:578 first_media_ms:2357 first_pt:111
+first_ssrc:1 first_seq:9` + the runB2c floor intact (`ice_ok:1`,
+`stun_bad:0`, full-window linger).
+
+### 70.2 The accounting CLOSES — every datagram is in exactly one bucket
+
+- **`other_in:9` = audio seq 0..8, which arrived BEFORE `dtls_ready`**
+  (the seat started streaming the instant its own Finished went out —
+  a race we cannot win and do not need to). The two logged heads
+  confirm it: `90ef0000…` = V2/X1, PT 111 + marker, seq 0; `906f0001…`
+  = seq 1. First authenticated = seq 9 at ready+249 ms. The honest
+  `other_in` bucket (§69.1(3)) did exactly its job: no fake drops, no
+  fake auths, and the sequence numbers prove nothing was lost between
+  the buckets.
+- **`media_ok:2306` ≈ 54.0/s over the 42.72 s post-ready window** —
+  the opus audio stream (PT 111, ssrc 1; a 20 ms cadence is 50/s, the
+  excess is start-up burst/jitter; payload-level reading is B3.5's
+  job, not the verdict's). Plain lengths 105/106 = wire 115/116 − tag
+  10 ✓.
+- **`media_other:578` ≈ 13.5/s — the SRTCP class** (RTCP SR/RR +
+  transport-cc feedback; the offer carries `extmap:3
+  transport-wide-cc`). RTCP-mux means they arrive 0x80-shaped, our
+  SRTP-only session rejects them as malformed/no-cipher, and they are
+  counted, not logged (the n≤8 failure budget had been spent on…
+  nothing — the first 8 media datagrams all authenticated, so zero
+  failure events printed; the counter is the evidence). B4 must decide
+  whether to answer TWCC/RR at all — the reference's rtcp behaviour is
+  the spec.
+- **`media_authfail:0` over 2306 packets** is the headline: the
+  F11 EXTRACTOR layout (server-write key km[16..32), salt km[46..60)),
+  profile 0x0001, tag 10 — derived from the native AUDIO track — is
+  correct for the B-track RECEIVE direction against a production
+  seat. One variable, one flight, confirmed.
+
+### 70.3 The SCTP INIT, decoded (the 44-byte `first_app`)
+
+`13881388 00000000 7409a4ac | 01 00 001e | 47069b6f 00500000 0080
+0080 b53078ba` + 12 bytes past the event's 32-byte head:
+
+| field | value |
+|---|---|
+| SCTP src/dst port | 5000 → 5000 (the WebRTC datachannel convention) |
+| verification tag | 0 (correct for INIT) |
+| chunk | 0x01 INIT, len 30 |
+| Initiate Tag | `0x47069b6f` (goes into our INIT-ACK) |
+| a_rwnd | 5,242,880 B |
+| outbound/inbound streams | 128 / 128 |
+| initial TSN | `0xb53078ba` |
+| tail | ~10 B optional param + padding — bytes 33..44 were NOT printed (the 5g event caps the head hex at 32 B; the MODULE captured up to `KN_DTLS_FIRST_APP_CAP` = 64, so the bytes existed in stats and were thrown away by the printer — B4 prints the full 64 and/or reads records via `kn_dtls_read_app`) |
+
+This is the seat asking for the datachannel **immediately** — app
+record #1, ready+0 ms, before a single media packet. Whether it
+retransmitted INIT during the 45 s (usrsctp would, at 1/2/4/8 s…) is
+UNMEASURED: stats were printed once at ready, the wire dump is
+TLS-plaintext-only (no UDP records), and kn_dtls drains app records
+into `app_records/app_bytes` counters nobody re-read. B4 adds the
+teardown stats line; the question is moot anyway once we answer INITs.
+
+### 70.4 The ICE delta vs runB2c is a finding, not a regression
+
+runB2c (no DTLS): the seat checked us **261** times (~6/s keepalive).
+runB3a: **3** checks, all at t≈1627, none after — the seat's ICE
+liveness duty collapses once the DTLS/SRTP session itself proves the
+peer alive. Our side held the 5.15 s consent cadence (stun_out 12 =
+3 punch + 9 consent), `stun_resp_in:9`, `stun_bad:0`. Mapped
+`10.222.254.5:62548` — the private-netns re-NAT of §66.6's corrected
+oracle reproduces on a third seat (`.39` after `.41`). B3 liveness
+math: the seat needs NO STUN from us post-DTLS; keep the consent
+cadence anyway (it is free and it is what a browser does).
+
+### 70.5 DECISION: B4 = the SCTP datachannel (and why it jumps the ladder)
+
+Evidence, in order of strength: (1) the seat sent INIT at ready+0 and
+we dropped it (by design — the B3 slice had no SCTP); (2) **zero video
+packets** (PT 96/97) in 42.7 s while audio flowed — the strongest
+available signal that video is gated on something we are not doing,
+and the only something the seat visibly asked for is the datachannel;
+(3) the reference flow agrees — nvst/OpenNOW: `Event::Connected →
+dtls_ready → start_sctp(true)` before media (the native tree's own
+comment, knvstd_main.c ~:5000); (4) `kn_sctp` already exists and was
+built for exactly this bridge: `kn_sctp_open(write_cb =
+kn_dtls_write_app)`, `kn_sctp_inject` fed from `kn_dtls_read_app`
+(its header says so verbatim), `kn_sctp_poll` with a message callback,
+DCEP builders/parsers (`dcep_open_build`/`dcep_ack_build`/`dcep_parse`)
+— and the rig HAS real usrsctp (T10: "PASS usrsctp source already
+present"); the sandbox stubs it (cross-check leg SKIPs, cmake builds
+the honest stub).
+
+B3.5 (kn_rx_video depacketization) is DEFERRED until video bytes
+exist — depacketizing zero packets is not a slice. Audio opus decode
+is not needed for any verdict either. **One variable for runB4a: the
+datachannel comes up (INIT-ACK → COOKIE-ECHO → COOKIE-ACK → DCEP open
+→ first nvst message) — with "video PT 96 appears" as the readout that
+tells us whether the gate hypothesis was right.** The card ships with
+the B4 code slice (the 5g pattern), not before.
+
+B4 recon list (next round, before touching code):
+1. `kn_dtls_read_app` semantics: does the rx ring HOLD app records
+   until read (bounded, `app_q_dropped` on overflow) or auto-drain?
+   The stats comment says "discarded", the header says "pop ONE
+   decrypted app record" — resolve in code, not from comments.
+2. `kn_sctp_open` vs `kn_sctp_open_peer`/`open_server`: which role
+   answers an inbound INIT (we are the DTLS client but the SCTP
+   INIT came FROM the seat — usrsctp role semantics matter here).
+3. The nvst datachannel protocol on top of DCEP (channel ids/labels,
+   the message dialect — heartbeat, input, `session present`): from
+   `gfn_ref_out/opennow_webrtc_ref/` + the 2026-11-02 web capture.
+4. usrsctp staging for the sandbox (SETUP §2.2 pins `c625e219`;
+   without it the sandbox gate can only prove compile+stub, and the
+   real SCTP battery runs on the rig's T10 — name that limit in the
+   gate canon if it stays).
+5. Teardown stats for dtls (app_records/app_bytes/app_q_dropped/
+   peer_closed) into `webrtc_answer_summary` — cheap, closes 70.3's
+   unmeasured.
+
+### 70.6 The handoff audit (operator's question: can a cold chat take over?)
+
+Asked and answered honestly this round: **before this patch, NO.**
+START-HERE's §2 reading order, §3 "Current state" and §4 "What to do
+next" were frozen at the native era (round M, 2026-10-29) — the
+binding continuity rule in the file's own header was not being honored
+by the B-track rounds, which appended §37–§43 at the end but never
+re-pointed the front. The patch delivery protocol (one `.patch`,
+`git am`, base chain, branch `poprawki-agenta`), the flight-card
+conventions and the evidence-repo workflow lived in agent session
+memory, not in the repo. Fixed in this patch: START-HERE grows **§44
+—the B-track handoff** (you-are-here, working protocol, reading path,
+known artifacts) with banners on §2/§3/§4 and corrected bullets in
+§5/§11. After this patch the answer is YES with a defined entry
+point: **START-HERE §44 first**, then the §44.4 reading path.
+
+### 70.7 This round's shape
+
+Docs-only: RTSP §70 (this), START-HERE §44 + the banners/bullet
+fixes, INTEGRATION slice 5h. No C, no build, no launcher change — the
+slice-5g gate canon stands verbatim, the rig needs NO rebuild for
+this patch. Patch `0006-slice-5h-runB3a-pass-b4-decision.patch`, base
+`c7617de` (the operator's pushed 5g). Evidence: karnyjohnny/
+karnynow-logs @ `86716ed` (runB3a/1 + T10), archived to the
+workspace's `priv-logs/runB3a` (plus the previously missing
+runB2a/runB2b archives — §11's rule, now whole). Next round: **B4
+code slice + the runB4a card.**
