@@ -7549,3 +7549,213 @@ karnynow-logs @ `86716ed` (runB3a/1 + T10), archived to the
 workspace's `priv-logs/runB3a` (plus the previously missing
 runB2a/runB2b archives — §11's rule, now whole). Next round: **B4
 code slice + the runB4a card.**
+
+## 71. Slice 5i (B-TRACK): **B4 SHIPS — the probe answers the seat's SCTP INIT and opens the WebRTC datachannel profile.** runB3a measured the seat firing a 44-byte INIT at ready+0 ms and no video arriving; this slice wires `kn_sctp` (vendored usrsctp, AF_CONN over the kn_dtls app ring) into the probe as the association RESPONDER, opens OpenNOW's three WebRTC channels on up, ACKs whatever the seat opens, watches for the reference's input handshake, and closes runB3a's measurement blind spots (post-ready app-ring counters). One file changed: `streamer/src/knvstd_main.c`. One flight variable: **the datachannel comes up** — with "does video PT 96 start" as the scoring readout.
+
+### 71.1 The role decision: RESPOND, never race
+
+runB3a's `first_app` settled a question the native track never faced:
+on the WebRTC path the SEAT initiates the SCTP association (INIT at
+ready+0, ports 5000/5000, tag `0x47069b6f`, OS/MIS 128/128, TSN
+`0xb53078ba`). The native path was the opposite (the client
+`start_sctp(true)`s — nvst.rs:8221 — and `kn_sctp_open` exists for
+exactly that). Racing our own INIT against the seat's would invoke
+RFC 4960 §5.2.1 collision resolution on the very flight whose single
+variable is "does the channel come up" — so the probe arms
+**`kn_sctp_open_server`** (bind+listen on 5000; `kn_sctp_poll`'s
+accept path takes the first association, and accept-returning IS the
+server-side COMM_UP — kn_sctp.c's own rule). Consequences, all
+spec-backed:
+
+- We are the DCEP **server** (RFC 8832 §5.1: the side that accepted
+  the association) → our OPENs use **ODD** stream ids (1/3/5), while
+  the native profile's even ids (0..14) belong to the initiator role.
+- The establishment transition is watched via `kn_sctp_established()`
+  in the tick, NOT via the event callback: the server-mode accept
+  deliberately does not up-call (the COMM_UP notification may fire
+  before the accepted socket is re-subscribed — the code says so), so
+  the callback route would be a coin flip. Client-mode COMM_LOST
+  still surfaces through `kn_sctp_poll`'s `KN_SCTP_ERR_LOST` return,
+  logged once with the stats corpse.
+- If a future seat does NOT INIT (behavior variance), the flight
+  reads `sctp_armed:1, sctp_up:0, pkts_in:0` + `dtls_final
+  app_records:0` — a named branch (71.6), and the initiator fallback
+  becomes the next slice's decision, made from that evidence, not
+  guessed now.
+
+### 71.2 The channel profile: the reference's THREE, not the native eight
+
+OpenNOW's WebRTC transport (transport_input.rs
+`InputChannels::create`) creates exactly three channels; the native
+`kn_sctp_nvst_channels[8]` (control/custom/cursor/rtcp…) is the
+Mjolnir profile and would be the wrong wire. The probe's table
+mirrors the reference's creation order, reliability mapping
+(str0m's `Reliability`→DCEP: ordered+reliable → `RELIABLE`,
+`MaxPacketLifetime{300}` → `TIMED`/300 unordered,
+`MaxRetransmits{0}` → `REXMIT`/0 unordered), priority 0 and the
+empty protocol string:
+
+| sid | label | ordered | DCEP type | rel |
+|---|---|---|---|---|
+| 1 | `stats_channel` | no | REXMIT\|0x80 | 0 |
+| 3 | `input_channel_v1` | yes | RELIABLE | 0 |
+| 5 | `input_channel_partially_reliable` | no | TIMED\|0x80 | 300 |
+
+(The `|0x80` is applied by `kn_sctp_dcep_open_build` from the def's
+`unordered` flag — the table carries plain types, like the native
+one.)
+
+### 71.3 What the code does (wire order)
+
+1. **NEW `sess_webrtc_sctp_tick`** at `hb_duty`, after the DTLS tick.
+   Arms once on `dtls_ready` (one-shot `webrtc_sctp_arm`; refusals:
+   `backend_unavailable` — the stub build says so loudly — or
+   `open_failed` + detail). Every pass: drain the kn_dtls app ring
+   (`kn_dtls_read_app` loop → `kn_sctp_inject` — the ring KEEPS
+   records until read, 8×2048 B, so the seat's ready+0 INIT is
+   waiting for us even though the arm happens a tick later) →
+   `kn_sctp_poll` (flushes tx through `sess_webrtc_sctp_write` =
+   `kn_dtls_write_app`, up-calls messages). On the establishment
+   transition (one-shot): `webrtc_sctp_up` (ms + t_ms) and the three
+   OPENs (`dc_opened` = the count the stack accepted).
+2. **`sess_webrtc_sctp_msg`** (the rx up-call): DCEP OPEN from the
+   seat → `webrtc_dc_peer_open` (sid/label/type/unordered/rel, first
+   8 — WHICH channels the WebRTC seat opens toward us is an open
+   runB3a question) + an ACK back (str0m's rule, the native callback
+   does the same) → `peer_acked`; DCEP ACK → `dc_acked`, one-shot
+   `webrtc_dc_open` when opened==acked; any other message →
+   `sctp_msgs_in` + the **input-handshake watch**: the reference's
+   readiness gate is the server's first bytes on `input_channel_v1`
+   — LE16 `526` (`0x0e 0x02`) with an optional LE16 version, or a
+   bare `0x0e`-prefixed pair — detected content-first (sid-agnostic,
+   robust to whatever sid the seat maps the label to), logged once as
+   `webrtc_input_hs` (sid/ppi/len/ver/t_ms); everything else gets a
+   bounded head hex (`webrtc_sctp_msg`, first 5).
+3. **Teardown gains two evidence lines and an order**:
+   `webrtc_sctp_final` (established/lost/assoc_state+error/errno/
+   pkts+bytes in-out/txq_dropped/msgs/sends/send_errors/notif) then
+   `kn_sctp_close` — BEFORE `webrtc_dtls_final`
+   (app_records/app_bytes/**app_q_dropped**/**peer_closed**/records/
+   polls — this closes recon point #5: runB3a printed app stats only
+   at ready, so whether the seat re-INITed or sent more app data was
+   unmeasured; runB4a measures it) then `kn_dtls_free` →
+   `kn_cert_free` → sock close (borrow order reversed, as before).
+4. **`webrtc_answer_summary` grows the B4 block**: `sctp_armed`,
+   `sctp_up`, `sctp_ms`, `dc_opened`, `dc_acked`, `peer_opened`,
+   `peer_acked`, `sctp_msgs_in`, `hs_seen`, `hs_ver`, `first_hs_ms`;
+   the verdict comment carries the §71.6 oracle shape.
+
+### 71.4 Event dictionary (new / grown this slice)
+
+- `webrtc_sctp_arm` — armed:1 (role:"responder", port:5000, t_ms) or
+  armed:0 + reason (+detail). One-shot.
+- `webrtc_sctp_up` — ms (open→accept), t_ms. One-shot.
+- `webrtc_dc_peer_open` — sid/label/type/unordered/rel (first 8).
+- `webrtc_dc_open` — opened/acked/peer_opened/t_ms. One-shot at
+  opened==acked.
+- `webrtc_input_hs` — sid/ppi/len/ver/t_ms. One-shot.
+- `webrtc_sctp_msg` — n/sid/ppi/len/head (first 5 non-DCEP,
+  non-handshake messages).
+- `webrtc_sctp_down` — cause (named via `kn_sctp_assoc_state_name`),
+  assoc_state/error, errno, counters, t_ms. One-shot.
+- `webrtc_sctp_final` / `webrtc_dtls_final` — the teardown stats
+  (71.3(3)).
+- `webrtc_answer_summary` — the 71.3(4) fields.
+
+### 71.5 Gate canon (measured this round, sandbox Debian 12, ALL THREE
+real trees staged: tiny-aes/sha1 + mbedTLS 3.6.0 + usrsctp c625e219)
+
+- paranoid knvstd compile ×2 arches: zero warnings.
+- `build_native_tests.sh`: **NATIVE TESTS PASS** (kn_sctp natively =
+  the honest stub; the DCEP goldens vs `tools/sctp_reference.py` run
+  in every build).
+- `cross_check.sh`: **CROSS-CHECK PASS** zero warnings both arches —
+  and with usrsctp staged the **kn_sctp real-body cross leg COMPILED**
+  (no SKIP this time), so the mingw path of the vendored stack is
+  proven again.
+- project cmake `-DKN_TLS_BACKEND=mbedtls` (+usrsctp auto-detected:
+  "kn_sctp: usrsctp backend ENABLED") → build 100% → **ctest 29/29**,
+  `test_knsctp` **REAL battery 35/0** (AF_CONN loopback association:
+  open↔open_peer relay, DCEP round-trip, PR-SCTP sends) and
+  `test_kndtls` **39/0**.
+- launcher **168/0**.
+- **No new unit tests, deliberately** (the 5g rule stands): the slice
+  is integration of a golden-tested module; the DCEP wire builders it
+  uses are already pinned twice (Python reference + C goldens); the
+  association behavior itself has exactly one honest test environment
+  — the seat. runB4a IS the test.
+
+### 71.6 runB4a — the flight card
+
+**Pre-flight (operator, in order):**
+1. Apply `0007-slice-5i-b4-sctp-datachannel.patch` on
+   `poprawki-agenta` (base: the pushed 5h HEAD), rebuild via **T10** —
+   expect `ALL PASS` 89/0 class with `test_knsctp` REAL shape
+   (**35/0**, usrsctp is on the rig) and `test_kndtls` 39/0.
+2. Launcher: run folder `runB4a`, draw 1, params EXACTLY:
+   `--cm-profile=browser --webrtc-answer=45 --session-queue-timeout=1500`
+3. One draw; probe, not a keeper.
+
+**PASS oracle (the GATE — every line must hold):**
+1. `webrtc_sctp_arm` `armed:1 role:"responder"`.
+2. `webrtc_sctp_up` with `ms` < ~3000 (an INIT-ACK/COOKIE round trip
+   on a ~30-60 ms path; 3 s is generous).
+3. `dc_opened:3` AND `webrtc_dc_open` with `acked:3` (the seat
+   accepted our WebRTC profile).
+4. The B3 floor intact: `dtls_ready:1 srtp_derived:1 media_ok ≥ 1
+   media_authfail:0 dtls_fail_rc:0 ice_ok:1 linger_ms ≈ 45000`.
+5. Clean exit shape (`webrtc_answer_done` + `cm_cancel 200`, exit 1 =
+   the known artifact).
+
+**Scoring readout (NOT gating — this is what the flight TELLS us):**
+- `hs_seen:1` + `hs_ver` → the seat drove the reference's
+  input-readiness handshake with us (the reference gates "input
+  ready" on exactly this message).
+- video PT 96/97 in `webrtc_media`/`first_pt` → **the gate hypothesis
+  was right** (datachannel up ⇒ video flows) and B5 =
+  depacketization + input. If the channel is fully up, acked, and
+  handshaken but video still absent → the gate is something else
+  (the media heartbeat / an nvst control message on
+  control-style channels — the `webrtc_dc_peer_open` labels +
+  `webrtc_sctp_msg` heads are the design input, and `peer_opened > 0`
+  would mean the seat expects ITS channels to be used).
+
+**Named fail branches (readout → first action):**
+- `armed:0 reason:backend_unavailable` → the rig build lost usrsctp
+  (T10 says "usrsctp source already present" — check
+  `KN_SCTP_BACKEND_USRSCTP` in the build log).
+- `sctp_up:0`, `sctp_final pkts_out ≥ 1`, `pkts_in ≥ 1` → the
+  handshake stalled mid-way (cookie/verification-tag class): read
+  `assoc_state/assoc_error/errno` and re-fly once before believing a
+  seat quirk.
+- `sctp_up:0`, `pkts_in:0` → split by `webrtc_dtls_final
+  app_records`: ≥1 means the INIT reached the ring but not usrsctp
+  (our bug — inject path); 0 means **the seat never INITed this
+  flight** (behavior variance — re-fly once; if it repeats, the
+  initiator fallback (`kn_sctp_open`) becomes the next slice's
+  decision, made from this evidence).
+- `dc_opened:3, dc_acked:0` with `peer_opened > 0` → the seat opened
+  ITS own channels and ignored ours: the `webrtc_dc_peer_open` labels
+  are the answer key (maybe the WebRTC seat expects the client to use
+  only server-opened channels — a profile decision for B5, not a
+  bug).
+- `webrtc_sctp_down cause:shutdown_comp` → the seat decided the
+  session was over (read the t_ms: an early shutdown = policy; a
+  late one = the linger ending). `comm_lost` → the path died
+  (compare with the STUN consent counters in the same window).
+- WS dies before 45 s with the channel up → we changed two
+  variables; the summary's B3/B2 floor fields localize which.
+
+### 71.7 This round's shape
+
+One file of C (`streamer/src/knvstd_main.c`), no new modules, no
+kn_* API change, no build-system change, no launcher change — the
+slice consumes `kn_sctp`'s existing, golden-tested API exactly as the
+native pump did, with the two WebRTC-path differences (responder
+role, three-channel profile) living in the probe where the flight
+evidence lives. Docs: this section, START-HERE §45 + the §44 pointer
+updates, INTEGRATION slice 5i. Patch
+`0007-slice-5i-b4-sctp-datachannel.patch`, base = the operator's
+pushed 5h HEAD on `poprawki-agenta`. Next: **runB4a**; then B5 from
+its readout (depacketization if video flows; the peer-channel /
+heartbeat dialect if it doesn't).

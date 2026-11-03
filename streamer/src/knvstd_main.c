@@ -7099,6 +7099,34 @@ typedef struct {
     unsigned long long first_media_ms;
     unsigned     first_pt, first_seq;
     uint32_t     first_ssrc;
+    /* Slice 5i (B4): the SCTP datachannel over the ready DTLS. The
+     * seat INITs the association at ready+0 (runB3a's first_app:
+     * ports 5000/5000, Initiate Tag 0x47069b6f, 128/128 streams) and
+     * no video flows until we answer — so the probe RESPONDS
+     * (kn_sctp_open_server = bind+listen on 5000; poll's accept IS
+     * the server-side COMM_UP) instead of racing its own INIT. On
+     * up we open the WebRTC profile — OpenNOW transport_input.rs's
+     * THREE channels (not the native eight): stats_channel,
+     * input_channel_v1, input_channel_partially_reliable — with ODD
+     * sids (RFC 8832 §5.1: the association responder is the DCEP
+     * server). Inbound OPENs get ACKed and their labels logged (what
+     * the seat opens is an open runB3a question); the reference's
+     * input-readiness gate is the server's [0x0e,…] handshake on
+     * input_channel_v1 — detected and versioned here. One variable:
+     * the datachannel comes up; the scoring readout is whether video
+     * PT 96 starts. */
+    kn_sctp     *sctp;
+    int          sctp_armed;        /* kn_sctp_open_server succeeded */
+    int          sctp_noarm_logged;
+    int          sctp_up;           /* association established */
+    int          sctp_down_logged;
+    unsigned long long sctp_up_ms;  /* open → accept/COMM_UP */
+    unsigned     dc_opened, dc_acked;      /* our OPENs / the seat's ACKs */
+    unsigned     peer_opened, peer_acked;  /* the seat's OPENs / our ACKs */
+    unsigned long long sctp_msgs_in;       /* non-DCEP stream messages */
+    int          hs_seen;                  /* the [0x0e,…] input handshake */
+    unsigned     hs_ver;
+    unsigned long long first_hs_ms;
 } webrtc_answer_state;
 
 /* Resolve the seat host to a numeric IPv4 for the UDP route: the CM
@@ -7586,6 +7614,210 @@ static void sess_webrtc_dtls_tick(webrtc_answer_state *as)
             kn_dtls_free(as->dtls);
             as->dtls = NULL;
         }
+    }
+}
+
+/* Slice 5i (B4): the WebRTC datachannel profile — OpenNOW
+ * transport_input.rs InputChannels::create()'s THREE channels in the
+ * reference's creation order (stats, reliable input, partial input),
+ * NOT the native eight-channel NVST profile (that one belongs to the
+ * Mjolnir/RTSP path). Sid parity per RFC 8832 §5.1: runB3a measured
+ * the seat INITiating the association, so we are the DCEP server and
+ * use ODD stream ids. Reliability mapping is str0m's (same rule the
+ * native profile in kn_sctp.c documents): ordered+reliable →
+ * RELIABLE, MaxPacketLifetime{300} → TIMED/300 unordered,
+ * MaxRetransmits{0} → REXMIT/0 unordered; priority 0 + empty protocol
+ * string, exactly as kn_sctp_open_channels emits. */
+static const kn_sctp_channel_def sess_webrtc_channels[3] = {
+    { 1, 1, KN_SCTP_DCEP_REXMIT,   0, "stats_channel" },
+    { 3, 0, KN_SCTP_DCEP_RELIABLE, 0, "input_channel_v1" },
+    { 5, 1, KN_SCTP_DCEP_TIMED,  300,
+      "input_channel_partially_reliable" },
+};
+
+/* The tx half of the bridge: every SCTP packet leaves as one DTLS
+ * application record (kn_sctp's write_cb contract; the native pump's
+ * sess_sctp_write verbatim). Called from kn_sctp_poll — the tick's
+ * thread — never from the usrsctp timer thread. */
+static int sess_webrtc_sctp_write(void *ctx, const uint8_t *data,
+                                  size_t len)
+{
+    webrtc_answer_state *as = (webrtc_answer_state *)ctx;
+    return (as->dtls &&
+            kn_dtls_write_app(as->dtls, data, len) == KN_DTLS_OK)
+        ? 0 : -1;
+}
+
+/* The rx half: DCEP OPEN → ACK + label evidence (what the WEBRTC seat
+ * opens toward us was unmeasured in runB3a — app_records:1 was the
+ * last thing printed); DCEP ACK → count, one-shot event when all our
+ * OPENs are acked; any other message → the nvst input-handshake watch
+ * (OpenNOW InputChannelState::channel_data: the server's first bytes
+ * on input_channel_v1 are LE16 526 = 0x0e 0x02, optionally followed
+ * by the LE16 version, or a bare 0x0e-prefixed pair) + bounded head
+ * hex for everything else. Counters/labels only in the log (§7). */
+static void sess_webrtc_sctp_msg(void *ctx, uint16_t sid, uint16_t ssn,
+                                 uint32_t ppi, int unordered,
+                                 const uint8_t *data, size_t len)
+{
+    webrtc_answer_state *as = (webrtc_answer_state *)ctx;
+    (void)ssn; (void)unordered;
+    if (ppi == KN_SCTP_PPI_DCEP && len >= 1) {
+        if (data[0] == KN_SCTP_DCEP_MSG_OPEN) {
+            int un = 0;
+            uint8_t ct = 0;
+            uint16_t pr = 0;
+            uint32_t rp = 0;
+            char label[KN_SCTP_MAX_LABEL + 1];
+            char proto[KN_SCTP_MAX_PROTO + 1];
+            uint8_t ack[4];
+            size_t alen = 0;
+            label[0] = '\0';
+            proto[0] = '\0';
+            (void)kn_sctp_dcep_parse(data, len, &un, &ct, &pr, &rp,
+                                     label, sizeof label,
+                                     proto, sizeof proto);
+            ++as->peer_opened;
+            if (as->peer_opened <= 8) {
+                printf("{\"mode\":\"session\","
+                       "\"event\":\"webrtc_dc_peer_open\",\"sid\":%u,"
+                       "\"label\":\"%.64s\",\"type\":%u,\"unordered\":%d,"
+                       "\"rel\":%u}\n", (unsigned)sid, label,
+                       (unsigned)ct, un, (unsigned)rp);
+                fflush(stdout);
+            }
+            if (kn_sctp_dcep_ack_build(ack, sizeof ack, &alen) ==
+                    KN_SCTP_OK &&
+                kn_sctp_send(as->sctp, sid, KN_SCTP_PPI_DCEP, 1,
+                             ack, alen) == KN_SCTP_OK)
+                ++as->peer_acked;
+            return;
+        }
+        if (data[0] == KN_SCTP_DCEP_MSG_ACK) {
+            ++as->dc_acked;
+            if (as->dc_acked == as->dc_opened && as->dc_opened > 0) {
+                printf("{\"mode\":\"session\",\"event\":\"webrtc_dc_open\","
+                       "\"opened\":%u,\"acked\":%u,\"peer_opened\":%u,"
+                       "\"t_ms\":%llu}\n", as->dc_opened, as->dc_acked,
+                       as->peer_opened,
+                       as->t0 ? (unsigned long long)(kn_sock_now_ms() -
+                            (uint64_t)as->t0) : 0ull);
+                fflush(stdout);
+            }
+            return;
+        }
+    }
+    ++as->sctp_msgs_in;
+    if (!as->hs_seen && len >= 2 && data[0] == 0x0e) {
+        unsigned v = (unsigned)data[0] | ((unsigned)data[1] << 8);
+        as->hs_seen = 1;
+        as->hs_ver = (v == 526u && len >= 4)
+            ? ((unsigned)data[2] | ((unsigned)data[3] << 8)) : v;
+        as->first_hs_ms = as->t0
+            ? (unsigned long long)(kn_sock_now_ms() - (uint64_t)as->t0)
+            : 0ull;
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_input_hs\","
+               "\"sid\":%u,\"ppi\":%u,\"len\":%llu,\"ver\":%u,"
+               "\"t_ms\":%llu}\n", (unsigned)sid, (unsigned)ppi,
+               (unsigned long long)len, as->hs_ver, as->first_hs_ms);
+        fflush(stdout);
+    } else if (as->sctp_msgs_in <= 5) {
+        size_t i, hn = len < 24 ? len : 24;
+        char hx[64];
+        for (i = 0; i < hn; ++i)
+            snprintf(hx + i * 2, 3, "%02x", data[i]);
+        hx[hn * 2 < sizeof hx ? hn * 2 : sizeof hx - 1] = '\0';
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_sctp_msg\","
+               "\"n\":%llu,\"sid\":%u,\"ppi\":%u,\"len\":%llu,"
+               "\"head\":\"%s\"}\n", as->sctp_msgs_in, (unsigned)sid,
+               (unsigned)ppi, (unsigned long long)len, hx);
+        fflush(stdout);
+    }
+}
+
+/* Slice 5i (B4): the SCTP duty cycle. Arms on dtls_ready (the seat's
+ * INIT is already in the kn_dtls app ring by then — runB3a proved it
+ * arrives at ready+0), then every pass: drain the ring →
+ * kn_sctp_inject → kn_sctp_poll (flushes tx through
+ * sess_webrtc_sctp_write, up-calls messages). The establishment
+ * transition is watched via kn_sctp_established() rather than the
+ * event callback because the server-mode accept path deliberately
+ * does not up-call (the COMM_UP notification may fire before the
+ * accepted socket is re-subscribed — kn_sctp.c says so); on the
+ * one-shot transition the three channels go out (the reference opens
+ * them the instant the association is up). KN_SCTP_ERR_LOST is
+ * logged once with the full stats corpse; the object stays for the
+ * teardown stats (poll is a no-op after lost). */
+static void sess_webrtc_sctp_tick(webrtc_answer_state *as)
+{
+    static uint8_t abuf[KN_DTLS_MAX_RECORD];
+    size_t alen = 0;
+    int prc;
+    if (!as->active || !as->dtls_ready || !as->dtls) return;
+    if (!as->sctp && !as->sctp_noarm_logged) {
+        char serr[200];
+        serr[0] = '\0';
+        if (!kn_sctp_available()) {
+            as->sctp_noarm_logged = 1;
+            printf("{\"mode\":\"session\",\"event\":\"webrtc_sctp_arm\","
+                   "\"armed\":0,\"reason\":\"backend_unavailable\"}\n");
+            fflush(stdout);
+        } else {
+            as->sctp = kn_sctp_open_server(sess_webrtc_sctp_write, as,
+                                           serr, sizeof serr);
+            if (as->sctp) {
+                as->sctp_armed = 1;
+                printf("{\"mode\":\"session\",\"event\":"
+                       "\"webrtc_sctp_arm\",\"armed\":1,\"role\":"
+                       "\"responder\",\"port\":%u,\"t_ms\":%llu}\n",
+                       (unsigned)KN_SCTP_PORT,
+                       as->t0 ? (unsigned long long)(kn_sock_now_ms() -
+                            (uint64_t)as->t0) : 0ull);
+            } else {
+                char e[240];
+                as->sctp_noarm_logged = 1;
+                sess_json_esc(e, sizeof e, serr, strlen(serr));
+                printf("{\"mode\":\"session\",\"event\":"
+                       "\"webrtc_sctp_arm\",\"armed\":0,"
+                       "\"reason\":\"open_failed\",\"detail\":\"%s\"}\n",
+                       e);
+            }
+            fflush(stdout);
+        }
+    }
+    if (!as->sctp) return;
+    while (kn_dtls_read_app(as->dtls, abuf, sizeof abuf, &alen) == 1)
+        (void)kn_sctp_inject(as->sctp, abuf, alen);
+    prc = kn_sctp_poll(as->sctp, sess_webrtc_sctp_msg, as, NULL, NULL);
+    if (!as->sctp_up && kn_sctp_established(as->sctp)) {
+        int n;
+        as->sctp_up = 1;
+        as->sctp_up_ms = kn_sctp_up_ms(as->sctp);
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_sctp_up\","
+               "\"ms\":%llu,\"t_ms\":%llu}\n", as->sctp_up_ms,
+               as->t0 ? (unsigned long long)(kn_sock_now_ms() -
+                    (uint64_t)as->t0) : 0ull);
+        fflush(stdout);
+        n = kn_sctp_open_channels(as->sctp, sess_webrtc_channels,
+                                  (int)(sizeof sess_webrtc_channels /
+                                        sizeof sess_webrtc_channels[0]));
+        as->dc_opened = (unsigned)n;
+    }
+    if (prc == KN_SCTP_ERR_LOST && !as->sctp_down_logged) {
+        kn_sctp_stats ss;
+        memset(&ss, 0, sizeof ss);
+        as->sctp_down_logged = 1;
+        kn_sctp_stats_get(as->sctp, &ss);
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_sctp_down\","
+               "\"cause\":\"%s\",\"assoc_state\":%u,\"assoc_error\":%u,"
+               "\"errno\":%d,\"msgs_in\":%u,\"pkts_in\":%u,"
+               "\"pkts_out\":%u,\"t_ms\":%llu}\n",
+               kn_sctp_assoc_state_name(ss.assoc_state), ss.assoc_state,
+               ss.assoc_error, ss.last_errno, ss.msgs_in, ss.pkts_in,
+               ss.pkts_out,
+               as->t0 ? (unsigned long long)(kn_sock_now_ms() -
+                    (uint64_t)as->t0) : 0ull);
+        fflush(stdout);
     }
 }
 
@@ -8202,6 +8434,9 @@ hb_duty:
                                              * EVERY pass (mbedTLS
                                              * retransmit lives inside
                                              * poll; stun_tick paces) */
+        sess_webrtc_sctp_tick(&as);         /* slice 5i: B4 datachannel —
+                                             * arms on dtls_ready, drains
+                                             * the app ring every pass */
         if (kn_sock_now_ms() - hb_at >= 5000u) {
             if (kn_ws_send_text(&wsc, "{\"hb\":1}", 8) == KN_WS_OK)
                 ++hb_sent;
@@ -8211,9 +8446,49 @@ hb_duty:
 
     (void)kn_ws_send_close(&wsc, 1000);
     kn_net_tls_stream_close(tls);
+    if (as.sctp) {                          /* slice 5i: the SCTP layer
+                                             * borrows the DTLS object as
+                                             * its write path, so it dies
+                                             * first; its final stats ride
+                                             * one evidence line (the
+                                             * counters the summary does
+                                             * not carry) */
+        kn_sctp_stats ss;
+        memset(&ss, 0, sizeof ss);
+        kn_sctp_stats_get(as.sctp, &ss);
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_sctp_final\","
+               "\"established\":%d,\"lost\":%d,\"assoc_state\":%u,"
+               "\"assoc_error\":%u,\"errno\":%d,\"pkts_in\":%u,"
+               "\"pkts_out\":%u,\"bytes_in\":%u,\"bytes_out\":%u,"
+               "\"txq_dropped\":%u,\"msgs_in\":%u,\"sends\":%u,"
+               "\"send_errors\":%u,\"notif_assoc\":%u}\n",
+               ss.established, ss.lost, ss.assoc_state, ss.assoc_error,
+               ss.last_errno, ss.pkts_in, ss.pkts_out, ss.bytes_in,
+               ss.bytes_out, ss.txq_dropped, ss.msgs_in, ss.sends,
+               ss.send_errors, ss.notif_assoc);
+        fflush(stdout);
+        kn_sctp_close(as.sctp);
+        as.sctp = NULL;
+    }
     if (as.dtls) {                          /* slice 5g: the DTLS object
                                              * borrows sock+cert, so it
-                                             * dies FIRST */
+                                             * dies FIRST — slice 5i: the
+                                             * final line also closes the
+                                             * runB3a blind spot (app-ring
+                                             * drains after the ready
+                                             * event: did the seat re-INIT
+                                             * or send more?) */
+        kn_dtls_stats ds;
+        memset(&ds, 0, sizeof ds);
+        kn_dtls_stats_get(as.dtls, &ds);
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_dtls_final\","
+               "\"app_records\":%u,\"app_bytes\":%u,\"app_q_dropped\":%u,"
+               "\"peer_closed\":%u,\"records_in\":%u,\"records_out\":%u,"
+               "\"records_dropped\":%u,\"send_errors\":%u,\"polls\":%u}\n",
+               ds.app_records, ds.app_bytes, ds.app_q_dropped,
+               ds.peer_closed, ds.records_in, ds.records_out,
+               ds.records_dropped, ds.send_errors, ds.polls);
+        fflush(stdout);
         kn_dtls_free(as.dtls);
         as.dtls = NULL;
     }
@@ -8250,7 +8525,14 @@ hb_duty:
          * linger (first_media_ms < linger_ms), media_authfail=0. The
          * flight's single variable: the handshake comes up AND the
          * first authenticated SRTP bytes decode — depacketization
-         * (kn_rx_video) is the NEXT slice's variable, not this one. */
+         * (kn_rx_video) is the NEXT slice's variable, not this one.
+         * Slice 5i adds the B4 half (RTSP §71): sctp_armed=1,
+         * sctp_up=1 (the seat's INIT answered — accept IS the
+         * server-side COMM_UP), dc_opened=3 with dc_acked=3 (the
+         * seat accepted our WebRTC channel profile), then the
+         * scoring readout: hs_seen (the reference's input-handshake
+         * gate) and whether media grows a video PT (96/97) — the
+         * first_pt/first_* fields stay audio-class until then. */
         char dip[16] = "-", mip[16] = "-";
         if (as.dest_ip) sess_dot4(as.dest_ip, dip);
         if (as.mapped_ip) sess_dot4(as.mapped_ip, mip);
@@ -8270,7 +8552,11 @@ hb_duty:
                "\"media_in\":%llu,\"media_ok\":%llu,"
                "\"media_authfail\":%llu,\"media_other\":%llu,"
                "\"first_media_ms\":%llu,\"first_pt\":%u,"
-               "\"first_ssrc\":%u,\"first_seq\":%u}\n",
+               "\"first_ssrc\":%u,\"first_seq\":%u,"
+               "\"sctp_armed\":%d,\"sctp_up\":%d,\"sctp_ms\":%llu,"
+               "\"dc_opened\":%u,\"dc_acked\":%u,\"peer_opened\":%u,"
+               "\"peer_acked\":%u,\"sctp_msgs_in\":%llu,\"hs_seen\":%d,"
+               "\"hs_ver\":%u,\"first_hs_ms\":%llu}\n",
                as.sent, as.cand_sent, as.cert_src ? as.cert_src : "?",
                as.local_ip, as.local_port,
                as.acks_in, cands, as.stun_in, as.dtls_in, as.other_in,
@@ -8287,7 +8573,11 @@ hb_duty:
                as.dtls_fail_rc, as.srtp_profile, as.srtp_derived,
                as.media_in, as.media_ok, as.media_authfail,
                as.media_other, as.first_media_ms, as.first_pt,
-               as.first_ssrc, as.first_seq);
+               as.first_ssrc, as.first_seq,
+               as.sctp_armed, as.sctp_up, as.sctp_up_ms,
+               as.dc_opened, as.dc_acked, as.peer_opened,
+               as.peer_acked, as.sctp_msgs_in, as.hs_seen,
+               as.hs_ver, as.first_hs_ms);
         fflush(stdout);
     }
     fflush(stdout);
