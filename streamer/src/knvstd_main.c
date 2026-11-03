@@ -7031,9 +7031,11 @@ static size_t sess_json_esc(char *dst, size_t dstsz,
  * The probe owns one of these; sess_webrtc_answer_send() opens the UDP
  * bundle socket and sends the answer + nvstSdp + host candidate, then
  * the probe loop drains the socket and counts what the server does.
- * B2 SERVES NO MEDIA on purpose: no STUN reply, no DTLS — the flight's
- * single variable is "does the server accept our answer and start ICE".
- * The wire dump (--wire-dump) captures every byte either way. */
+ * History: B2 served NO media on purpose (the flight's single variable
+ * was "does the server accept our answer and start ICE"); 5d added the
+ * outbound ICE punch; slice 5g (B3) adds DTLS-SRTP — the handshake on
+ * the validated pair plus authenticated SRTP counting on the media
+ * branch. The wire dump (--wire-dump) captures every byte either way. */
 typedef struct {
     int          active;          /* answer sent; the socket is live */
     int          sent;            /* answer+nvstSdp frame went out */
@@ -7070,6 +7072,33 @@ typedef struct {
     int          ice_ok;          /* >= 1 authenticated success resp */
     uint64_t     next_stun_ms;    /* 0 = nothing scheduled */
     unsigned     stun_gap_ms;     /* 500 → x2 → 4000 cap (RFC 8445 Ta) */
+    /* Slice 5g (B3): DTLS-SRTP on the validated pair. The arm gate is
+     * the nvst :8196 rule — a REAL inbound STUN first (ice_ok or any
+     * stun_in), never synthesized; the pin is the OFFER's fingerprint
+     * (kn_sdp_offer.fingerprint, parsed since 5b and unused until
+     * now); the identity is the KEPT kn_cert — the native arm rule
+     * verbatim: "a placeholder fingerprint has no keypair behind it —
+     * announcing one and handshaking another would be a lie". After
+     * ready: EXTRACTOR-dtls_srtp (km[60], server-write halves at 16/46)
+     * → kn_rx_srtp_session for the receive direction; RTP-shaped
+     * datagrams (0x80..0x8B) go through kn_rx_srtp_unprotect and are
+     * counted/verified — full depacketization (kn_rx_video) is the
+     * NEXT slice's single variable. */
+    char         srv_fp[KN_CERT_FP_LEN + 1];
+    kn_cert     *cert;            /* kept when real; freed at teardown */
+    kn_dtls     *dtls;
+    int          dtls_armed;      /* kn_dtls_client succeeded */
+    int          dtls_noarm_logged;
+    int          dtls_ready;
+    int          dtls_fail_rc;    /* final poll verdict (< 0) */
+    unsigned long long dtls_ready_ms;
+    unsigned     srtp_profile;    /* negotiated use_srtp IANA id */
+    int          srtp_derived;
+    kn_rx_srtp_session srtp;
+    unsigned long long media_in, media_ok, media_authfail, media_other;
+    unsigned long long first_media_ms;
+    unsigned     first_pt, first_seq;
+    uint32_t     first_ssrc;
 } webrtc_answer_state;
 
 /* Resolve the seat host to a numeric IPv4 for the UDP route: the CM
@@ -7138,17 +7167,38 @@ static int sess_webrtc_answer_send(kn_ws_client *wsc,
     sess_local_identity(ufrag, sizeof ufrag, pwd, sizeof pwd,
                         fp, sizeof fp);
     if (kn_cert_available()) {
-        /* the REAL certificate fingerprint — B3's DTLS handshake will
-         * regenerate/keep one; for B2 the fingerprint only has to be
-         * well-formed and stable within the flight (the F37 R3-A
-         * pattern, kn_cert.h header contract). */
+        /* the REAL certificate fingerprint — B3 (slice 5g) keeps the
+         * handle: it IS the DTLS handshake identity (the fingerprint
+         * that flies in the answer must be the one the ClientHello
+         * authenticates — the native arm rule). */
         kn_cert *cert = kn_cert_generate(err, sizeof err);
         if (cert) {
             if (kn_cert_fingerprint(cert, fp, sizeof fp) == 0)
                 cert_src = "real";
-            kn_cert_free(cert);
+            if (strcmp(cert_src, "real") == 0)
+                as->cert = cert;      /* kept; freed at probe teardown */
+            else
+                kn_cert_free(cert);
         }
         as->cert_src = cert_src;
+    }
+    /* B3: the pin — the offer's sha-256 fingerprint (colon-hex, no
+     * algorithm prefix; kn_dtls_client tolerates both forms). A
+     * sha-256 colon-hex value is exactly KN_CERT_FP_LEN chars, so
+     * anything longer is not a usable pin: leave srv_fp EMPTY and the
+     * arm gate reports the honest no_remote_fp instead of a truncated
+     * lie. Bounded memcpy, not snprintf — the paranoid leg's
+     * -Wformat-truncation=2 refuses a char[128] → char[96] %s copy no
+     * matter the guard, and it is right to: the bound must be in the
+     * bytes, not in the programmer's promise. */
+    {
+        size_t fl = strlen(off.fingerprint);
+        if (fl < sizeof as->srv_fp) {
+            memcpy(as->srv_fp, off.fingerprint, fl);
+            as->srv_fp[fl] = '\0';
+        } else {
+            as->srv_fp[0] = '\0';       /* no_remote_fp at the gate */
+        }
     }
     mip = sess_webrtc_media_ip(media_host);
     mport = (off.n_media > 0 && off.m[0].port > 0 &&
@@ -7418,6 +7468,127 @@ static void sess_webrtc_stun_tick(webrtc_answer_state *as)
     }
 }
 
+/* Slice 5g (B3): the DTLS duty cycle on the validated pair — arm on
+ * the first REAL inbound STUN (the nvst :8196 rule, never
+ * synthesized), then one non-blocking handshake step per tick
+ * (retransmissions are timer-driven inside kn_dtls; the tick cadence
+ * only has to be "often"). On KN_DTLS_READY: the negotiated facts go
+ * to the console, EXTRACTOR-dtls_srtp derives the RECEIVE session
+ * (server-write key km[16..32), salt km[46..60); profile 0x0001 =
+ * SRTP_AES128_CM_HMAC_SHA1_80 → tag 10) and the key material is
+ * scrubbed from the stack (§7: shapes and ids in the log, never
+ * keys). Final failures latch dtls_fail_rc and free the object (it
+ * refuses further polling); the summary reports the corpse. */
+static void sess_webrtc_dtls_tick(webrtc_answer_state *as)
+{
+    if (!as->active || !as->sock_open) return;
+    if (!as->dtls && !as->dtls_fail_rc && !as->dtls_noarm_logged) {
+        if (as->ice_ok || as->stun_in) {   /* REAL inbound STUN first */
+            const char *why = NULL;
+            char derr[200];
+            derr[0] = '\0';
+            if (!as->cert)                 why = "no_real_cert";
+            else if (!as->srv_fp[0])       why = "no_remote_fp";
+            else if (!kn_dtls_available()) why = "backend_unavailable";
+            else if (!as->dest_ip || !as->dest_port) why = "no_dest";
+            if (why) {
+                as->dtls_noarm_logged = 1;
+                printf("{\"mode\":\"session\",\"event\":\"webrtc_dtls_arm\","
+                       "\"armed\":0,\"reason\":\"%s\"}\n", why);
+                fflush(stdout);
+            } else {
+                as->dtls = kn_dtls_client(&as->sock, as->dest_ip,
+                                          as->dest_port, as->cert,
+                                          as->srv_fp, derr, sizeof derr);
+                if (as->dtls) {
+                    as->dtls_armed = 1;
+                    printf("{\"mode\":\"session\",\"event\":"
+                           "\"webrtc_dtls_arm\",\"armed\":1,"
+                           "\"pin_len\":%d,\"cert_real\":1,"
+                           "\"dest_port\":%u,\"t_ms\":%llu}\n",
+                           (int)strlen(as->srv_fp),
+                           (unsigned)as->dest_port,
+                           as->t0 ? (unsigned long long)
+                               (kn_sock_now_ms() - (uint64_t)as->t0)
+                                  : 0ull);
+                    fflush(stdout);
+                } else {
+                    char e[240];
+                    as->dtls_noarm_logged = 1;
+                    sess_json_esc(e, sizeof e, derr, strlen(derr));
+                    printf("{\"mode\":\"session\",\"event\":"
+                           "\"webrtc_dtls_arm\",\"armed\":0,"
+                           "\"reason\":\"client_init\","
+                           "\"detail\":\"%s\"}\n", e);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+    if (as->dtls && !as->dtls_ready && !as->dtls_fail_rc) {
+        int drc = kn_dtls_poll(as->dtls);
+        if (drc == KN_DTLS_READY) {
+            char cs[64], hx[65];
+            kn_dtls_stats ds;
+            uint8_t km[60];
+            size_t i, hn;
+            memset(km, 0, sizeof km);
+            as->dtls_ready = 1;
+            as->dtls_ready_ms = kn_dtls_ready_ms(as->dtls);
+            kn_dtls_stats_get(as->dtls, &ds);
+            (void)kn_dtls_ciphersuite(as->dtls, cs, sizeof cs);
+            hn = ds.first_app_len < 32u ? ds.first_app_len : 32u;
+            for (i = 0; i < hn; ++i)
+                snprintf(hx + i * 2, 3, "%02x", ds.first_app[i]);
+            hx[hn * 2 < sizeof hx ? hn * 2 : sizeof hx - 1] = '\0';
+            as->srtp_profile = kn_dtls_srtp_profile(as->dtls);
+            printf("{\"mode\":\"session\",\"event\":\"webrtc_dtls_ready\","
+                   "\"ms\":%llu,\"version\":\"%.16s\",\"cipher\":\"%.48s\","
+                   "\"records_in\":%u,\"records_out\":%u,\"verify\":%d,"
+                   "\"pin_matched\":%d,\"srtp_prof\":%u,"
+                   "\"app_records\":%u,\"app_bytes\":%u,"
+                   "\"first_app_len\":%u,\"first_app\":\"%s\"}\n",
+                   as->dtls_ready_ms, kn_dtls_version(as->dtls), cs,
+                   ds.records_in, ds.records_out, ds.verify_result,
+                   ds.pin_matched, as->srtp_profile,
+                   ds.app_records, ds.app_bytes, ds.first_app_len,
+                   ds.first_app_len ? hx : "");
+            fflush(stdout);
+            /* the receive-direction SRTP session (F11 layout:
+             * [16..32) server_write key, [46..60) server_write salt).
+             * Profile 0x0001 only — anything else (including "the
+             * extension was absent") stays honestly disarmed. */
+            if (as->srtp_profile == 0x0001u &&
+                kn_dtls_srtp_export(as->dtls, km) == 0) {
+                if (kn_rx_srtp_session_init(&as->srtp,
+                        KN_RX_SRTP_CM128_HMAC_SHA1,
+                        km + 16, 16, km + 46, 14, 10) == KN_RX_OK)
+                    as->srtp_derived = 1;
+            }
+            memset(km, 0, sizeof km);       /* scrub (§7) */
+            printf("{\"mode\":\"session\",\"event\":\"webrtc_srtp_arm\","
+                   "\"derived\":%d,\"profile\":%u}\n",
+                   as->srtp_derived, as->srtp_profile);
+            fflush(stdout);
+        } else if (drc < 0) {
+            kn_dtls_stats ds;
+            as->dtls_fail_rc = drc;
+            kn_dtls_stats_get(as->dtls, &ds);
+            printf("{\"mode\":\"session\",\"event\":\"webrtc_dtls_fail\","
+                   "\"rc\":%d,\"verify\":%d,\"pin_matched\":%d,"
+                   "\"last_rc\":%d,\"records_in\":%u,\"records_out\":%u,"
+                   "\"polls\":%u,\"t_ms\":%llu}\n",
+                   drc, ds.verify_result, ds.pin_matched, ds.last_rc,
+                   ds.records_in, ds.records_out, ds.polls,
+                   as->t0 ? (unsigned long long)(kn_sock_now_ms() -
+                        (uint64_t)as->t0) : 0ull);
+            fflush(stdout);
+            kn_dtls_free(as->dtls);
+            as->dtls = NULL;
+        }
+    }
+}
+
 /* One UDP datagram classification step for the B2 linger loop: STUN
  * binding requests (the server's ICE checks at us), STUN responses to
  * our own checks, DTLS records (would mean the server already trusts
@@ -7570,9 +7741,63 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
                        (unsigned long long)rlen, hx);
                 fflush(stdout);
             }
+        } else if (as->dtls_ready && dl >= 12 &&
+                   (upkt[0] & 0xC0) == 0x80) {
+            /* Slice 5g (B3): SRTP/SRTCP on the validated pair. The
+             * receive session came from EXTRACTOR-dtls_srtp;
+             * unprotect is IN PLACE, so the head hex is captured
+             * BEFORE — the wire bytes are the evidence, the decoded
+             * header the verdict. RTP-shaped datagrams before
+             * dtls_ready fall through to other_in honestly. */
+            uint64_t idx = 0;
+            kn_gs_rtp rtp;
+            size_t plain = 0;
+            int detail = 0, urc;
+            char hx[65];
+            size_t i, hn;
+            memset(&rtp, 0, sizeof rtp);
+            ++as->media_in;
+            if (!as->first_media_ms)
+                as->first_media_ms = as->t0
+                    ? (unsigned long long)(now - (uint64_t)as->t0) : 0ull;
+            hn = dl < 32 ? dl : 32;
+            for (i = 0; i < hn; ++i)
+                snprintf(hx + i * 2, 3, "%02x", upkt[i]);
+            hx[hn * 2 < sizeof hx ? hn * 2 : sizeof hx - 1] = '\0';
+            urc = as->srtp_derived
+                ? kn_rx_srtp_unprotect(&as->srtp, upkt, dl, &idx, &rtp,
+                                       &plain, &detail)
+                : KN_RX_DROP_NO_CIPHER;
+            if (urc == KN_RX_OK) {
+                ++as->media_ok;
+                if (as->media_ok == 1) {
+                    as->first_pt = rtp.pt;
+                    as->first_ssrc = rtp.ssrc;
+                    as->first_seq = rtp.seq;
+                }
+            } else if (urc == KN_RX_DROP_AUTH_FAILED) {
+                ++as->media_authfail;
+            } else {
+                ++as->media_other;
+            }
+            if (as->media_in <= 3 ||
+                (urc != KN_RX_OK && as->media_in <= 8)) {
+                printf("{\"mode\":\"session\",\"event\":\"webrtc_media\","
+                       "\"n\":%llu,\"len\":%llu,\"urc\":%d,\"detail\":%d,"
+                       "\"plain\":%llu,\"pt\":%u,\"ssrc\":%u,\"seq\":%u,"
+                       "\"t_ms\":%llu,\"head\":\"%s\"}\n",
+                       as->media_in, (unsigned long long)dl, urc, detail,
+                       (unsigned long long)plain, rtp.pt, rtp.ssrc,
+                       rtp.seq,
+                       as->t0 ? (unsigned long long)(now -
+                            (uint64_t)as->t0) : 0ull, hx);
+                fflush(stdout);
+            }
         } else if (dl >= 13 && upkt[0] >= 0x14 && upkt[0] <= 0x17 &&
                    upkt[1] == 0xFE) {
             ++as->dtls_in;
+            if (as->dtls)
+                (void)kn_dtls_inject(as->dtls, upkt, dl);
             if (as->dtls_in <= 2) {
                 size_t i, hn = dl < 32 ? dl : 32;
                 char hx[80];
@@ -7973,6 +8198,10 @@ static int sess_webrtc_probe(const kn_cm_settings *st,
 hb_duty:
         sess_webrtc_answer_drain(&as);      /* slice 5b: the UDP watch */
         sess_webrtc_stun_tick(&as);         /* slice 5d: the ICE punch */
+        sess_webrtc_dtls_tick(&as);         /* slice 5g: B3 handshake —
+                                             * EVERY pass (mbedTLS
+                                             * retransmit lives inside
+                                             * poll; stun_tick paces) */
         if (kn_sock_now_ms() - hb_at >= 5000u) {
             if (kn_ws_send_text(&wsc, "{\"hb\":1}", 8) == KN_WS_OK)
                 ++hb_sent;
@@ -7982,6 +8211,16 @@ hb_duty:
 
     (void)kn_ws_send_close(&wsc, 1000);
     kn_net_tls_stream_close(tls);
+    if (as.dtls) {                          /* slice 5g: the DTLS object
+                                             * borrows sock+cert, so it
+                                             * dies FIRST */
+        kn_dtls_free(as.dtls);
+        as.dtls = NULL;
+    }
+    if (as.cert) {
+        kn_cert_free(as.cert);
+        as.cert = NULL;
+    }
     if (as.sock_open) {                     /* slice 5b: the bundle sock */
         kn_sock_udp_close(&as.sock);
         as.sock_open = 0;
@@ -8000,10 +8239,18 @@ hb_duty:
         /* The verdict line. Slice 5b pass shape (RTSP §65.6):
          * answer_sent=1, acks_in >= 1, server_cands > 0 within ~2 s, no
          * error/bye frames. Slice 5d adds the ICE half (RTSP §66):
-         * stun_out > 0, first_resp_ms < ~2000, ice_ok=1, mapped_ip =
-         * the CM clientIp (a public address — proof the seat sees us
-         * through the NAT), stun_answered > 0 when the seat checks us
-         * back, and the WS ALIVE past the old 17 s timeout kill. */
+         * stun_out > 0, first_resp_ms < ~2000, ice_ok=1, mapped !=
+         * local (ip AND port — runB2c falsified §66.6: the media edge
+         * re-NATs into a private netns, mapped 10.222.254.7),
+         * stun_answered > 0 when the seat checks us back, and the WS
+         * ALIVE past the old 17 s timeout kill. Slice 5g adds the B3
+         * half (RTSP §69): dtls_armed=1, dtls_ready=1 with
+         * pin_matched=1 and verify benign, srtp_derived=1 (profile
+         * 0x0001), then media_in > 0 and media_ok > 0 within the
+         * linger (first_media_ms < linger_ms), media_authfail=0. The
+         * flight's single variable: the handshake comes up AND the
+         * first authenticated SRTP bytes decode — depacketization
+         * (kn_rx_video) is the NEXT slice's variable, not this one. */
         char dip[16] = "-", mip[16] = "-";
         if (as.dest_ip) sess_dot4(as.dest_ip, dip);
         if (as.mapped_ip) sess_dot4(as.mapped_ip, mip);
@@ -8017,7 +8264,13 @@ hb_duty:
                "\"stun_out\":%llu,\"stun_resp_in\":%llu,"
                "\"stun_answered\":%llu,\"stun_bad\":%llu,"
                "\"first_resp_ms\":%llu,\"ice_ok\":%d,"
-               "\"mapped_ip\":\"%s\",\"mapped_port\":%u}\n",
+               "\"mapped_ip\":\"%s\",\"mapped_port\":%u,"
+               "\"dtls_armed\":%d,\"dtls_ready\":%d,\"dtls_ms\":%llu,"
+               "\"dtls_fail_rc\":%d,\"srtp_prof\":%u,\"srtp_derived\":%d,"
+               "\"media_in\":%llu,\"media_ok\":%llu,"
+               "\"media_authfail\":%llu,\"media_other\":%llu,"
+               "\"first_media_ms\":%llu,\"first_pt\":%u,"
+               "\"first_ssrc\":%u,\"first_seq\":%u}\n",
                as.sent, as.cand_sent, as.cert_src ? as.cert_src : "?",
                as.local_ip, as.local_port,
                as.acks_in, cands, as.stun_in, as.dtls_in, as.other_in,
@@ -8029,7 +8282,12 @@ hb_duty:
                as.dest_typ[0] ? as.dest_typ : "-",
                as.stun_out, as.stun_resp_in, as.stun_answered,
                as.stun_bad, as.first_resp_ms, as.ice_ok,
-               mip, (unsigned)as.mapped_port);
+               mip, (unsigned)as.mapped_port,
+               as.dtls_armed, as.dtls_ready, as.dtls_ready_ms,
+               as.dtls_fail_rc, as.srtp_profile, as.srtp_derived,
+               as.media_in, as.media_ok, as.media_authfail,
+               as.media_other, as.first_media_ms, as.first_pt,
+               as.first_ssrc, as.first_seq);
         fflush(stdout);
     }
     fflush(stdout);

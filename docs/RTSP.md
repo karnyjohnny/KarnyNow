@@ -7183,3 +7183,201 @@ B3 code — one variable: DTLS up, first media bytes seen.
 Docs-only: no C changed (the gates stand at slice 5e's canon), the
 deliverable is the readout + the B3 decision. Patch
 `0004-slice-5f-runB2c-pass-b3-decision.patch`, base `327bb87`.
+
+## 69. Slice 5g (B-TRACK): **B3 SHIPS — DTLS-SRTP is wired into the probe.** runB2c proved the validated pair and left `dtls_in:0`: the seat waits for OUR ClientHello. This slice connects the three modules the native track already proved — `kn_cert` (the answer's fingerprint IS the handshake identity), `kn_dtls` (DTLS 1.2 active client, fingerprint pin, use_srtp negotiation, EXTRACTOR-dtls_srtp export) and `kn_rx`'s SRTP session (AES-128-CM + HMAC-SHA1, replay window, in-place unprotect) — to the probe's single-reader drain, and ships the runB3a card. One file changed: `streamer/src/knvstd_main.c`. One flight variable: **the handshake comes up and the first authenticated SRTP bytes decode.**
+
+### 69.1 What the code does (the whole slice, in wire order)
+
+1. **`sess_webrtc_answer_send` keeps the identity.** The real `kn_cert`
+   generated for the answer's fingerprint is no longer freed after
+   fingerprinting — the handle lives in `as->cert` until probe teardown
+   (the native R3-B rule verbatim: *"a placeholder fingerprint has no
+   keypair behind it — announcing one and handshaking another would be
+   a lie"*). The offer's sha-256 pin is copied into `as->srv_fp`
+   (colon-hex, prefix already stripped by `kn_sdp_offer_parse`) via a
+   **bounded memcpy with an honest empty-pin fallback**: an oversize
+   value cannot be a usable pin, and `no_remote_fp` at the arm gate
+   beats a truncated lie. (This guard is not decoration — the paranoid
+   leg's `-Wformat-truncation=2` flagged the naive `snprintf("%s")`
+   char[128]→char[96] copy as an error, and it was right to.)
+2. **NEW `sess_webrtc_dtls_tick`** runs at `hb_duty` on **every** pass,
+   right after `sess_webrtc_stun_tick`. It is a separate function
+   because the STUN tick early-returns on its own pacing
+   (`next_stun_ms`) — and mbedTLS's DTLS retransmission timers are
+   driven **inside** `kn_dtls_poll` calls, so the poll cadence must be
+   "every loop", never "when STUN feels like it".
+   - **Arm gate** (one-shot, `dtls_noarm_logged`): fire on
+     `ice_ok || stun_in` — the nvst :8196 rule, a REAL inbound STUN
+     first, never synthesized (the probe cannot fake `stun_in`: only
+     the seat's datagrams increment it). Refusals log the native
+     reasons verbatim: `no_real_cert` / `no_remote_fp` /
+     `backend_unavailable` / `no_dest`; a failed `kn_dtls_client` logs
+     `client_init` + the module's own detail string.
+   - **Poll**: one `kn_dtls_poll` per pass while armed and not final.
+     `KN_DTLS_READY` → capture stats/ciphersuite/version/first_app
+     head → `webrtc_dtls_ready`; negative rc → `webrtc_dtls_fail`
+     (rc/verify/pin_matched/last_rc/records/polls), then
+     `kn_dtls_free` + NULL (the object refuses further polling; the
+     summary reports the corpse via `dtls_fail_rc`).
+   - **SRTP derivation on ready**: `kn_dtls_srtp_profile` must be
+     `0x0001` (SRTP_AES128_CM_HMAC_SHA1_80 — the offer's use_srtp
+     list, negotiated) and `kn_dtls_srtp_export` must succeed; then
+     `kn_rx_srtp_session_init(CM128_HMAC_SHA1, km+16, 16, km+46, 14,
+     tag 10)` — the **server-write halves** of the 60-byte EXTRACTOR
+     output (F11 layout), the same halves the native audio arm proved
+     against the rig. `km` is memset-scrubbed immediately (§7: shapes
+     and ids in the log, never keys). Anything else — including "the
+     extension was absent" (`srtp_prof:0`) — stays honestly disarmed
+     and the media branch reports `KN_RX_DROP_NO_CIPHER` instead of
+     pretending.
+3. **The drain's demux grows one branch and one line.** The existing
+   DTLS classifier (`0x14..0x17` + `[1]==0xFE`, i.e. record
+   content-types CCS/alert/handshake/appdata at DTLS 1.2 version
+   0xFEFD) is kept — it is **stricter** than `kn_dtls_peek`'s 20..63
+   window and can never steal an RTP-shaped datagram (first byte
+   0x80..0xBF). Each classified DTLS record is now also
+   `kn_dtls_inject`ed (copies to the module's bounded queue, never
+   blocks; overflow counts in `records_dropped`, not in lost bytes).
+   The NEW media branch sits after the STUN-request branch:
+   `dtls_ready && dl >= 12 && (upkt[0] & 0xC0) == 0x80` → capture the
+   head hex **FIRST** (unprotect is IN PLACE — the wire bytes are the
+   evidence, the decoded header the verdict) → `kn_rx_srtp_unprotect`
+   → `KN_RX_OK` counts `media_ok` (+ first pt/ssrc/seq latched),
+   `KN_RX_DROP_AUTH_FAILED` counts `media_authfail`, every other
+   verdict (malformed/replay/no-cipher) counts `media_other` with the
+   `detail` code. Event budget: the first 3 media datagrams always
+   log, failures keep logging to n≤8 (a wall of auth failures is
+   diagnostic, a wall of successes is noise — the counters carry it).
+   RTP-shaped datagrams **before** `dtls_ready` fall through to
+   `other_in` with their head hex — attempting SRTP before the keys
+   exist is a category error, and the honest bucket keeps the
+   evidence.
+4. **Teardown order is the borrow order reversed**: `kn_dtls_free` →
+   `kn_cert_free` → `kn_sock_udp_close` (the DTLS object borrows both
+   the socket and the cert for its whole life).
+5. **`webrtc_answer_summary` grows the B3 block**: `dtls_armed`,
+   `dtls_ready`, `dtls_ms` (arm→ready), `dtls_fail_rc`, `srtp_prof`,
+   `srtp_derived`, `media_in/ok/authfail/other`, `first_media_ms`
+   (relative to answer-sent, like every other `*_ms`), `first_pt`,
+   `first_ssrc`, `first_seq`.
+
+### 69.2 Event dictionary (new / grown this slice)
+
+- `webrtc_dtls_arm` — `armed:1` (pin_len, cert_real, dest_port, t_ms)
+  or `armed:0` + `reason` (+ `detail` on client_init). One-shot.
+- `webrtc_dtls_ready` — ms (arm→ready), version, cipher, records_in /
+  records_out, verify (0 = clean), pin_matched, srtp_prof, app_records
+  / app_bytes / first_app_len / first_app (hex head ≤ 32 B — an SCTP
+  INIT here is B4's design input, R3-C's old finding), t-relative.
+- `webrtc_srtp_arm` — derived:0/1, profile. (derived:0 with
+  profile:1 means the export or session_init failed — read the build;
+  profile:0 means the seat never negotiated use_srtp — read the
+  offer.)
+- `webrtc_dtls_fail` — rc (KN_DTLS_ERR_* negative), verify,
+  pin_matched, last_rc (the fatal mbedTLS code), records_in/out,
+  polls, t_ms.
+- `webrtc_media` — n, len, urc (0 = KN_RX_OK, >0 = the drop verdict),
+  detail, plain (plaintext length, tag stripped), pt, ssrc, seq,
+  t_ms, head (PRE-decryption hex ≤ 32 B).
+- `webrtc_answer_summary` — the 69.1(5) fields appended to the 5d/5e
+  shape.
+
+### 69.3 Gate canon (measured this round, sandbox Debian 12)
+
+- `build_native_tests.sh`: **NATIVE TESTS PASS** (knsdp 102/0,
+  knogg 163/0, knarx 62/0, knwire 52/0, JSONL + ZIP validation; the
+  kn_dtls legs run STUBBED natively — the real battery is cmake's).
+- `cross_check.sh`: **CROSS-CHECK PASS**, zero warnings under
+  `-Wall -Wextra -Werror` on **both** arches (x86_64 + i686), the
+  paranoid knvstd leg (`-Wunused-but-set-variable
+  -Wformat-truncation=2`) included — it caught the pin-copy
+  truncation class BEFORE shipping, exactly what round XXVII built it
+  for. usrsctp leg SKIPs (tree absent = normal state).
+- **NEW this slice**: project cmake with the REAL mbedTLS backend
+  (`-DKN_TLS_BACKEND=mbedtls`, third_party staged by
+  `tools/prepare_mbedtls_sandbox.sh`) → build 100% → **ctest 29/29**,
+  including `test_kndtls`'s real loopback-UDP battery **39/0** and
+  `test_kncert` **10/0**. The slice's own code path (kn_dtls +
+  kn_rx_srtp against real mbedTLS) is the same code the rig links.
+- Launcher: **168/0** (untouched, re-run as the regression floor).
+- **No new unit tests, deliberately**: the slice is pure integration
+  (no new module, no new parser, no shared representation crossing a
+  module boundary — the 5e ledger rule doesn't bite here). The
+  integration itself has exactly one honest test environment: the
+  seat. runB3a IS the test.
+
+### 69.4 runB3a — the flight card
+
+**Pre-flight (operator, in order):**
+1. Apply `0005-slice-5g-b3-dtls-srtp.patch` on `poprawki-agenta`
+   (base: the pushed 0004 HEAD), rebuild via **T10** — expect
+   `ALL PASS` (89/0 class; the kndtls leg now runs the REAL battery
+   because the rig build carries mbedTLS — 39/0, not the stub shape).
+2. Launcher: run folder `runB3a` (free name, 5c), draw 1, params
+   EXACTLY the minimal card (the extra session flags are provably
+   inert in probe mode — §67.4):
+   `--cm-profile=browser --webrtc-answer=45 --session-queue-timeout=1500`
+3. One draw. This is a probe, not a keeper attempt.
+
+**PASS oracle (every line must hold):**
+1. `webrtc_dtls_arm` `armed:1` (any `armed:0` is a named branch below).
+2. `webrtc_dtls_ready` with `pin_matched:1`, `verify:0`,
+   `srtp_prof:1`, `ms` < ~5000 (loopback-class RTT to the seat is
+   ~30-60 ms; 5 s is generous).
+3. `webrtc_srtp_arm` `derived:1`.
+4. `webrtc_media` with `urc:0` — at least one; `media_ok ≥ 1`,
+   `media_authfail:0`, `first_pt` ∈ the offer's PT set (96/97 video,
+   RTX, or the opus PT), `first_media_ms` < `linger_ms`.
+5. `webrtc_answer_summary`: `dtls_armed:1 dtls_ready:1 srtp_derived:1
+   media_ok ≥ 1 media_authfail:0 dtls_fail_rc:0` AND the runB2c
+   regression floor intact: `ice_ok:1`, `stun_answered ≥ 1`,
+   `linger_ms ≈ 45000` (the WS must still live the full window —
+   a B3 that kills the WS is a B3 that changed two variables).
+6. Clean exit shape: `webrtc_answer_done` + `cm_cancel 200`
+   (exit_code 1 remains the known probe artifact).
+
+**Named fail branches (readout → first action):**
+- `armed:0 reason:no_real_cert` → the rig build lost the mbedTLS
+  backend; check T10's `KN_TLS_BACKEND` line and `cert:"real"` in the
+  `identity` event.
+- `armed:0 reason:no_remote_fp` → the offer carried no sha-256
+  fingerprint (or an oversize one — see 69.1(1)); diff the flight's
+  `webrtc_offer_sdp` against runB2c's.
+- `armed:0 reason:backend_unavailable` → same as no_real_cert, one
+  layer down (`kn_dtls_available()` false in the linked binary).
+- `webrtc_dtls_fail rc:-3` (`ERR_PIN`) with `pin_matched:0` → the
+  seat's cert does not match the offer's fingerprint: pin-copy bug on
+  our side (compare `pin_len:95` in the arm event) or seat-side cert
+  rotation between offer and handshake (re-fly once before believing
+  it).
+- `rc:-4` (`ERR_HANDSHAKE`) → read `last_rc` (the mbedTLS code):
+  version/ciphersuite disagreement or a half-eaten flight; the
+  `records_in/out` pair says whether the seat replied at all.
+- `rc:-7` (`ERR_IO`) → our sendto died; check the socket state in the
+  same window (`webrtc_stun_out` errors).
+- `dtls_ready:1` but `media_in:0` → the seat sent no RTP inside the
+  window: either it gates media on the SCTP datachannel coming up
+  (B4's variable — note `first_app` in the ready event: an SCTP INIT
+  from the seat would be visible there) or media arrived pre-ready
+  (`other_in` heads starting 0x80.. in the wire dump say exactly
+  this).
+- `media_authfail > 0` → wrong key material: the halves are km+16
+  (key) / km+46 (salt), tag 10, profile 0x0001 — the native-proven
+  set; if those are confirmed, the seat derived under a different
+  SRTP profile than it negotiated (compare `srtp_prof` with the
+  offer's use_srtp list).
+- `media_other > 0` with `detail` = kn_gs malformed codes → RTP
+  header shapes the depacketizer rejects; the pre-decryption heads in
+  the events are the ground truth — B3.5's design input, not a B3
+  failure, as long as `media_ok ≥ 1` holds.
+
+### 69.5 This round's shape
+
+One file of C (`streamer/src/knvstd_main.c`), no new modules, no
+build-system change, no launcher change, no kn_* API change — the
+slice consumes three existing, rig-proven APIs exactly as the native
+track did. Docs: this section, START-HERE §43, INTEGRATION slice 5g.
+Patch `0005-slice-5g-b3-dtls-srtp.patch`, base = the operator's
+pushed 0004 HEAD on `poprawki-agenta`. Next: **runB3a**; then B3.5
+(`kn_rx_video` depacketization — decode the first NALUs, not just
+count them) and B4 (SCTP datachannel + input + media heartbeat).
