@@ -8901,9 +8901,20 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
                  * so the exact match IS the full video feed. Payload
                  * bounds come from kn_gs_rtp_payload (post-decrypt
                  * padding validation, the native kn_rx idiom); the
-                 * marker bit is peeked from the plaintext header byte
-                 * (the first 12 octets are never encrypted — kn_gs_rtp
-                 * has no marker field by design). */
+                 * marker bit is peeked from PLAINTEXT OCTET 1 — the
+                 * M|PT byte (the first 12 octets are never encrypted;
+                 * kn_gs_rtp has no marker field by design). Slice 5o
+                 * CORRECTION: 5n peeked octet 0, whose 0x80 bit is the
+                 * VERSION (V=2 ⇒ always set) — runB5d proved the feed
+                 * ran marker=1 on EVERY packet: every packet emitted
+                 * instantly, FU-A S=1 starters emitted as
+                 * fu_incomplete (1187/1189) and their continuations
+                 * orphaned into malformed (15411/15482 = fu −
+                 * starters, exact on both draws), aus == single ==
+                 * 1189/1191 all ≤ 32 B (parameter-set/SEI-class NALs
+                 * only), frames 0. The octet-1 peek is the whole
+                 * fix — kn_h264rtp itself was never wrong (KAT
+                 * 58/0 covers multi-fragment FU-A byte-exact). */
                 if (as->h264_active && as->pt_video &&
                     rtp.pt == as->pt_video) {
                     size_t poff = 0, plen = 0;
@@ -8911,7 +8922,7 @@ static void sess_webrtc_answer_drain(webrtc_answer_state *as)
                                           &plen) == KN_GS_OK) {
                         int drc = kn_h264rtp_push(
                             &as->h264, (uint16_t)rtp.seq, rtp.timestamp,
-                            (upkt[0] & 0x80u) ? 1 : 0,
+                            (upkt[1] & 0x80u) ? 1 : 0,
                             upkt + poff, plen, sess_h264_au_cb, as);
                         if (drc != 0)
                             as->h264_active = 0;   /* -4 sticky decode abort */
