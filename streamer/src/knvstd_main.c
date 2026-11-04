@@ -7335,6 +7335,25 @@ typedef struct {
     unsigned     first_frame_w, first_frame_h;
     long long    first_frame_fi;
     int          pgm_ok;                   /* frame_first.pgm written */
+    /* Slice 5p (B-track): the WebRTC input-channel TX (ver-3) + the
+     * endurance tick. hs_epoch_us is the OpenNOW input_origin analogue
+     * (microseconds since the seat's handshake — the wrapper AND the
+     * body timestamp epoch). The duty cycle lives in the probe loop
+     * (sess_webrtc_input_tick): liveness kind-2 every 2 s + the
+     * anti-AFK relative-mouse jiggle at 10 Hz, BOTH on
+     * input_channel_v1 (sid = sess_webrtc_channels[1]), because
+     * OpenNOW's public send_input REFUSES the partially-reliable flag
+     * on main @2026-11. next_tick_ms paces the 60 s endurance line;
+     * the prev_* pair turns its counters into per-minute rates. */
+    uint64_t     hs_epoch_us;
+    unsigned     input_tx_armed;           /* arm event printed */
+    unsigned     input_tx_ver;             /* recorded handshake ver */
+    uint64_t     next_hb_ms, next_jig_ms;
+    int          jig_sign;                 /* alternating +-1 dx */
+    unsigned long long in_hb_sent, in_jig_sent, in_send_err;
+    unsigned long long first_hb_ms, first_jig_ms;
+    uint64_t     next_tick_ms;
+    unsigned long long tick_prev_mi, tick_prev_vin, tick_prev_fr;
     const char  *log_dir;                  /* borrowed (probe scope) */
 } webrtc_answer_state;
 
@@ -8027,6 +8046,11 @@ static void sess_webrtc_sctp_msg(void *ctx, uint16_t sid, uint16_t ssn,
         as->first_hs_ms = as->t0
             ? (unsigned long long)(kn_sock_now_ms() - (uint64_t)as->t0)
             : 0ull;
+        /* Slice 5p: the handshake instant IS the input timestamp
+         * epoch (OpenNOW's input_origin / InputChannelState.start) —
+         * latch it in microseconds for the ver-3 wrapper and bodies. */
+        as->hs_epoch_us = kn_sock_now_us();
+        as->input_tx_ver = as->hs_ver;
         printf("{\"mode\":\"session\",\"event\":\"webrtc_input_hs\","
                "\"sid\":%u,\"ppi\":%u,\"len\":%llu,\"ver\":%u,"
                "\"t_ms\":%llu}\n", (unsigned)sid, (unsigned)ppi,
@@ -8659,6 +8683,108 @@ static int sess_h264_au_cb(const uint8_t *annexb, size_t len,
     if (n == -4) return -4;               /* sticky abort: h264_active off */
     if (n < 0) ++as->dec_push_err;
     return 0;
+}
+
+/* Slice 5p (B-track): the input-channel TX duty + the endurance tick,
+ * called from the probe's hb_duty on EVERY pass (the same single-
+ * reader discipline as the other ticks; paces itself on wall clock).
+ *
+ * INPUT TX (OpenNOW main @2026-11, byte-exact via kn_input_webrtc_*):
+ *   ready = the seat's handshake seen AND our three channels acked
+ *   (OpenNOW's is_ready = both input channels open + handshake; our
+ *   dc_acked == dc_opened covers the opens both ways) — then:
+ *     liveness [2,0,0,0] every 2000 ms, NEVER wrapped, ordered, on
+ *     input_channel_v1 (OpenNOW's HEARTBEAT_INTERVAL; a backpressured
+ *     heartbeat is a HARD error there — we count send_err and ride on,
+ *     the probe must never die on a pulse);
+ *     the anti-AFK jiggle every 100 ms: kind-7 relative mouse dx=+-1
+ *     alternating (cursor nets ZERO drift, the server sees continuous
+ *     motion — the round-XLI.1 instrument, now on the WebRTC wire),
+ *     wrapped per the recorded handshake version (ver 3: 0x23 + ts
+ *     BE64 since hs + 0x21 + BE16 len + body).
+ *   OpenNOW ships ALL input on the RELIABLE channel (its public
+ *   send_input refuses partially_reliable=true), so both duties use
+ *   ordered kn_sctp_send on sess_webrtc_channels[1].sid.
+ *
+ * ENDURANCE TICK: one SHORT line per 60 s from t0 (well under the
+ * launcher's ~700-char split threshold) carrying the cumulative
+ * counters plus per-minute deltas — a session that degrades at minute
+ * seven must leave a face in the log, not a silent corpse. */
+static void sess_webrtc_input_tick(webrtc_answer_state *as)
+{
+    uint8_t body[40], out[KN_INPUT_WRTC_WRAP_MAX];
+    uint64_t now;
+    size_t n, w;
+    if (!as->active) return;
+    now = kn_sock_now_ms();
+    if (!as->next_tick_ms) as->next_tick_ms = as->t0 ? as->t0 + 60000u : 0u;
+    if (as->next_tick_ms && now >= as->next_tick_ms) {
+        unsigned long long t_s = (now - (uint64_t)as->t0) / 1000u;
+        printf("{\"mode\":\"session\",\"event\":"
+               "\"webrtc_endurance_tick\",\"t_s\":%llu,"
+               "\"mi\":%llu,\"mok\":%llu,\"vin\":%llu,\"fr\":%llu,"
+               "\"tw_out\":%llu,\"rt_ok\":%llu,\"rt_out\":%llu,"
+               "\"hb\":%llu,\"jig\":%llu,\"serr\":%llu,"
+               "\"mi_d\":%llu,\"vin_d\":%llu,\"fr_d\":%llu}\n",
+               t_s, as->media_in, as->media_ok, as->video_in,
+               as->frames_ok, as->twcc_out, as->rtcp_ok, as->rtcp_out,
+               as->in_hb_sent, as->in_jig_sent, as->in_send_err,
+               as->media_in - as->tick_prev_mi,
+               as->video_in - as->tick_prev_vin,
+               as->frames_ok - as->tick_prev_fr);
+        fflush(stdout);
+        as->tick_prev_mi = as->media_in;
+        as->tick_prev_vin = as->video_in;
+        as->tick_prev_fr = as->frames_ok;
+        as->next_tick_ms = now + 60000u;
+    }
+    if (!as->sctp || !as->hs_seen ||
+        as->dc_acked != as->dc_opened || as->dc_opened == 0)
+        return;
+    if (!as->input_tx_armed) {
+        as->input_tx_armed = 1;
+        as->next_hb_ms = now;          /* first pulse immediately */
+        as->next_jig_ms = now;
+        as->jig_sign = 1;
+        printf("{\"mode\":\"session\",\"event\":\"webrtc_input_tx_arm\","
+               "\"ver\":%u,\"sid\":%u,\"t_ms\":%llu}\n",
+               as->input_tx_ver, (unsigned)sess_webrtc_channels[1].sid,
+               as->t0 ? (unsigned long long)(now - (uint64_t)as->t0)
+                      : 0ull);
+        fflush(stdout);
+    }
+    if (now >= as->next_hb_ms) {
+        n = kn_input_webrtc_body_heartbeat(body);
+        if (kn_sctp_send(as->sctp, sess_webrtc_channels[1].sid,
+                         KN_SCTP_PPI_BINARY, 1, body, n) == KN_SCTP_OK) {
+            ++as->in_hb_sent;
+            if (!as->first_hb_ms)
+                as->first_hb_ms = as->t0
+                    ? (unsigned long long)(now - (uint64_t)as->t0) : 0ull;
+        } else {
+            ++as->in_send_err;
+        }
+        as->next_hb_ms = now + 2000u;
+    }
+    if (now >= as->next_jig_ms) {
+        uint64_t ts = kn_sock_now_us() - as->hs_epoch_us;
+        n = kn_input_webrtc_body_mouse_rel((int16_t)as->jig_sign, 0,
+                                           ts, body);
+        as->jig_sign = -as->jig_sign;
+        w = kn_input_webrtc_wrap(as->input_tx_ver, body, n, ts, out,
+                                 sizeof out);
+        if (w && kn_sctp_send(as->sctp, sess_webrtc_channels[1].sid,
+                              KN_SCTP_PPI_BINARY, 1, out, w)
+                 == KN_SCTP_OK) {
+            ++as->in_jig_sent;
+            if (!as->first_jig_ms)
+                as->first_jig_ms = as->t0
+                    ? (unsigned long long)(now - (uint64_t)as->t0) : 0ull;
+        } else {
+            ++as->in_send_err;
+        }
+        as->next_jig_ms = now + 100u;
+    }
 }
 
 /* One UDP datagram classification step for the B2 linger loop: STUN
@@ -9420,6 +9546,10 @@ hb_duty:
                                              * TWCC 50ms / RR 1s+5s /
                                              * PLI 1s pre-video, armed on
                                              * srtcp_derived */
+        sess_webrtc_input_tick(&as);        /* slice 5p: input TX duty
+                                             * (liveness 2 s + anti-AFK
+                                             * jiggle 10 Hz, ver-3) +
+                                             * the 60 s endurance tick */
         if (kn_sock_now_ms() - hb_at >= 5000u) {
             if (kn_ws_send_text(&wsc, "{\"hb\":1}", 8) == KN_WS_OK)
                 ++hb_sent;
@@ -9527,6 +9657,22 @@ hb_duty:
             kn_decode_stream_close(as.dec);
             as.dec = NULL;
         }
+    }
+    if (as.hs_seen || as.input_tx_armed) {
+        /* Slice 5p: the input-TX face on its own SHORT line (the
+         * launcher-split lesson): did the liveness/anti-AFK duties
+         * actually fly, and did any send bounce off usrsctp. A draw
+         * where armed:0 says the seat never handed us the handshake
+         * — the input plane stayed dark and the endurance verdict
+         * must be read without it. */
+        printf("{\"mode\":\"session\",\"event\":"
+               "\"webrtc_input_tx_final\",\"armed\":%u,\"ver\":%u,"
+               "\"hb\":%llu,\"jig\":%llu,\"serr\":%llu,"
+               "\"first_hb_ms\":%llu,\"first_jig_ms\":%llu}\n",
+               as.input_tx_armed, as.input_tx_ver,
+               as.in_hb_sent, as.in_jig_sent, as.in_send_err,
+               as.first_hb_ms, as.first_jig_ms);
+        fflush(stdout);
     }
     if (as.dtls) {                          /* slice 5g: the DTLS object
                                              * borrows sock+cert, so it
@@ -13072,11 +13218,17 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--webrtc-answer") == 0 ||
                  strncmp(a, "--webrtc-answer=", 16) == 0) {
             /* B-track slice 5b: 0 = off; bare flag = 45 s post-answer
-             * observation window (RTSP §65.6 flight card B2) */
+             * observation window (RTSP §65.6 flight card B2).
+             * Slice 5p: the ceiling rises 300 -> 3660 s — the mission
+             * (G2) is a FULL free-tier session (60 min cap) with video
+             * at the client, and the minute scale was never measured
+             * on this track; the endurance card (runB5f) flies 600 s
+             * first. The floor stays 10 s (a draw shorter than the
+             * handshake is not a draw). */
             g_sess_webrtc_answer =
                 a[15] == '=' ? strtol(a + 16, NULL, 10) : 45;
             if (g_sess_webrtc_answer < 10) g_sess_webrtc_answer = 10;
-            if (g_sess_webrtc_answer > 300) g_sess_webrtc_answer = 300;
+            if (g_sess_webrtc_answer > 3660) g_sess_webrtc_answer = 3660;
         }
         else if (strncmp(a, "--session-play-wait=", 20) == 0)
             sess_play_wait = strtol(a + 20, NULL, 10);

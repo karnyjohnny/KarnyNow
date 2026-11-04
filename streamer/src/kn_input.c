@@ -759,3 +759,101 @@ const char *kn_input_cursor_state_name(kn_input_cursor_state s)
     default:                        return "?";
     }
 }
+
+/* ---- slice 5p (B-track): the WebRTC input-channel wire (ver-3) ----
+ * Byte-exact against OpenNOW main @2026-11: transport input.rs
+ * validate_packet (the kind/length table + the 0x23 wrapper) and core
+ * lib.rs captured_input_packet (the bodies). See kn_input.h for the
+ * full contract; the KAT in test_kninput.c pins every byte. */
+
+static unsigned kn_input_webrtc_kind_len(unsigned kind)
+{
+    switch (kind) {
+    case 2u:                return 4u;
+    case 3u: case 4u: case 8u: case 9u:  return 18u;
+    case 5u:                return 26u;
+    case 7u: case 10u:      return 22u;
+    case 12u:               return 38u;
+    case 13u:               return 6u;
+    case 19u:               return 5u;
+    default:                return 0u;   /* UnsupportedInput */
+    }
+}
+
+static void kn_input_webrtc_put_be64(uint8_t *p, uint64_t v)
+{
+    unsigned i;
+    for (i = 0; i < 8u; ++i) p[i] = (uint8_t)(v >> (56u - 8u * i));
+}
+
+size_t kn_input_webrtc_body_heartbeat(uint8_t *out)
+{
+    if (!out) return 0;
+    out[0] = 2; out[1] = 0; out[2] = 0; out[3] = 0;   /* kind 2 LE u32 */
+    return KN_INPUT_WRTC_BODY_HEARTBEAT;
+}
+
+size_t kn_input_webrtc_body_mouse_rel(int16_t dx, int16_t dy,
+                                      uint64_t ts_us, uint8_t *out)
+{
+    if (!out) return 0;
+    out[0] = 7; out[1] = 0; out[2] = 0; out[3] = 0;   /* kind 7 LE u32 */
+    out[4] = (uint8_t)((uint16_t)dx >> 8);
+    out[5] = (uint8_t)((uint16_t)dx & 0xFFu);
+    out[6] = (uint8_t)((uint16_t)dy >> 8);
+    out[7] = (uint8_t)((uint16_t)dy & 0xFFu);
+    memset(out + 8, 0, 6);
+    kn_input_webrtc_put_be64(out + 14, ts_us);
+    return KN_INPUT_WRTC_BODY_MOUSE_REL;
+}
+
+size_t kn_input_webrtc_body_key(int pressed, uint16_t vk, uint16_t mods,
+                                uint64_t ts_us, uint8_t *out)
+{
+    if (!out) return 0;
+    {
+        uint32_t kind = pressed ? KN_INPUT_WRTC_KIND_KEY_DOWN
+                                : KN_INPUT_WRTC_KIND_KEY_UP;
+        out[0] = (uint8_t)(kind & 0xFFu);
+        out[1] = (uint8_t)((kind >> 8) & 0xFFu);
+        out[2] = (uint8_t)((kind >> 16) & 0xFFu);
+        out[3] = (uint8_t)((kind >> 24) & 0xFFu);
+    }
+    out[4] = (uint8_t)(vk >> 8);
+    out[5] = (uint8_t)(vk & 0xFFu);
+    out[6] = (uint8_t)(mods >> 8);
+    out[7] = (uint8_t)(mods & 0xFFu);
+    out[8] = 0; out[9] = 0;
+    kn_input_webrtc_put_be64(out + 10, ts_us);
+    return KN_INPUT_WRTC_BODY_KEY;
+}
+
+size_t kn_input_webrtc_wrap(unsigned hs_ver, const uint8_t *body,
+                            size_t blen, uint64_t ts_us,
+                            uint8_t *out, size_t cap)
+{
+    unsigned kind, need;
+    size_t total;
+    if (!out || (!body && blen)) return 0;
+    if (blen < 4u) return 0;
+    kind = (unsigned)body[0] | ((unsigned)body[1] << 8) |
+           ((unsigned)body[2] << 16) | ((unsigned)body[3] << 24);
+    if (kn_input_webrtc_kind_len(kind) != (unsigned)blen) return 0;
+    if (hs_ver <= 2u || kind == KN_INPUT_WRTC_KIND_HEARTBEAT) {
+        if (cap < blen) return 0;
+        memcpy(out, body, blen);
+        return blen;
+    }
+    need = (kind == 5u || kind == 7u || kind == 12u) ? 0x21u : 0x22u;
+    total = 10u + (need == 0x21u ? 2u : 0u) + blen;
+    if (cap < total) return 0;
+    out[0] = 0x23;
+    kn_input_webrtc_put_be64(out + 1, ts_us);
+    out[9] = (uint8_t)need;
+    if (need == 0x21u) {
+        out[10] = (uint8_t)((unsigned)blen >> 8);
+        out[11] = (uint8_t)((unsigned)blen & 0xFFu);
+    }
+    memcpy(out + (total - blen), body, blen);
+    return total;
+}

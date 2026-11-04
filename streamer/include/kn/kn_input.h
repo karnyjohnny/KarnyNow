@@ -355,6 +355,54 @@ int         kn_input_cursor_update(kn_input_cursor *c, uint64_t now_ms,
                                    kn_input_cursor_send send, void *ctx);
 const char *kn_input_cursor_state_name(kn_input_cursor_state s);
 
+/* ---- slice 5p (B-track): the WebRTC input-channel wire (ver-3) ----
+ * Ground truth = OpenNOW (the golden book), byte-exact, main @2026-11:
+ * transport webrtc/input.rs (validate_packet length table + encode)
+ * and core lib.rs captured_input_packet (per-kind bodies).
+ *   body = kind u32 LE + fixed payload; lengths: 2->4, 3|4|8|9->18,
+ *   5->26, 7|10->22, 12->38, 13->6, 19->5 (anything else REFUSED).
+ *   kind 2 = the liveness heartbeat [2,0,0,0] — NEVER wrapped, 2 s
+ *   duty on input_channel_v1 (reliable); OpenNOW treats a
+ *   backpressured heartbeat as a hard transport error (we count and
+ *   ride on — the probe never dies on a pulse).
+ *   kind 7 = relative mouse: dx i16 BE, dy i16 BE, six zero bytes,
+ *   timestamp_us u64 BE (22 B).  kinds 3/4 = key press/release:
+ *   vk u16 BE, mods u16 BE, zero u16 BE, timestamp_us u64 BE (18 B).
+ *   ver >= 3 wrap (EVERY body except kind 2): 0x23 + ts_us u64 BE
+ *   (microseconds since the input handshake) + 0x21 + body-len u16 BE
+ *   for the batched kinds 5|7|12, else 0x22 + body.  ver <= 2: the
+ *   body rides raw.  The timestamp epoch is the handshake instant on
+ *   BOTH the wrapper and the body (OpenNOW's input_origin).
+ * Purity: no allocation, no clock, no sockets, no stdio — the probe
+ * owns the duty cycle, this module owns the bytes. */
+#define KN_INPUT_WRTC_KIND_HEARTBEAT  2u
+#define KN_INPUT_WRTC_KIND_KEY_DOWN   3u
+#define KN_INPUT_WRTC_KIND_KEY_UP     4u
+#define KN_INPUT_WRTC_KIND_MOUSE_ABS  5u
+#define KN_INPUT_WRTC_KIND_MOUSE_REL  7u
+#define KN_INPUT_WRTC_KIND_WHEEL     10u
+#define KN_INPUT_WRTC_BODY_HEARTBEAT  4u
+#define KN_INPUT_WRTC_BODY_KEY       18u
+#define KN_INPUT_WRTC_BODY_MOUSE_REL 22u
+/* 0x23 + ts(8) + 0x21 + len(2) + the largest body (38) */
+#define KN_INPUT_WRTC_WRAP_MAX       50u
+
+/* The three bodies the B-track ships. Return the body length (fixed
+ * per kind) or 0 on bad args (out must hold the body size). */
+size_t kn_input_webrtc_body_heartbeat(uint8_t *out);
+size_t kn_input_webrtc_body_mouse_rel(int16_t dx, int16_t dy,
+                                      uint64_t ts_us, uint8_t *out);
+size_t kn_input_webrtc_body_key(int pressed, uint16_t vk, uint16_t mods,
+                                uint64_t ts_us, uint8_t *out);
+/* Wrap a body per the recorded handshake version. Returns the final
+ * byte count in out, or 0 when the body fails the reference's
+ * validate_packet table (kind unknown or length wrong — refuse to
+ * ship a shape the seat would drop) or cap is too small. out must
+ * hold KN_INPUT_WRTC_WRAP_MAX; body and out may NOT alias. */
+size_t kn_input_webrtc_wrap(unsigned hs_ver, const uint8_t *body,
+                            size_t blen, uint64_t ts_us,
+                            uint8_t *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

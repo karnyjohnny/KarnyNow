@@ -1110,6 +1110,99 @@ static void t_cursor_notification_info(void)
           "info: NULL bytes -> 0");
 }
 
+/* Slice 5p (B-track): the WebRTC input-channel wire (ver-3), pinned
+ * byte-exact against OpenNOW main @2026-11 — transport input.rs
+ * (validate_packet + encode, incl. its own unit test's expectations:
+ * encoded[0]==0x23, [1..9]==ts BE, [9]==0x21/0x22, [10..12]==len BE)
+ * and core lib.rs captured_input_packet (body layouts). The goldens
+ * below are hand-transcribed from THOSE two functions, the same way
+ * the native goldens were transcribed from nvst_input.rs. */
+static void t_webrtc_ver3(void)
+{
+    uint8_t body[40], out[64], exp[64];
+    size_t n, w;
+
+    /* heartbeat body + the kind-2 wrap exemption (raw at ANY ver) */
+    n = kn_input_webrtc_body_heartbeat(body);
+    CHECK(n == 4 && body[0] == 2 && body[1] == 0 && body[2] == 0 &&
+          body[3] == 0, "wrtc heartbeat body [2,0,0,0]");
+    w = kn_input_webrtc_wrap(3, body, n, 1234, out, sizeof out);
+    CHECK(w == 4 && memcmp(out, body, 4) == 0,
+          "wrtc kind 2 NEVER wrapped at ver 3");
+    w = kn_input_webrtc_wrap(1, body, n, 0, out, sizeof out);
+    CHECK(w == 4, "wrtc kind 2 raw at ver 1 too");
+
+    /* relative-mouse body: kind LE, dx/dy BE i16, six zeros, ts BE */
+    n = kn_input_webrtc_body_mouse_rel(1, -2, 0x01861330ull, body);
+    CHECK(n == 22, "wrtc mouse-rel body len 22");
+    memcpy(exp, "\x07\x00\x00\x00\x00\x01\xff\xfe"
+                "\x00\x00\x00\x00\x00\x00"
+                "\x00\x00\x00\x00\x01\x86\x13\x30", 22);
+    CHECK(memcmp(body, exp, 22) == 0, "wrtc mouse-rel body bytes");
+
+    /* ver-3 wrap of a batched kind (7): 0x23 ts BE 0x21 len BE body */
+    w = kn_input_webrtc_wrap(3, body, n, 1234, out, sizeof out);
+    CHECK(w == 34, "wrtc wrap mouse-rel len 34");
+    CHECK(out[0] == 0x23, "wrtc wrap lead 0x23");
+    CHECK(out[1] == 0 && out[6] == 0 && out[7] == 0x04 &&
+          out[8] == 0xD2 && out[9] == 0x21,
+          "wrtc wrap ts 1234 BE64 + batched 0x21");
+    CHECK(out[10] == 0x00 && out[11] == 22, "wrtc wrap body len BE 22");
+    CHECK(memcmp(out + 12, body, 22) == 0, "wrtc wrap body verbatim");
+
+    /* ver-3 wrap of a single kind (key down 3): 0x22, no length */
+    n = kn_input_webrtc_body_key(1, 0x7C, 0, 99, body);
+    CHECK(n == 18, "wrtc key body len 18");
+    memcpy(exp, "\x03\x00\x00\x00\x00\x7c\x00\x00\x00\x00"
+                "\x00\x00\x00\x00\x00\x00\x00\x63", 18);
+    CHECK(memcmp(body, exp, 18) == 0, "wrtc key-down body bytes");
+    w = kn_input_webrtc_wrap(3, body, n, 5, out, sizeof out);
+    CHECK(w == 28 && out[9] == 0x22 && memcmp(out + 10, body, 18) == 0,
+          "wrtc wrap key = 0x22 + body");
+
+    /* ver <= 2 ships bodies raw (the legacy framing family) */
+    n = kn_input_webrtc_body_mouse_rel(0, 0, 7, body);
+    w = kn_input_webrtc_wrap(2, body, n, 7, out, sizeof out);
+    CHECK(w == 22 && memcmp(out, body, 22) == 0, "wrtc ver 2 raw body");
+
+    /* wheel (kind 10) is 22 B but NOT batched (OpenNOW: 5|7|12 only) */
+    body[0] = 10; body[1] = 0; body[2] = 0; body[3] = 0;
+    memset(body + 4, 0, 18);
+    w = kn_input_webrtc_wrap(3, body, 22, 1, out, sizeof out);
+    CHECK(w == 32 && out[9] == 0x22, "wrtc kind 10 single (0x22)");
+    /* kind 5 (26 B) IS batched */
+    body[0] = 5; body[1] = 0; body[2] = 0; body[3] = 0;
+    memset(body + 4, 0, 22);
+    w = kn_input_webrtc_wrap(3, body, 26, 1, out, sizeof out);
+    CHECK(w == 38 && out[9] == 0x21 && out[10] == 0 && out[11] == 26,
+          "wrtc kind 5 batched (0x21+len)");
+
+    /* validate_packet table: wrong length or unknown kind refused */
+    n = kn_input_webrtc_body_mouse_rel(1, 1, 1, body);
+    CHECK(kn_input_webrtc_wrap(3, body, n - 1, 1, out, sizeof out) == 0,
+          "wrtc truncation refused");
+    CHECK(kn_input_webrtc_wrap(3, body, n + 1, 1, out, sizeof out) == 0,
+          "wrtc oversize refused");
+    body[0] = 99;
+    CHECK(kn_input_webrtc_wrap(3, body, 22, 1, out, sizeof out) == 0,
+          "wrtc unknown kind refused");
+    CHECK(kn_input_webrtc_wrap(3, body, 3, 1, out, sizeof out) == 0,
+          "wrtc 3-byte body refused");
+    CHECK(kn_input_webrtc_wrap(3, NULL, 4, 1, out, sizeof out) == 0,
+          "wrtc NULL body refused");
+    /* cap discipline: exact fit passes, one byte short refuses */
+    n = kn_input_webrtc_body_heartbeat(body);
+    body[0] = 12; /* 38-byte kind: build a valid batched body */
+    memset(body + 4, 0, 34);
+    CHECK(kn_input_webrtc_wrap(3, body, 38, 1, out, 50) == 50,
+          "wrtc wrap cap exact fit");
+    CHECK(kn_input_webrtc_wrap(3, body, 38, 1, out, 49) == 0,
+          "wrtc wrap cap short refused");
+    /* heartbeat at exact cap 4 */
+    CHECK(kn_input_webrtc_wrap(3, (const uint8_t *)"\x02\x00\x00\x00", 4,
+                               0, out, 4) == 4, "wrtc hb cap exact");
+}
+
 int main(void)
 {
     printf("== test_kninput: the NVST control/input plane ==\n");
@@ -1135,5 +1228,6 @@ int main(void)
     t_command_names();
     t_hist();
     t_truncations();
+    t_webrtc_ver3();
     return kn_test_summary("test_kninput");
 }
